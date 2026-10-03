@@ -51,6 +51,27 @@ impl Sender {
         self.limit
     }
 
+    /// A synchronous observer cannot await capacity while the runtime is
+    /// borrowing it. Close that connection explicitly instead of losing a
+    /// lifecycle/permission update or retaining an unbounded second queue.
+    pub fn try_send_serialized(&self, value: &impl serde::Serialize) -> Result<(), Closed> {
+        let admitted = (|| {
+            let slot = self.slots.clone().try_acquire_owned().map_err(|_| Closed)?;
+            let size = encoded_size(value, self.limit).ok_or(Closed)?;
+            let bytes = self.bytes.clone().try_acquire_many_owned(size as u32).map_err(|_| Closed)?;
+            let mut encoded = Vec::with_capacity(size);
+            serde_json::to_writer(&mut encoded, value).map_err(|_| Closed)?;
+            let text = String::from_utf8(encoded).map_err(|_| Closed)?;
+            self.frames.try_send(Frame { text, _slot: slot, _bytes: bytes }).map_err(|_| Closed)
+        })();
+        if admitted.is_err() {
+            self.failed.send_replace(true);
+            self.slots.close();
+            self.bytes.close();
+        }
+        admitted
+    }
+
     /// Admission precedes copying a received frame. The websocket separately
     /// caps its one incoming message at this same byte limit.
     pub async fn send_text(&self, text: &str) -> Result<(), Closed> {
@@ -109,7 +130,7 @@ impl Drop for Receiver {
     }
 }
 
-pub fn encoded_size(event: &ChatEvent, limit: usize) -> Option<usize> {
+pub fn encoded_size(event: &impl serde::Serialize, limit: usize) -> Option<usize> {
     let mut count = Counter { remaining: limit, used: 0 };
     serde_json::to_writer(&mut count, event).ok()?;
     Some(count.used)
@@ -141,6 +162,39 @@ mod tests {
 
     fn text(value: &str) -> ChatEvent {
         ChatEvent::Text { text: value.into() }
+    }
+
+    #[tokio::test]
+    async fn synchronous_lifecycle_delivery_fails_explicitly_while_a_frame_is_in_flight() {
+        let (out, mut incoming) = channel(1, 4096);
+        out.try_send_serialized(&serde_json::json!({"status":"in_progress"})).unwrap();
+        let writing = incoming.recv().await.unwrap();
+        assert_eq!(out.slots.available_permits(), 0, "the writer still owns the sole slot");
+        assert!(out.try_send_serialized(&serde_json::json!({"status":"completed"})).is_err());
+        drop(writing);
+        assert!(incoming.recv().await.is_none(), "a missing lifecycle event closes the view");
+        assert!(out.try_send_serialized(&serde_json::json!({"status":"later"})).is_err());
+    }
+
+    #[tokio::test]
+    async fn synchronous_json_admission_counts_escaping_and_in_flight_bytes() {
+        let (out, mut incoming) = channel(8, 4096);
+        let event = serde_json::json!({"text":"\n".repeat(1100)});
+        let size = serde_json::to_vec(&event).unwrap().len();
+        assert!(size < 4096 && size * 2 > 4096);
+        out.try_send_serialized(&event).unwrap();
+        let writing = incoming.recv().await.unwrap();
+        assert_eq!(out.bytes.available_permits(), 4096 - size);
+        assert!(out.try_send_serialized(&event).is_err());
+        drop(writing);
+        assert!(incoming.recv().await.is_none());
+
+        let (out, mut incoming) = channel(8, 4096);
+        let oversized = serde_json::json!({"text":"\0".repeat(800)});
+        assert!(serde_json::to_vec(&oversized).unwrap().len() > 4096);
+        assert!(out.try_send_serialized(&oversized).is_err());
+        assert_eq!(out.bytes.available_permits(), 4096, "encoding was never admitted");
+        assert!(incoming.recv().await.is_none());
     }
 
     #[tokio::test]

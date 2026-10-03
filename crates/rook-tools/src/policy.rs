@@ -919,6 +919,9 @@ impl Approval {
 
 #[async_trait]
 pub trait Approver: Send + Sync {
+    fn for_session(&self, _session: &str) -> Option<std::sync::Arc<dyn Approver>> {
+        None
+    }
     /// `preview` is what the call would change, when the tool can say. Passed
     /// beside the risk rather than folded into it: the risk is what a rule
     /// matches on, and a diff is not that.

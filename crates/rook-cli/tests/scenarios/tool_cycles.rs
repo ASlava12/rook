@@ -42,6 +42,9 @@ impl Model {
                     std::thread::sleep(std::time::Duration::from_millis(10));
                     continue;
                 };
+                // Windows can retain the listener's nonblocking mode on the
+                // accepted socket. A client may not have written headers yet.
+                socket.set_nonblocking(false).unwrap();
                 socket.set_read_timeout(Some(std::time::Duration::from_secs(90))).unwrap();
                 socket.set_write_timeout(Some(std::time::Duration::from_secs(90))).unwrap();
                 let mut bytes = Vec::new();

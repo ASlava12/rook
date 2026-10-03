@@ -26,8 +26,15 @@ use serde_json::Value;
 /// nobody reads — it is identical on every line of every turn. A path *outside*
 /// the workspace keeps all of it, because there the prefix is the news.
 ///
-/// Not shortened here: how much room there is belongs to whoever is drawing.
+/// Display fields admit at most 1 KiB before copying; views may shorten further.
 pub fn doing(name: &str, arguments: Option<&Value>, workspace: &Path) -> String {
+    let bounded = |text: &str| {
+        let mut end = text.len().min(1024);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == text.len() { text.into() } else { format!("{}…", &text[..end]) }
+    };
     let nearer = |path: String| match Path::new(&path).strip_prefix(workspace) {
         // The workspace itself, which `list_dir` is usually handed: `.` is what
         // a person calls where they are standing.
@@ -36,7 +43,7 @@ pub fn doing(name: &str, arguments: Option<&Value>, workspace: &Path) -> String 
         Err(_) => path,
     };
     let field =
-        |key: &str| arguments.and_then(|a| a.get(key)).and_then(|v| v.as_str()).map(|v| v.trim().to_string());
+        |key: &str| arguments.and_then(|a| a.get(key)).and_then(|v| v.as_str()).map(|v| bounded(v.trim()));
     // `edit_file` takes its work as a list so a refactor across several files
     // is one call; the first path is what the call is about at a glance.
     let first_path = || {
@@ -47,7 +54,7 @@ pub fn doing(name: &str, arguments: Option<&Value>, workspace: &Path) -> String 
                 .and_then(|files| files.first())
                 .and_then(|first| first.get("path"))
                 .and_then(|p| p.as_str())
-                .map(str::to_string)
+                .map(bounded)
         })
     };
     match name {
@@ -67,7 +74,7 @@ pub fn doing(name: &str, arguments: Option<&Value>, workspace: &Path) -> String 
         "delegate" => Some("delegate".into()),
         _ => None,
     }
-    .unwrap_or_else(|| name.to_string())
+    .unwrap_or_else(|| bounded(name))
 }
 
 /// The same phrase in the room there is for it. One line however long the
@@ -152,6 +159,14 @@ fn plainly(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn large_display_fields_are_admitted_as_unicode_safe_prefixes_before_copying() {
+        let source = "команда 🙂 ".repeat(10000);
+        assert!(source.len() > 1024);
+        let shown = doing("run_command", Some(&serde_json::json!({"command":source})), Path::new("."));
+        assert!(shown.len() < 1100 && shown.ends_with('…'));
+        assert!(source.starts_with(shown.trim_start_matches("run ").trim_end_matches('…')));
+    }
     use serde_json::json;
 
     /// The wait says how long it may last, because that is the decision the

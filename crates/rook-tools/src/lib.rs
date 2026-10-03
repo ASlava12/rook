@@ -147,6 +147,11 @@ impl ToolOutcome {
 /// was before the user's last change, and edits it back.
 #[async_trait]
 pub trait Files: Send + Sync {
+    /// A negotiated editor bridge can address child work without changing its
+    /// filesystem authority. Other frontends keep sharing the original bridge.
+    fn for_session(&self, _session: &str) -> Option<Arc<dyn Files>> {
+        None
+    }
     async fn read(&self, path: &std::path::Path) -> Result<String>;
     async fn write(&self, path: &std::path::Path, contents: &str) -> Result<()>;
 }
@@ -158,6 +163,9 @@ pub trait Files: Send + Sync {
 /// waiting for the agent to report on one.
 #[async_trait]
 pub trait Terminals: Send + Sync {
+    fn for_session(&self, _session: &str) -> Option<Arc<dyn Terminals>> {
+        None
+    }
     async fn run(&self, command: &str, cwd: &std::path::Path, output_limit: usize) -> Result<Ran>;
 }
 

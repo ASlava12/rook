@@ -47,6 +47,7 @@ pub(super) struct Crew<'a> {
     policy: std::sync::Arc<Policy>,
     approver: std::sync::Arc<dyn Approver>,
     hooks: std::sync::Arc<Hooks>,
+    observer: Option<std::sync::Arc<dyn super::observe::Observer>>,
     servers: std::sync::Arc<crate::lsp::Servers>,
     spawned: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     parent: u128,
@@ -254,80 +255,116 @@ impl Crew<'_> {
         said: std::sync::Arc<Interjections>,
     ) -> Result<(String, TurnOutcome)> {
         let session = self.rook.fork_for_subtask(self.parent, task)?;
-        let mut accounting = crate::model_delegation::Guard::start(self.rook, self.parent, session)?;
-        let mut tree = if bounds.isolated {
-            Some(accounting.returned(crate::worktrees::create(self.rook, session).await)?)
-        } else {
-            None
-        };
-        let _finished = tree.as_ref().map(|_| crate::worktrees::Finished(self.rook, session));
-        let isolated_rook = tree.as_ref().map(|tree| self.rook.for_workspace(tree.path.clone()));
-        let rook = isolated_rook.as_ref().unwrap_or(self.rook);
-        if let Some(context) = inherited {
-            self.rook.log(session, EventKind::Note, "inherited", context).ok();
-        }
+        let mut observation = super::observe::Child::start(self.observer.clone(), self.parent, session, task);
+        let result = self.run_subtask_in(session, task, inherited, bounds, doing, index, said).await;
+        observation.finish(&result);
+        result
+    }
 
-        // What the call asked for, or what the turn is using.
-        let chosen = bounds.provider.clone().unwrap_or_else(|| self.provider.clone());
-        let mut child = AgentLoop::new(rook, chosen, session);
-        child.depth = self.depth + 1;
-        if tree.is_none() {
-            child.tools = self.tools.clone();
-            child.tool_ctx = self.tool_ctx.clone();
-            child.servers = self.servers.clone();
-        } else {
-            // MCP servers and editor bridges may be rooted in the parent. Local
-            // tools, language servers and jobs must be constructed for this tree.
-            child.tool_ctx.delegated = true;
-            child.tool_ctx.allow_outside_workspace = false;
-            child.servers = servers_for(&rook.config, &rook.workspace);
-            crate::lsp::register(&mut child.tools, child.servers.clone());
-            child.tool_ctx.jobs = Some(jobs_for(&rook.config));
-            child.tools.register(std::sync::Arc::new(rook_tools::jobs::JobTool));
-        }
-        child.policy = self.policy.clone();
-        child.approver = self.approver.clone();
-        // Deliberately not `ask_via`: a subagent the user did not start should
-        // not interrupt them, and its parent is the one holding the context to
-        // judge the answer.
-        child.hooks = self.hooks.clone();
-        child.spawned = self.spawned.clone();
-        // Its own queue, not the parent's: what the user says while several of
-        // these run has to reach all of them, and taking from one queue would
-        // give it to whichever child stepped first.
-        child.interjections = said;
-        // A sub-task is a bounded errand, and lower effort means fewer and more
-        // consolidated tool calls rather than a worse answer.
-        child.effort = bounds.effort.unwrap_or(rook_llm::Effort::Low);
-        child.max_steps = bounds.steps.unwrap_or(self.max_steps);
-        child.max_turn_tokens = bounds.tokens;
-        child.by = bounds.by;
-
-        // Boxed because this is `run` calling itself through a tool call. The
-        // channel carries only tool names, so it holds at most one short string
-        // per step the children are already bounded to.
-        let where_it_runs = rook.workspace.clone();
-        let result = Box::pin(child.run_with(task, move |progress| {
-            if let Progress::Delta(Delta::ToolCall(call)) = progress {
-                let _ = doing
-                    .send((index, crate::calls::doing(&call.name, Some(&call.arguments), &where_it_runs)));
+    // The explicit Send bound terminates recursive run_with/delegation proof
+    // expansion without restricting callers' progress closures.
+    #[allow(clippy::too_many_arguments, clippy::manual_async_fn)]
+    fn run_subtask_in<'b>(
+        &'b self,
+        session: u128,
+        task: &'b str,
+        inherited: Option<&'b str>,
+        bounds: Bounds,
+        doing: tokio::sync::mpsc::UnboundedSender<(usize, String)>,
+        index: usize,
+        said: std::sync::Arc<Interjections>,
+    ) -> impl std::future::Future<Output = Result<(String, TurnOutcome)>> + Send + 'b {
+        async move {
+            let mut accounting = crate::model_delegation::Guard::start(self.rook, self.parent, session)?;
+            let mut tree = if bounds.isolated {
+                Some(accounting.returned(crate::worktrees::create(self.rook, session).await)?)
+            } else {
+                None
+            };
+            let _finished = tree.as_ref().map(|_| crate::worktrees::Finished(self.rook, session));
+            let isolated_rook = tree.as_ref().map(|tree| self.rook.for_workspace(tree.path.clone()));
+            let rook = isolated_rook.as_ref().unwrap_or(self.rook);
+            if let Some(context) = inherited {
+                self.rook.log(session, EventKind::Note, "inherited", context).ok();
             }
-        }))
-        .await;
-        let mut report = None;
-        if let Some(tree) = tree.as_mut() {
-            tree.finished = true;
-            accounting.returned(tree.save(self.rook, session))?;
-            report = Some(tree.report(session));
+
+            // What the call asked for, or what the turn is using.
+            let chosen = bounds.provider.clone().unwrap_or_else(|| self.provider.clone());
+            let mut child = AgentLoop::new(rook, chosen, session);
+            child.depth = self.depth + 1;
+            if tree.is_none() {
+                child.tools = self.tools.without(&["ask"]);
+                child.tool_ctx = self.tool_ctx.clone();
+                child.servers = self.servers.clone();
+            } else {
+                // MCP servers and editor bridges may be rooted in the parent. Local
+                // tools, language servers and jobs must be constructed for this tree.
+                child.tool_ctx.delegated = true;
+                child.tool_ctx.allow_outside_workspace = false;
+                child.servers = servers_for(&rook.config, &rook.workspace);
+                crate::lsp::register(&mut child.tools, child.servers.clone());
+                child.tool_ctx.jobs = Some(jobs_for(&rook.config));
+                child.tools.register(std::sync::Arc::new(rook_tools::jobs::JobTool));
+            }
+            child.policy = self.policy.clone();
+            let child_id = rook_store::format_session_id(session);
+            child.approver = self.approver.for_session(&child_id).unwrap_or_else(|| self.approver.clone());
+            child.tool_ctx.files = child
+                .tool_ctx
+                .files
+                .as_ref()
+                .map(|files| files.for_session(&child_id).unwrap_or_else(|| files.clone()));
+            child.tool_ctx.terminals = child
+                .tool_ctx
+                .terminals
+                .as_ref()
+                .map(|terminals| terminals.for_session(&child_id).unwrap_or_else(|| terminals.clone()));
+            // Deliberately not `ask_via`: a subagent the user did not start should
+            // not interrupt them, and its parent is the one holding the context to
+            // judge the answer.
+            child.hooks = self.hooks.clone();
+            child.observer = self.observer.clone();
+            child.spawned = self.spawned.clone();
+            // Its own queue, not the parent's: what the user says while several of
+            // these run has to reach all of them, and taking from one queue would
+            // give it to whichever child stepped first.
+            child.interjections = said;
+            // A sub-task is a bounded errand, and lower effort means fewer and more
+            // consolidated tool calls rather than a worse answer.
+            child.effort = bounds.effort.unwrap_or(rook_llm::Effort::Low);
+            child.max_steps = bounds.steps.unwrap_or(self.max_steps);
+            child.max_turn_tokens = bounds.tokens;
+            child.by = bounds.by;
+
+            // Boxed because this is `run` calling itself through a tool call. The
+            // channel carries only tool names, so it holds at most one short string
+            // per step the children are already bounded to.
+            let where_it_runs = rook.workspace.clone();
+            let result = Box::pin(child.run_with(task, move |progress| {
+                if let Progress::Delta(Delta::ToolCall(call)) = progress {
+                    let _ = doing.send((
+                        index,
+                        crate::calls::doing(&call.name, Some(&call.arguments), &where_it_runs),
+                    ));
+                }
+            }))
+            .await;
+            let mut report = None;
+            if let Some(tree) = tree.as_mut() {
+                tree.finished = true;
+                accounting.returned(tree.save(self.rook, session))?;
+                report = Some(tree.report(session));
+            }
+            let mut outcome =
+                accounting.returned(result.map_err(|why| {
+                    CoreError::Other(format!("{why}\n{}", report.as_deref().unwrap_or("")))
+                }))?;
+            if let Some(report) = report {
+                outcome.reply.push_str(&format!("\n\n{report}"));
+            }
+            accounting.finish(crate::model_delegation::State::Completed)?;
+            Ok((rook_store::format_session_id(session), outcome))
         }
-        let mut outcome = accounting.returned(
-            result.map_err(|why| CoreError::Other(format!("{why}\n{}", report.as_deref().unwrap_or("")))),
-        )?;
-        if let Some(report) = report {
-            outcome.reply.push_str(&format!("\n\n{report}"));
-        }
-        accounting.finish(crate::model_delegation::State::Completed)?;
-        Ok((rook_store::format_session_id(session), outcome))
     }
 }
 
@@ -744,6 +781,7 @@ impl<'a> AgentLoop<'a> {
             policy: self.policy.clone(),
             approver: self.approver.clone(),
             hooks: self.hooks.clone(),
+            observer: self.observer.clone(),
             servers: self.servers.clone(),
             spawned: self.spawned.clone(),
             parent: self.session,

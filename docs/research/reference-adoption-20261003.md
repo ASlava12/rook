@@ -11,7 +11,7 @@ Reference commits identify mechanisms, not code to copy wholesale.
 | Repetition in streamed text | Done | Bounded Unicode-aware detector, legitimate repetition/opt-out fixtures, attributed interruption, local/daemon physical accounting, clean reopen and actual compaction replay; CI and storage compaction exit 0 |
 | Tool cycles without progress | Done | Bounded execution companions, content progress/live job and child checks, alternating calls/argument and background-ID churn, actual compaction/reopen and worker/new-instruction scopes; native CLI/daemon durable counts; CI and compaction exit 0 |
 | Browser rendering batches | Done | Bounded frame batching, final/error/Stop flush, socket/session/turn/view ownership and history races; actual Edge 1,134 to 36 parses with full fenced text; drafts/questions/queue receipts, Node/assets tests and CI exit 0 |
-| ACP child/compaction/error events | Pending | Explicit negotiated preview capabilities, legacy fallback, child IDs/ownership, duplicate/recovery and restricted cancellation, wire tests and CI |
+| ACP child/compaction/error events | Done | Negotiated v1 object capabilities, directed tasks/answers, child editor bridges/states and restricted controls, bounded recovery and durable compaction IDs; actual owned wire/core/transport and reopen fixtures; CI and compaction exit 0 |
 | Model/price reference catalog | Pending | Explicit refresh and bounded cache, canonical/cloud identity, source/age, operator-applied rates, live/manual precedence, offline/account/corrupt-cache tests, frontend parity and CI |
 | Delegated worktree recovery | Pending | Read-only diagnosis plus explicit restore, registered checkout identity, preservation of recreated/dirty files, leases/path/platform bounds, local/daemon checks and CI |
 | Delegation progress persistence audit | Pending | Measured write/queue behavior under streamed updates, no full-history snapshots, durable critical receipts, bounded delivery and CI |
@@ -181,18 +181,17 @@ formats were unchanged, so a compaction remeasurement was not required.
 
 ## Continuation notes for the remaining scope
 
-Four behavioral rows are Done; six rows remain, including the required audits.
-The next block is ACP child/compaction/error previews, followed by the catalog,
-worktree recovery and the three audits. Do not mark the entire goal complete
-after this finished browser block.
+Five behavioral rows are Done; five rows remain: the catalog, worktree recovery
+and the three audits. The next block is the model/price reference catalog.
+Do not mark the entire goal complete after this finished ACP block.
 
 The completed guard lives in `agent/tool_cycles.rs`. Its execution companion is
 separate from prompt compaction and commits with operation completion; keep the
 run/root/generation boundary and don't replace content proof with tool names or
-timestamps in later runtime/delegation work. The catalog, ACP previews and
-worktree recovery are still Pending; no audit is implicitly closed by this block.
+timestamps in later runtime/delegation work. The catalog and worktree recovery
+are still Pending; no audit is implicitly closed by the ACP transport changes.
 
-The next ACP block must use the inspected v1 capability shapes:
+The ACP block uses the inspected v1 capability shapes:
 `clientCapabilities.subagents` and `clientCapabilities.session.compaction`
 are enabled by a non-null object, not a boolean. Missing/null retain the legacy
 path. Upstream `59172ba`'s root post-admission error stop reason concerns v2;
@@ -206,3 +205,80 @@ step/task limits. Measure queue high-water and durability before changing it.
 Shared-root children clone tools/context/server pools; worktree children
 intentionally reconstruct local tools/LSP/jobs to avoid using parent-root MCP or
 editor access. Runtime reuse must preserve that execution-root boundary.
+
+## Fifth block: negotiated ACP child and compaction previews
+
+Runtime observations carry the actual child session/execution workspace and
+compaction boundary without extending stable Progress/ChatEvent enums. Child
+associations precede directed task/answer messages, own tool/reasoning/context
+events and editor requests. Optional child-scoped file, terminal and approval
+wrappers share the existing rights/policy; worktree isolation still refuses
+editor bridges and reconstructs its rooted equipment. Shared children no longer
+borrow the parent's interactive `ask` tool. Individual cancellation is not
+supported by the runtime, so capabilities are `{}` and child client operations
+are refused without cancelling the parent. Actual child failure ends in an idle
+error snapshot; dropped observation remains unknown. Ordinary v1 root errors
+remain JSON-RPC errors. Non-null object previews are independent and only enabled
+for explicit protocol v1. The pinned v2 post-admission lifecycle is not imported.
+
+Compaction start/terminal events share a saved optional `compaction_id` in the
+existing Compaction JSON. Old records remain readable; replay source IDs for old
+records are deterministic. Completion follows successful append. Generation
+failure can still complete the existing neutral replacement fallback, while
+failed persistence and cancellation cannot claim saved completion. Summary
+streams cap combined narrative/text before assembly (64 KiB default, validated
+1 KiB–1 MiB, 2,048 requested output tokens); opaque blocks are not assembled.
+Fallback error display is also bounded before formatting. Display summaries and
+directed tasks have UTF-8-safe prefixes, saved source attribution and explicit
+shortening metadata.
+
+Recovery bounds session/tree/event metadata, record reads and display copies.
+Historical snapshots precede load/resume success; observed current states on
+an existing connection are confirmed afterwards. Full child conversation replay
+is not reconstructed; `_meta.rook.recovery` reports this and admission truncation.
+Transport shares escaped-byte/event leases through flush, explicitly closes on
+synchronous delivery overflow and caps pending editor requests. It cannot retain
+an unbounded second queue or silently lose critical lifecycle/permission events.
+See [the product contract](../acp.md) for exact limits.
+
+Owned HTTP/ACP fixtures cover actual simultaneous and nested delegation, directed
+participants, unsaved editor buffers, terminal requests and permission/tool IDs,
+restricted controls, parent cancellation, failed children, v1 root errors,
+independent/null/boolean capabilities, actual compaction and reopened store/ACP
+recovery. Core fixtures exercise combined output admission, opaque-state exclusion,
+saved ID/sequence, fallback, insufficient history, actual append failure after
+summary generation, cancellation and configuration
+bounds. Adapter/transport fixtures reach live-child, pending-request, in-flight
+event and escaped-byte budgets; blocked output closes the view while preserving
+the completed store mutation. Initial compiler errors in new fixture model fields
+and a directionally ambiguous JSON-RPC-ID assertion were corrected. Clippy's
+manual-async suggestions are locally explained: explicit `impl Future + Send`
+boundaries prevent recursive run_with proof overflow without restricting public
+progress closures. Focused logs are `target/reference-acp-tests-final.log`,
+`target/reference-acp-compaction-tests-final.log`,
+`target/reference-acp-delivery-tests.log` and `target/reference-acp-clippy.log`.
+The first full CI exited 1 in 692.0 seconds: its only failed target was
+`no_panics`, identifying two new production unwraps. Both are removed, and the
+targeted rule plus actual append-failure fixture exited 0. Session-control
+metadata read errors now fail closed instead of permitting an unchecked mutation.
+The second full CI exited 1 in 913.3 seconds with only the existing native
+tool-cycle fixture failing: a Windows accepted socket retained nonblocking mode,
+so an immediate read raced the client's header write and returned WouldBlock.
+The fixture now explicitly sets blocking mode, as the other owned HTTP fixtures
+do; its actual native CLI/daemon check exited 0
+(`target/reference-acp-native-cycle-fixture.log`), without relaxing limits.
+The final full `cargo xtask ci` exited 0 in 873.8 seconds
+(`target/reference-acp-ci-verified.log`), covering all existing frontend, daemon,
+storage and replay checks as well as the new fixtures. `cargo xtask compaction`
+exited 0 (`target/reference-acp-compaction.log`); corpus measurements remain
+23.31 MiB logical, 5.29 MiB distinct, 0.14 MiB warm and 4.02 MiB on disk, with
+37.1x dictionary and 5.8x end-to-end compression.
+
+For the next catalog block, extend the existing bounded endpoint catalog and
+configuration editor rather than replacing them: `model_catalog.rs` and its
+runtime snapshot already preserve offline/live observation scopes, while
+`model_route::Prices` freezes operator rates into physical receipts. Native model
+listing lives in `rook-cli/src/commands/config.rs`. Reference cloud identity,
+public source/age, explicit refresh/apply, unknown local/proxy pricing and all
+frontend paths still need implementing and verifying. No remaining audit is
+closed by the ACP observer or delivery fixtures.

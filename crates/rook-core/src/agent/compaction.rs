@@ -5,7 +5,7 @@ use super::budget::images_in;
 use crate::context::estimate_tokens;
 use crate::error::{CoreError, Result};
 use futures_util::StreamExt;
-use rook_llm::{Assembler, Message, Provider, Request};
+use rook_llm::{Assembler, Delta, Message, Provider, Request};
 use rook_store::EventKind;
 
 const SUMMARY_INSTRUCTIONS: &str = "\
@@ -84,9 +84,13 @@ impl<'a> AgentLoop<'a> {
     }
 
     pub(super) async fn compact(&self) {
-        match self.summarise_span().await {
+        let mut observed = super::observe::Compaction::start(self.observer.clone(), self.session);
+        match self.summarise_span(observed.id).await {
             Ok(note) => {
-                self.rook.log(self.session, EventKind::Compaction, "auto", &note).ok();
+                let saved = serde_json::to_string(&note)
+                    .map_err(CoreError::from)
+                    .and_then(|record| self.rook.log(self.session, EventKind::Compaction, "auto", &record));
+                observed.finish(saved.as_ref().map(|seq| (*seq, note.summary.as_str())));
             }
             // Not recorded as a compaction: one with no position in it frees no
             // context, so the next turn compacts again, and the one after that,
@@ -94,11 +98,12 @@ impl<'a> AgentLoop<'a> {
             // points at something nothing can read.
             Err(e) => {
                 self.rook.log(self.session, EventKind::Error, "compaction", &e.to_string()).ok();
+                observed.finish(Err(&e));
             }
         }
     }
 
-    async fn summarise_span(&self) -> Result<String> {
+    async fn summarise_span(&self, id: u128) -> Result<Compacted> {
         let (from_seq, previous) = self.rook.last_compaction(self.session)?;
         // Only what the model was actually shown. The log also holds checkpoint
         // manifests, asides and errors, and summarising those spends the budget
@@ -253,22 +258,43 @@ impl<'a> AgentLoop<'a> {
         // them rather than pretending they are gone.
         let summary = match self.ask_for_summary(material).await {
             Ok(text) => text,
-            Err(e) => format!(
-                "The transcript before this point could not be summarised ({e}). It is still in \
-                 the session log — `rook session show` reads it back — so ask before assuming \
-                 what is in it."
-            ),
+            Err(e) => {
+                // Provider errors can themselves contain a large response.
+                // Admit their borrowed display prefix before formatting a note.
+                let reason = match &e {
+                    CoreError::Other(text) => {
+                        let mut end = text.len().min(512);
+                        while !text.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        &text[..end]
+                    }
+                    _ => "summary request failed; inspect the saved diagnostics",
+                };
+                format!(
+                    "The transcript before this point could not be summarised ({reason}). It is still in \
+                     the session log — `rook session show` reads it back — so ask before assuming \
+                     what is in it."
+                )
+            }
         };
 
-        Ok(serde_json::to_string(&serde_json::json!({
-            "through_seq": through_seq,
-            "dropped_events": span.len(),
-            "summary": if span.iter().any(|entry| tool_images.contains(&entry.seq)) {
-                format!("{summary}\nEarlier tool images are no longer in context. Their original pixels remain available through read_result with include_images=true.")
+        Ok(Compacted {
+            through_seq,
+            dropped_events: span.len(),
+            compaction_id: rook_store::format_session_id(id),
+            summary: if span.iter().any(|entry| tool_images.contains(&entry.seq)) {
+                format!(
+                    "{summary}\nEarlier tool images are no longer in context. Their original pixels remain available through read_result with include_images=true."
+                )
             } else if span.iter().any(|entry| entry.label == crate::attachments::LABEL) {
-                format!("{summary}\nEarlier attachments are now represented by a summary; any image pixels are no longer in context. Ask the user to reattach an image if its visual details matter.")
-            } else { summary },
-        }))?)
+                format!(
+                    "{summary}\nEarlier attachments are now represented by a summary; any image pixels are no longer in context. Ask the user to reattach an image if its visual details matter."
+                )
+            } else {
+                summary
+            },
+        })
     }
 
     /// The model to condense a span with.
@@ -310,6 +336,7 @@ impl<'a> AgentLoop<'a> {
         // mechanical, and a turn configured to think hard would otherwise spend
         // that thinking on writing its own summary.
         request.effort = Some(rook_llm::Effort::Low);
+        request.max_output_tokens = 2048;
         let asked = self.summariser();
         let started = std::time::Instant::now();
         let mut timing = crate::diagnostics::Timer::start(
@@ -323,9 +350,22 @@ impl<'a> AgentLoop<'a> {
                 .await
                 .map_err(|e| CoreError::Other(e.to_string()))?;
             let mut assembler = Assembler::default();
+            let mut remaining = self.rook.config.agent.max_compaction_summary_bytes.clamp(1024, 1024 * 1024);
             while let Some(delta) = stream.next().await {
+                let delta = delta.map_err(|e| CoreError::Other(e.to_string()))?;
+                match &delta {
+                    Delta::Text(text) | Delta::Reasoning(text) => {
+                        remaining = remaining.checked_sub(text.len()).ok_or_else(|| CoreError::Other(
+                            "compaction output exceeds agent.max_compaction_summary_bytes; the saved log remains available".into()
+                        ))?;
+                    }
+                    // A summary has no tools and never replays opaque provider state.
+                    Delta::ReasoningDone(_) => continue,
+                    Delta::ToolCall(_) => return Err(CoreError::Other("the compaction model tried to call a tool".into())),
+                    _ => {}
+                }
                 assembler
-                    .push(delta.map_err(|e| CoreError::Other(e.to_string()))?)
+                    .push(delta)
                     .map_err(|e| CoreError::Other(e.to_string()))?;
             }
             Ok(assembler)
@@ -372,4 +412,13 @@ impl<'a> AgentLoop<'a> {
             false => Ok(summary),
         }
     }
+}
+
+#[derive(serde::Serialize)]
+struct Compacted {
+    through_seq: u64,
+    dropped_events: usize,
+    summary: String,
+    // JSON companions may gain optional fields; no postcard/wire struct changes.
+    compaction_id: String,
 }

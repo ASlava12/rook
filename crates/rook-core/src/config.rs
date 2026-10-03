@@ -592,6 +592,8 @@ pub struct AgentConfig {
     /// being asked for is plainly not judgement. The rest wait for numbers;
     /// `cargo xtask bench` is where they come from.
     pub compaction_model: String,
+    /// Admission for combined narrative/text output of a summarisation request.
+    pub max_compaction_summary_bytes: usize,
     /// What a delegated errand runs on, when the call does not ask for better.
     /// Empty is the turn's own model.
     ///
@@ -946,6 +948,7 @@ impl Default for AgentConfig {
             answer_timeout_secs: 600,
             decide_alone_after_secs: 1800,
             compaction_model: String::new(),
+            max_compaction_summary_bytes: 64 * 1024,
             errand_model: String::new(),
             max_reasoning_tokens: 800,
             max_provider_state_bytes: 4 * 1024 * 1024,

@@ -96,6 +96,10 @@
     "kind": "string",
     "help": "Model used to summarize older context. Empty uses agent.model. A smaller model can reduce the cost of long sessions."
   },
+  "agent.max_compaction_summary_bytes": {
+    "kind": "integer",
+    "help": "Admission for combined compaction text and narrative reasoning (1024–1048576 bytes; default 64 KiB), before assembly. Excess output keeps an attributed fallback summary and the original saved log; opaque provider state is excluded."
+  },
   "agent.errand_model": {
     "kind": "string",
     "help": "What a delegated errand runs on, when the call does not ask for better. Empty is the turn's own model."

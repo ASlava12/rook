@@ -43,6 +43,9 @@ impl Config {
         if let Err(why) = crate::context::check_compact_at(self.agent.compact_at) {
             errors.push(why);
         }
+        if !(1024..=1024 * 1024).contains(&self.agent.max_compaction_summary_bytes) {
+            errors.push("agent.max_compaction_summary_bytes: expected 1024..=1048576".into());
+        }
         for (name, valid, range) in [
             (
                 "max_bytes",

@@ -512,60 +512,93 @@ impl<'a> AgentLoop<'a> {
         tokens: u64,
     ) -> Result<(String, TurnOutcome)> {
         let session = self.rook.fork_for_subtask(self.session, instruction)?;
-        let mut accounting = crate::model_delegation::Guard::start(self.rook, self.session, session)?;
-        let mut child = AgentLoop::new(self.rook, self.provider.clone(), session);
-        child.depth = self.depth + 1;
-        child.by = self.by;
-        child.max_turn_secs = self.max_turn_secs;
-        child.max_turn_tokens = tokens;
-        child.tools = self.tools.without(CHANGES_FILES);
-        child.tool_ctx = self.tool_ctx.clone();
-        child.policy = self.policy.clone();
-        child.approver = self.approver.clone();
-        child.hooks = self.hooks.clone();
-        child.servers = self.servers.clone();
-        child.spawned = self.spawned.clone();
-        // No relay of what the user says mid-turn, unlike a sub-task: a checker
-        // is asked to be the one party with no stake in the answer, and a remark
-        // from the person whose work is being checked is a stake.
-        child.checking = true;
-        // Not lowered the way a delegated errand is: an errand is bounded work
-        // to get through, and a check is the judgement the parent could not make
-        // for itself.
-        child.effort = self.effort;
-        // Bounded, though, because a check is not the work: a checker with the
-        // whole turn's step budget spent twenty-six minutes on a goal check at
-        // `high` effort against a local model — longer than the turn it was
-        // checking — and ended on a provider timeout with no verdict at all.
-        // Enough steps to read a few files and run one command, and no more.
-        child.max_steps = self.max_steps.min(CHECKER_STEPS);
+        let mut observation =
+            super::observe::Child::start(self.observer.clone(), self.session, session, instruction);
+        let result = self.run_checker_in(session, instruction, doing, tokens).await;
+        observation.finish(&result);
+        result
+    }
 
-        // Cloned out before the closure: a phrase names a path relative to the
-        // workspace, and the closure outlives this borrow of `self`.
-        let where_it_runs = self.rook.workspace.clone();
-        let mut relay = |progress: Progress<'_>| {
-            if let Progress::Delta(Delta::ToolCall(call)) = progress {
-                let _ =
-                    doing.send((0, crate::calls::doing(&call.name, Some(&call.arguments), &where_it_runs)));
+    // As in delegation, the explicit Send boundary stops recursive future
+    // proof expansion without adding a bound to the public progress callback.
+    #[allow(clippy::manual_async_fn)]
+    fn run_checker_in<'b>(
+        &'b self,
+        session: u128,
+        instruction: &'b str,
+        doing: tokio::sync::mpsc::UnboundedSender<(usize, String)>,
+        tokens: u64,
+    ) -> impl std::future::Future<Output = Result<(String, TurnOutcome)>> + Send + 'b {
+        async move {
+            let mut accounting = crate::model_delegation::Guard::start(self.rook, self.session, session)?;
+            let mut child = AgentLoop::new(self.rook, self.provider.clone(), session);
+            child.depth = self.depth + 1;
+            child.by = self.by;
+            child.max_turn_secs = self.max_turn_secs;
+            child.max_turn_tokens = tokens;
+            child.tools = self.tools.without(CHANGES_FILES);
+            child.tools = child.tools.without(&["ask"]);
+            child.tool_ctx = self.tool_ctx.clone();
+            child.policy = self.policy.clone();
+            let child_id = rook_store::format_session_id(session);
+            child.approver = self.approver.for_session(&child_id).unwrap_or_else(|| self.approver.clone());
+            child.tool_ctx.files = child
+                .tool_ctx
+                .files
+                .as_ref()
+                .map(|files| files.for_session(&child_id).unwrap_or_else(|| files.clone()));
+            child.tool_ctx.terminals = child
+                .tool_ctx
+                .terminals
+                .as_ref()
+                .map(|terminals| terminals.for_session(&child_id).unwrap_or_else(|| terminals.clone()));
+            child.hooks = self.hooks.clone();
+            child.observer = self.observer.clone();
+            child.servers = self.servers.clone();
+            child.spawned = self.spawned.clone();
+            // No relay of what the user says mid-turn, unlike a sub-task: a checker
+            // is asked to be the one party with no stake in the answer, and a remark
+            // from the person whose work is being checked is a stake.
+            child.checking = true;
+            // Not lowered the way a delegated errand is: an errand is bounded work
+            // to get through, and a check is the judgement the parent could not make
+            // for itself.
+            child.effort = self.effort;
+            // Bounded, though, because a check is not the work: a checker with the
+            // whole turn's step budget spent twenty-six minutes on a goal check at
+            // `high` effort against a local model — longer than the turn it was
+            // checking — and ended on a provider timeout with no verdict at all.
+            // Enough steps to read a few files and run one command, and no more.
+            child.max_steps = self.max_steps.min(CHECKER_STEPS);
+
+            // Cloned out before the closure: a phrase names a path relative to the
+            // workspace, and the closure outlives this borrow of `self`.
+            let where_it_runs = self.rook.workspace.clone();
+            let mut relay = |progress: Progress<'_>| {
+                if let Progress::Delta(Delta::ToolCall(call)) = progress {
+                    let _ = doing
+                        .send((0, crate::calls::doing(&call.name, Some(&call.arguments), &where_it_runs)));
+                }
+            };
+            let mut outcome = accounting.returned(Box::pin(child.run_with(instruction, &mut relay)).await)?;
+            // A small model narrates what it would run and stops, or reasons its
+            // way to the end and forgets the line. Asked once, in the same session,
+            // it usually does what it said; a second silence is reported as one.
+            if verdict_in(&outcome.reply).is_none() && !child.overspent(&outcome) && !child.out_of_time() {
+                child.max_turn_tokens = child.left_to_spend(&outcome);
+                let finished =
+                    accounting.returned(Box::pin(child.run_with(VERDICT_NUDGE, &mut relay)).await)?;
+                outcome.reply = finished.reply;
+                outcome.stopped = finished.stopped;
+                outcome.steps += finished.steps;
+                outcome.input_tokens += finished.input_tokens;
+                outcome.output_tokens += finished.output_tokens;
+                outcome.cached_tokens += finished.cached_tokens;
+                outcome.tools_called.extend(finished.tools_called);
             }
-        };
-        let mut outcome = accounting.returned(Box::pin(child.run_with(instruction, &mut relay)).await)?;
-        // A small model narrates what it would run and stops, or reasons its
-        // way to the end and forgets the line. Asked once, in the same session,
-        // it usually does what it said; a second silence is reported as one.
-        if verdict_in(&outcome.reply).is_none() && !child.overspent(&outcome) && !child.out_of_time() {
-            child.max_turn_tokens = child.left_to_spend(&outcome);
-            let finished = accounting.returned(Box::pin(child.run_with(VERDICT_NUDGE, &mut relay)).await)?;
-            outcome.reply = finished.reply;
-            outcome.stopped = finished.stopped;
-            outcome.steps += finished.steps;
-            outcome.input_tokens += finished.input_tokens;
-            outcome.output_tokens += finished.output_tokens;
-            outcome.cached_tokens += finished.cached_tokens;
-            outcome.tools_called.extend(finished.tools_called);
+            accounting.finish(crate::model_delegation::State::Completed)?;
+            Ok((rook_store::format_session_id(session), outcome))
         }
-        accounting.finish(crate::model_delegation::State::Completed)?;
-        Ok((rook_store::format_session_id(session), outcome))
     }
 }
 

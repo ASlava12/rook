@@ -54,6 +54,13 @@ same [`Rook`](../crates/rook-core/src/service.rs) façade, which is what keeps t
 from becoming three products that disagree about what the agent did. Anything the
 web UI can show, `rook … --json` can print.
 
+The ACP editor adapter also uses the shared engine. Its optional negotiated v1
+previews observe actual child session/workspace ownership and durable compaction
+boundaries without changing stable Progress/ChatEvent storage or wire enums.
+Child editor bridges retain capability and policy boundaries; historical recovery
+and current activity are distinct. Outbound escaped JSON uses bounded shared
+transport leases through writer flush. See [the editor contract](acp.md).
+
 The CLI entry point parses and routes commands. Its grammar lives in
 `rook-cli/src/args.rs`, handlers in `commands/`, and turn configuration shared
 with the REPL/TUI in `turn_options.rs`. In particular, command-line and interactive

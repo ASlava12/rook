@@ -31,6 +31,7 @@ mod effects;
 mod followups;
 pub(crate) mod history;
 mod lifecycle;
+pub mod observe;
 mod output;
 mod prompt;
 mod repetition;
@@ -521,6 +522,9 @@ pub struct AgentLoop<'a> {
     /// Socket admission receipt for this top-level prompt only. Follow-ups
     /// build a fresh loop and never inherit its caller identity.
     pub submission_key: Option<String>,
+    /// Connection-scoped observation, inherited by children and follow-ups.
+    /// Delivery must remain bounded and must not wait while an engine lock is held.
+    pub observer: Option<std::sync::Arc<dyn observe::Observer>>,
     launched_job: std::sync::Mutex<Option<String>>,
     tool_cycles: std::sync::Mutex<Option<tool_cycles::Guard>>,
     tool_cycle_outcome: std::sync::Mutex<Option<[u8; 32]>>,
@@ -694,6 +698,7 @@ impl<'a> AgentLoop<'a> {
             execution: None,
             reserved_execution: None,
             submission_key: None,
+            observer: None,
             launched_job: Default::default(),
             tool_cycles: Default::default(),
             tool_cycle_outcome: Default::default(),
@@ -840,6 +845,7 @@ impl<'a> AgentLoop<'a> {
         let session = self.session;
         let mut changed = rook.extension_changed.subscribe();
         let mut cursor = crate::extension_ui::live::Cursor::default();
+        let observer = self.observer.clone();
         let progress = std::sync::Mutex::new(on_progress);
         let emit = |cursor: &mut crate::extension_ui::live::Cursor, initial: bool| match cursor
             .advance(rook, session)
@@ -848,14 +854,31 @@ impl<'a> AgentLoop<'a> {
             Ok(Some(event)) => {
                 if !initial || matches!(&event, rook_proto::ChatEvent::Agent { text, .. } if !text.is_empty())
                 {
-                    (progress.lock().unwrap_or_else(|e| e.into_inner()))(Progress::ExtensionUi(&event));
+                    let p = Progress::ExtensionUi(&event);
+                    if let Some(observer) = &observer {
+                        observer.observe(observe::Event::Progress {
+                            session,
+                            workspace: &rook.workspace,
+                            progress: &p,
+                        });
+                    }
+                    (progress.lock().unwrap_or_else(|e| e.into_inner()))(p);
                 }
             }
             Ok(None) => {}
             Err(why) => tracing::warn!("extension display refresh failed: {why}"),
         };
         emit(&mut cursor, true);
-        let mut relay = |p: Progress<'_>| (progress.lock().unwrap_or_else(|e| e.into_inner()))(p);
+        let mut relay = |p: Progress<'_>| {
+            if let Some(observer) = &observer {
+                observer.observe(observe::Event::Progress {
+                    session,
+                    workspace: &rook.workspace,
+                    progress: &p,
+                });
+            }
+            (progress.lock().unwrap_or_else(|e| e.into_inner()))(p)
+        };
         let mut running = Box::pin(self.run_with_inner(prompt, &mut relay));
         loop {
             tokio::select! {

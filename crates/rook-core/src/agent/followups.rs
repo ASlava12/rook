@@ -13,6 +13,7 @@ impl<'a> AgentLoop<'a> {
         next.asker = self.asker.clone();
         next.servers = self.servers.clone();
         next.hooks = self.hooks.clone();
+        next.observer = self.observer.clone();
         next.summariser = self.summariser.clone();
         next.interjections = self.interjections.clone();
         next.effort = self.effort;
