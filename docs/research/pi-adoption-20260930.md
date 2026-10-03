@@ -16,8 +16,10 @@ Source: Pi `ee602414c703be8da722ec56de7f2399e62581ac`; starting Rook:
 | Opt-in phase-based model routing | In progress | Static policy, durable branch transition, historical receipts and compatible image/scoped-state handoffs implemented; native continuation/reopen/fork and automatic fallback verified; auxiliary/branch-summary receipts, physical-attempt lifecycle, saved rate estimates and frozen delegated aggregation implemented with explicit unknown facts; actual local/shared TUI and browser phase interactions verified; real comparison runner and failed target-availability pilot retained; finish completed same-task quality/cost/latency comparison without claiming unmeasured savings |
 | Declarative extension UI | Complete | Opt-in bounded source-owned status/progress/forms/result/clear reports; persistent local/shared TUI and browser panels, legacy text fallback, cancellation/reconnect/reopen/fork restoration, before-copy count/byte bounds and actual frontend interactions verified; full CI/compaction passed |
 
-Regular-scrollback TUI and terminal image preview remain experiments from the
-review, to assess after the main capabilities. Existing MCP/OAuth, durable goals,
+The regular-scrollback mechanism has been assessed with a bounded prototype and
+native Windows observations: direct inline adoption was rejected because shrink
+moves the lower queue upwards; no production mode was shipped. Terminal image
+preview remains an experiment from the review. Existing MCP/OAuth, durable goals,
 skills, editor launch and storage are reused. No replacement runtime is planned.
 
 ## First integrated block
@@ -4009,3 +4011,43 @@ proof index is `target/pi-extension-live-proof.json`. Earlier failed checks
 remain retained and are not counted as passes. The declarative extension UI
 capability is Complete; eight of the nine main capabilities are now complete.
 Phase comparison and both terminal experiments remain open; the goal is active.
+
+## Ordinary scrollback mechanism assessment
+
+The [research note](terminal-scrollback-20261003.md) and
+[finite native prototype](../../crates/rook-cli/examples/terminal_scrollback.rs)
+assess pinned Ratatui inline insertion, lower input/queue and overlay restoration.
+This is a terminal experiment with synthetic rows, without model requests,
+agent stores or an alternate production runtime. It does not claim local/daemon
+conversation parity or host mouse/copy/search verification.
+
+Focused example tests exited 0 (four tests;
+`target/pi-scrollback-four-tests.log`). They reach actual TestBackend scrollback,
+check each completed row exactly once at widths 40/80/120, enforce insertion
+geometry/count bounds, expose inline shrink and check fullscreen reflow.
+The corrected actual native inline driver and terminal exited 0, preserving the
+draft, overlay return and an added row. Accepted shrink from 80 to 40 columns
+moves the inline viewport to y=0 and queue content from row 22 to row 8 of 24.
+Evidence: `target/scrollback-probe-inline-2ad1367155bf4ee1a41e21977396fb92`
+and `target/pi-scrollback-inline-corrected-proof.log`.
+
+The native fullscreen driver and terminal also exited 0, preserving draft,
+overlay and append. Its alternate-buffer Win32 resize was rejected; its queue
+row 22 was observed at width 80, not width 40. Narrow fullscreen behavior is
+therefore supported only by TestBackend here. Evidence:
+`target/scrollback-probe-fullscreen-987b7b2149e14b2dbbed5884bf5f1186`
+and `target/pi-scrollback-fullscreen-proof.log`. Both processes are stopped.
+Win32 exposes only the 24-row ConPTY backing surface, so these captures do not
+prove access to host scrollback. Bounded PTY traces are retained separately.
+
+First test/helper/input-driver failures and corrected instrumentation are
+documented in the note. Direct `Viewport::Inline` adoption is rejected on the
+measured lower-queue regression. Fullscreen remains the Rook default; production
+re-anchoring/reflow, mutable receipt/tool/Markdown rows, branch/reconnect semantics
+and host interaction requirements are explicitly retained for any future adapter.
+The simple renderer assessment is complete. Mandatory `cargo xtask ci` exited 0
+in 495.5 seconds, including fmt, Clippy, build, workspace tests and doctests;
+output is retained in `target/pi-scrollback-ci.log`. No production storage changes
+were made; the preceding committed
+compaction measurement remains applicable. Terminal image assessment and the
+completed real-model phase comparison remain open; the full goal stays active.

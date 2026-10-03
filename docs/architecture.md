@@ -187,6 +187,12 @@ message at the bottom of the chat, directly above the status line. The composer
 and approval controls sit above it, so streaming output and a growing draft do
 not move the preview. The queue page supplies ordering and count in both local
 and daemon modes.
+Fullscreen remains the production TUI mode. A
+[bounded scrollback experiment](research/terminal-scrollback-20261003.md)
+measures inline completed-row insertion and alternate-buffer overlays. Direct
+inline adoption was rejected after an accepted native width shrink moved the
+queue away from the lower edge. The prototype is separate from the agent;
+mutable transcript rows and branch/reconnect semantics remain adapter concerns.
 The running/quiet-model status sits on the composer's border. Its length never
 changes draft wrapping or caret movement; a scrolled draft keeps its hidden-row
 hint on the opposite border.
