@@ -913,6 +913,9 @@ mod tests {
         std::fs::create_dir(workspace.path().join("nested")).unwrap();
         std::fs::write(workspace.path().join("nested/other.txt"), b"other\n").unwrap();
         git_test(workspace.path(), &["init", "-q"]);
+        // Worktree creation uses its own Git invocation. Persist this fixture's
+        // byte policy so a Windows runner's global autocrlf cannot alter blobs.
+        git_test(workspace.path(), &["config", "core.autocrlf", "false"]);
         git_test(workspace.path(), &["add", "."]);
         git_test(workspace.path(), &["commit", "-qm", "baseline"]);
         let rook = Rook::from_parts(

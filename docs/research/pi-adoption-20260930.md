@@ -4201,3 +4201,16 @@ are claimed. There is no remaining mandatory transfer implementation or planned
 retry-to-pass measurement; possible production terminal adapters retain their
 separate future evidence requirements. This closes the full requested transfer
 after the completed block is committed and its working tree is verified clean.
+
+## Release validation follow-up — 2026-10-04
+
+Unix crash/reopen validation found that an explicitly confirmed branch-summary
+carry could still be buffered between turns. `transfer_summary_at` now flushes
+before returning its save acknowledgment. The bounded source-attributed Note,
+source boundary, wire representation and existing store layout remain unchanged.
+The core regression reaches buffered writes and verifies the confirmed summary
+has no pending events; the PTY scenario still kills the local/daemon owner before
+reopening the store. Focused branch tests and `cargo xtask compaction` exit 0;
+storage measurements remain 4.02 MiB / 37.1x warm / 5.8x overall. Release matrices,
+platform fixture corrections and archive evidence are recorded in the
+[reference adoption release follow-up](reference-adoption-20261003.md#v0110-release-validation-follow-up).

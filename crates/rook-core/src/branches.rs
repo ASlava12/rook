@@ -544,6 +544,9 @@ pub fn transfer_summary_at(
         rook_store::NewEvent::new(rook_store::EventKind::Note, rook_store::Kind::Message, &bytes)
             .label(SUMMARY_LABEL),
     )?;
+    // A manual branch switch can happen between ordinary turns. Its save
+    // acknowledgment is a recovery point even if the process dies next.
+    rook.store.flush()?;
     Ok(seq)
 }
 
@@ -988,11 +991,13 @@ mod tests {
         session(&rook, 1, None, "departed");
         session(&rook, 2, Some(1), "target");
         rook.log(1, rook_store::EventKind::UserMessage, "", "try option A").unwrap();
+        assert!(rook.store.not_on_disk_yet() > 0, "setup must exercise buffered events");
         let before = rook.store.get_session(2).unwrap().unwrap().next_seq;
         assert!(transfer_summary(&rook, 1, 2, &"x".repeat(SUMMARY_BYTES + 1)).is_err());
         assert_eq!(rook.store.get_session(2).unwrap().unwrap().next_seq, before);
         let seq = transfer_summary(&rook, 1, 2, "Option A failed in that branch.").unwrap();
         assert_eq!(seq, before);
+        assert_eq!(rook.store.not_on_disk_yet(), 0, "the save acknowledgment must survive process loss");
         rook.log(1, rook_store::EventKind::AssistantMessage, "", "later claim").unwrap();
         let event = rook.store.events(2, seq, 1).unwrap().pop().unwrap();
         assert_eq!(event.record.kind, rook_store::EventKind::Note);

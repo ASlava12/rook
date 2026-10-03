@@ -73,14 +73,28 @@ impl Model {
                     }
                 };
                 let (mime, body) = if request["stream"] == true {
-                    // OpenAI accepts both a string and structured text content.
+                    // OpenAI accepts string/structured content and can fold
+                    // consecutive user messages. Match the task line, not a
+                    // marker quoted inside the source-wrapped nursery report.
                     let task = request["messages"]
                         .as_array()
                         .unwrap()
                         .iter()
                         .filter(|message| message["role"] == "user")
-                        .map(|message| message["content"].to_string())
-                        .find(|text| text.contains("AUDIT CHILD:"));
+                        .find_map(|message| {
+                            let content = &message["content"];
+                            content
+                                .as_str()
+                                .and_then(|text| text.lines().find(|line| line.starts_with("AUDIT CHILD: ")))
+                                .or_else(|| {
+                                    content
+                                        .as_array()?
+                                        .iter()
+                                        .filter_map(|part| part["text"].as_str())
+                                        .flat_map(str::lines)
+                                        .find(|line| line.starts_with("AUDIT CHILD: "))
+                                })
+                        });
                     let mut body = String::new();
                     let checker = request["messages"]
                         .to_string()

@@ -552,3 +552,26 @@ daemon context now pass. The summary fixture's transient acknowledgment is
 cleared while rehydrating the selected branch, so it now waits for the saved
 `branch-summary` event loaded into target history before closing the process.
 That displayed persisted event also verifies the source-attributed recall.
+
+The crash/reopen assertion then exposed a real missing durability boundary:
+manual summary carry appended a buffered event between ordinary turns. Carry
+now flushes before returning its acknowledgment; the existing core assertion
+first reaches buffered events and then verifies none remain after saving. The
+Unix PTY fixture retains abrupt local/daemon shutdown and checks the reopened
+record, rather than weakening the scenario to a graceful exit.
+
+Windows hosted failures also exposed fixture assumptions: the delegation mock
+matched a quoted nursery report as a fresh child task, the hook scenario used
+a five-second PowerShell startup guard, and worktree setup did not persist its
+LF policy for the production Git invocation. The mock now matches an exact
+task line across folded/structured user content; hook patience is 90 seconds;
+owned worktree repositories set `core.autocrlf=false` before checkout creation.
+Production hook patience and Git behavior are unchanged.
+
+Focused delegation, native form, worktree recovery (with an owned temporary
+global `autocrlf=true`) and summary tests exit 0. The initial strict whole-message
+mock matcher exited 101 because provider folding prepended context; the corrected
+task-line matcher passes with exact parent/child request counts. `cargo xtask
+compaction` exits 0: 4.02 MiB on disk, 37.1x warm-object compression, 5.8x overall
+(`target/release-summary-compaction.log`). Formats and measurement claims remain
+unchanged. Full CI and release archive checks follow these final corrections.

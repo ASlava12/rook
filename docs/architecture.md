@@ -298,6 +298,8 @@ Its record names the source session and last source event. Replay treats the
 summary as attributed source data, while transcript reading renders that
 attribution for people. It does not imply that files or tests still match the
 departed branch. Ordinary branch navigation does not create this event.
+Manual carry flushes the store before acknowledging the save: branch navigation
+can occur between turns, and a confirmed summary must survive process loss.
 The TUI history worker prepares and saves an opted-in navigation draft through
 the same local/daemon Source methods. A separate bounded editor pins its source
 and boundary and keeps the chat prompt intact. A save reply from a replaced

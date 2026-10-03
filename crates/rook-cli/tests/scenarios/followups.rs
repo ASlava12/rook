@@ -246,7 +246,7 @@ fn extension_form_config(rook: &Rook, url: &str) -> String {
         )
     };
     format!(
-        "[agent]\nmodel='initial'\ninstall_servers=false\none_script=false\nplan_first=false\n[models.initial]\napi='openai'\nmodel='initial-model'\nurl='{url}'\ncontext_window=32768\n[[hooks]]\nevent='prompt'\nui=true\nui_stream=true\ntimeout_secs=5\ncommand={}\n",
+        "[agent]\nmodel='initial'\ninstall_servers=false\none_script=false\nplan_first=false\n[models.initial]\napi='openai'\nmodel='initial-model'\nurl='{url}'\ncontext_window=32768\n[[hooks]]\nevent='prompt'\nui=true\nui_stream=true\ntimeout_secs=90\ncommand={}\n",
         serde_json::to_string(&command).unwrap()
     )
 }
@@ -264,7 +264,9 @@ fn extension_forms_use_native_unavailable_fallback_and_daemon_answer_reconnect_a
             let outcome = rook.json(&["run", "Use the extension."]);
             let id = outcome["session"].as_str().unwrap();
             let answer: Value = serde_json::from_slice(
-                &std::fs::read(rook.workspace.path().join("hook-answer.json")).unwrap(),
+                &std::fs::read(rook.workspace.path().join("hook-answer.json")).unwrap_or_else(|error| {
+                    panic!("hook answer missing: {error}; native outcome: {outcome}")
+                }),
             )
             .unwrap();
             assert_eq!(answer["form_answer"]["status"], "unavailable");
