@@ -164,6 +164,8 @@ impl<'a> AgentLoop<'a> {
         on_progress: &mut impl FnMut(Progress<'_>),
     ) -> (String, Option<&'static str>) {
         let ceiling = self.rook.config.agent.max_subagents_per_turn;
+        // The renamed try_update is newer than our Rust 1.90 MSRV.
+        #[allow(deprecated)]
         let claimed = self.spawned.fetch_update(
             std::sync::atomic::Ordering::Relaxed,
             std::sync::atomic::Ordering::Relaxed,
