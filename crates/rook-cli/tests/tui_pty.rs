@@ -673,7 +673,7 @@ fn branch_navigation_reviews_and_carries_a_pinned_summary_without_submitting_the
         let events = store.events_before(2, 2, 2).unwrap();
         let saved = events.iter().find(|event| event.record.label == "branch-summary").unwrap();
         let summary: serde_json::Value =
-            serde_json::from_slice(&store.get(saved.record.object).unwrap()).unwrap();
+            serde_json::from_slice(&store.get(&saved.record.body).unwrap()).unwrap();
         assert_eq!(summary["source_session"], rook_store::format_session_id(1));
         assert_eq!(summary["source_through"], 0);
         assert_eq!(summary["text"], "REVIEWED_BRANCH_SUMMARY");

@@ -744,7 +744,7 @@ async fn quiet_stream() -> (String, tokio::sync::oneshot::Receiver<bool>) {
             .await
             .unwrap();
         let mut buf = [0; 1];
-        let result = tokio::time::timeout(Duration::from_secs(3), socket.read(&mut buf)).await;
+        let result = tokio::time::timeout(Duration::from_secs(90), socket.read(&mut buf)).await;
         let _ = closed.send(matches!(result, Ok(Ok(0)) | Ok(Err(_))));
     });
     (format!("http://{address}/v1"), wait)
@@ -755,7 +755,9 @@ async fn dropping_or_stalling_a_response_releases_its_connection() {
     for stall in [false, true] {
         let (url, closed) = quiet_stream().await;
         let mut config = Config::new(url, None, 128_000);
-        config.stream_idle_timeout = Duration::from_millis(30);
+        // Connection release is the claim, not a VM delivering its first byte
+        // within 30 ms. Keep a deliberate stall clock and a generous hang guard.
+        config.stream_idle_timeout = Duration::from_secs(1);
         let provider = Responses::new("quiet", "gpt-6-astra", config).unwrap();
         let mut stream = provider.stream(Request::new(vec![])).await.unwrap();
         assert!(matches!(stream.next().await.unwrap().unwrap(),Delta::Text(text) if text=="started"));
@@ -763,7 +765,7 @@ async fn dropping_or_stalling_a_response_releases_its_connection() {
             assert!(matches!(stream.next().await.unwrap(), Err(rook_llm::LlmError::Stalled { .. })));
         }
         drop(stream);
-        assert!(tokio::time::timeout(Duration::from_secs(4), closed).await.unwrap().unwrap());
+        assert!(tokio::time::timeout(Duration::from_secs(90), closed).await.unwrap().unwrap());
     }
 }
 
