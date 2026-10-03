@@ -30,6 +30,11 @@ the common context window defaults to 32768, configurable with `--window`
 (16384..262144). `--output-dir` must name a new directory; existing evidence is
 never replaced. Otherwise roots are fresh `target/phase-bench-UUID` directories
 and `target/pi-phase-bench-root.txt` points to the latest real run.
+`--output-tokens` sets the same per-generation output limit in both arms,
+512..8192 (default 1536). Record different limits as different profiles; do not
+pool their totals. The 1536-token pilot hit that exact output limit immediately
+before a malformed write call, so a larger bounded profile can test that
+measurement limitation without relaxing the oracle or planning protocol.
 
 ## Protocol and quality
 
@@ -57,7 +62,12 @@ outcome and saved context. `report.json` is written before a stage starts and
 after it ends; per-stage stdout/stderr files and the owned PID remain readable
 while it runs. A final bounded journal retains main/auxiliary receipts.
 `source_commit`, the binary version and a hash of the benchmark scripts identify
-the runner. The report keeps original observations; it does not automatically
+the runner. Each run now snapshots the actual CLI into its owned root, admitting
+at most 128 MiB before copying with 64 KiB buffers and enforcing the budget while
+bytes arrive. Its byte count/SHA-256 are recorded; all measured stages and
+inspection commands use that pinned executable. This prevents builds changing
+the executable between stages and avoids Windows locks on target/debug/rook.exe.
+The report keeps original observations; it does not automatically
 claim a percentage improvement.
 
 A workspace quality pass and a successful agent completion are separate facts.
@@ -84,7 +94,8 @@ wall time. Small samples support only the stated workloads and environment.
 
 ## Bounds and configuration
 
-Each turn has at most 8 steps, 1536 output tokens per generation and a 900-second
+Each turn has at most 8 steps, the chosen bounded output tokens per generation
+and a 900-second
 process deadline. Ordinary delegation is disabled with
 `max_subagents_per_turn=0`; background jobs are disabled. Command execution and
 capture have their own limits. Turn stdout and stderr have fixed 1/3 MiB buffers;

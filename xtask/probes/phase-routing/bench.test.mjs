@@ -5,6 +5,8 @@ import path from 'node:path';
 import test from 'node:test';
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { tasks, seed, score } from './bench-tasks.mjs';
 import { turn } from './bench-process.mjs';
 
@@ -110,6 +112,18 @@ test('run evidence is readable while its owned process is still waiting', async 
   const result = await running;
   assert.equal(result.status, 0); assert.equal(result.stdout, 'live'); assert.equal(result.error, undefined);
 });
+test('invalid output limits fail before configuration or evidence creation', t => {
+  const dir = workspace(t, tasks[0]);
+  const output = path.join(dir, 'must-not-exist');
+  for (const value of ['511', '8193', '1536.5']) {
+    const result = spawnSync(process.execPath, [fileURLToPath(new URL('bench.mjs', import.meta.url)),
+      '--source', 'absent', '--implementation-model', 'absent', '--output-tokens', value,
+      '--output-dir', output], {encoding:'utf8', maxBuffer:64*1024, timeout:20000, windowsHide:true});
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /output-tokens must be 512\.\.8192/);
+    assert.equal(fs.existsSync(output), false);
+  }
+});
 test('a fatal provider reply retains its real failed-session coverage and aborts further cases', async t => {
   const dir = workspace(t, tasks[0]);
   const rook = path.resolve(`target/debug/rook${process.platform === 'win32' ? '.exe' : ''}`);
@@ -125,6 +139,7 @@ test('a fatal provider reply retains its real failed-session coverage and aborts
       chunks.push(chunk);
     }
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    if (body.stream) assert.equal(body.max_tokens, 4096, 'both physical models receive the chosen output limit');
     if (body.model === 'implementation-model') {
       res.writeHead(400, {'Content-Type':'application/json'});
       res.end(JSON.stringify({error:{message:'Failed to load model: controlled fixture',type:'invalid_request_error'}})); return;
@@ -147,9 +162,15 @@ test('a fatal provider reply retains its real failed-session coverage and aborts
   const files = {stdout:path.join(dir,'driver-out'),stderr:path.join(dir,'driver-err'),pid:path.join(dir,'driver-pid')};
   const result = await turn(process.execPath, [fileURLToPath(new URL('bench.mjs',import.meta.url)),
     '--source','analysis','--implementation-source','implementation','--repeats','2','--tasks','rename',
-    '--output-dir',output], {...process.env,ROOK_HOME:home,ROOK_LOG:'error'}, files, 90000);
+    '--output-dir',output,'--output-tokens','4096'], {...process.env,ROOK_HOME:home,ROOK_LOG:'error'}, files, 90000);
   assert.equal(result.status, 1, result.stderr);
   const report = JSON.parse(fs.readFileSync(path.join(output,'report.json'),'utf8'));
+  assert.equal(report.limits.output_tokens_per_generation, 4096);
+  const binary = path.join(output, `rook${process.platform === 'win32' ? '.exe' : ''}`);
+  assert.equal(fs.statSync(binary).size, report.binary_bytes);
+  const hash = createHash('sha256');
+  for await (const chunk of fs.createReadStream(binary, {highWaterMark:64*1024})) hash.update(chunk);
+  assert.equal(hash.digest('hex'), report.binary_sha256);
   assert.equal(report.runs.length, 2, 'later repetitions must not retry the failed real run');
   const failed = report.runs[1];
   assert.equal(failed.arm, 'routed'); assert.equal(failed.stages.length, 1);

@@ -4096,3 +4096,51 @@ The active pair's authoritative report is
 At this block's commit it is still on fixed analysis; continue the confirmed
 live process rather than starting another pair. The report and per-stage PID
 files identify its fresh workspaces/stores and native process state.
+
+## Real phase comparison with an available Gemma target
+
+The first new pair is now terminal: runner exit 1, because fixed analysis did not
+create DESIGN.txt and fixed implementation ended `looping`. Its independent
+quality check failed. The routed stages both exited 0, passed planning and
+quality, and their final native receipt reports `google/gemma-4-e4b` in the
+implementation phase. Both counted receipt journals are complete; USD totals
+remain unknown because configured rates are absent. The invalid fixed planning
+protocol prevents treating its timing as a successful paired workflow comparison.
+
+[The comparison note](pi-phase-comparison-20261003.md) retains exact stage exits,
+token subtotals, source receipts, failure observations and caveats. A three-task
+suite (`rename,ports,money`, one repetition) is active in
+`target/phase-bench-8bd23576-7847-481b-8220-061ecc85b7ab/report.json` with log
+`target/pi-phase-gemma-suite-20261003.log`. It reuses the unchanged protocol and
+external oracles. Do not start a duplicate while that owned stage is live. The
+main comparison remains in progress; the overall goal is not complete.
+
+The suite's fixed rename arm subsequently passed both native stages (exit 0),
+planning and the independent oracle. The first CI attempt for this comparison
+block exited 1 because Windows denied replacing `target/debug/rook.exe` while
+the active benchmark held it. Preserve `target/pi-phase-gemma-comparison-ci.log`
+and rerun the entire gate after the suite is terminal; this is not a green gate
+and does not justify restarting a live benchmark. No production store changes
+were made.
+
+The three-task suite is now terminal, exit 1: rename's routed planning changed
+the seed, and money's fixed planning failed. Only ports has an eligible paired
+workflow; fixed passed the independent oracle, while routed reached eight steps
+and failed invalid-input rejection. All six native arms and their exact outcomes
+are retained in the [comparison note](pi-phase-comparison-20261003.md) and
+[bounded committed summary](pi-phase-comparison-20261003.json). Counted journals
+are complete, actual implementation receipts report Gemma, and USD remains
+unknown because every receipt is unpriced. This is not a green native benchmark
+or proof of monetary savings.
+
+The first malformed-write observation immediately followed a receipt at the
+1536-token output cap. The runner now supports an explicit common 512..8192 cap
+while preserving its default; the next native profile will use 4096 without
+relaxing the planning/quality oracles. A source CLI snapshot, copied with a
+128 MiB admission/64 KiB buffers and recorded size/hash/version, also prevents
+Windows build locks and mid-suite executable changes. Focused Node tests exited
+0, 13/13 (`target/pi-phase-gemma-runner-final-tests.log`). After the old native
+executable was released, full `cargo xtask ci` exited 0 in 479.1 seconds,
+including fmt, Clippy, frontend builds, workspace tests and doctests
+(`target/pi-phase-gemma-comparison-final-ci.log`). No production storage changes
+were made. Main phase comparison and the full goal remain in progress.

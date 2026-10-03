@@ -14,16 +14,18 @@ for (let n = 2; n < process.argv.length; n += 2) {
   assert(!options.has(process.argv[n]), 'duplicate option');
   options.set(process.argv[n], process.argv[n + 1]);
 }
-for (const name of options.keys()) assert(['--source', '--implementation-source', '--implementation-model', '--repeats', '--tasks', '--window', '--output-dir'].includes(name), `unknown option ${name}`);
+for (const name of options.keys()) assert(['--source', '--implementation-source', '--implementation-model', '--repeats', '--tasks', '--window', '--output-dir', '--output-tokens'].includes(name), `unknown option ${name}`);
 assert(options.has('--source'), '--source must name a configured model');
 assert(options.has('--implementation-source') !== options.has('--implementation-model'), 'choose one implementation source or physical model');
 const repeats = Number(options.get('--repeats') ?? 2);
 const window = Number(options.get('--window') ?? 32768);
+const outputTokens = Number(options.get('--output-tokens') ?? 1536);
 assert(Number.isInteger(repeats) && repeats >= 1 && repeats <= 5, 'repeats must be 1..5');
 assert(Number.isInteger(window) && window >= 16384 && window <= 262144, 'window must be 16384..262144');
+assert(Number.isInteger(outputTokens) && outputTokens >= 512 && outputTokens <= 8192, 'output-tokens must be 512..8192');
 const selected = options.has('--tasks') ? tasks.filter(task => options.get('--tasks').split(',').includes(task.name)) : tasks;
 assert(selected.length && (!options.has('--tasks') || options.get('--tasks').split(',').every(name => tasks.some(task => task.name === name))), 'unknown task');
-const rook = path.resolve(`target/debug/rook${process.platform === 'win32' ? '.exe' : ''}`);
+let rook = path.resolve(`target/debug/rook${process.platform === 'win32' ? '.exe' : ''}`);
 assert(fs.existsSync(rook), 'build rook-cli before running the comparison');
 function execute(args, env, timeout = 60000) {
   return spawnSync(rook, args, { env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout,
@@ -60,6 +62,36 @@ function table(name, values) {
 }
 const root = path.resolve(options.get('--output-dir') ?? `target/phase-bench-${randomUUID()}`);
 fs.mkdirSync(root);
+// Pin the actual executable so a build cannot replace it between measured
+// stages or fail on Windows because an inference holds target/debug/rook.exe.
+const binary = path.join(root, `rook${process.platform === 'win32' ? '.exe' : ''}`);
+const binaryLimit = 128 * 1024 * 1024;
+const inputBinary = fs.openSync(rook, 'r');
+let outputBinary;
+const binaryHash = createHash('sha256');
+let binaryBytes = 0;
+try {
+  const info = fs.fstatSync(inputBinary);
+  assert(info.isFile() && info.size > 0 && info.size <= binaryLimit, 'binary exceeds 128 MiB admission');
+  outputBinary = fs.openSync(binary, 'wx', info.mode & 0o777);
+  const buffer = Buffer.alloc(64 * 1024);
+  for (;;) {
+    const read = fs.readSync(inputBinary, buffer, 0, Math.min(buffer.length, binaryLimit - binaryBytes + 1), null);
+    if (!read) break;
+    assert(read <= binaryLimit - binaryBytes, 'binary grew past admitted copy budget');
+    binaryHash.update(buffer.subarray(0, read));
+    let wrote = 0;
+    while (wrote < read) wrote += fs.writeSync(outputBinary, buffer, wrote, read - wrote);
+    binaryBytes += read;
+  }
+  assert(binaryBytes === info.size, 'binary changed size while snapshotting');
+} finally {
+  fs.closeSync(inputBinary);
+  if (outputBinary !== undefined) fs.closeSync(outputBinary);
+}
+rook = binary;
+const pinnedVersion = execute(['--version'], process.env);
+assert(pinnedVersion.status === 0 && !pinnedVersion.error, 'pinned CLI snapshot did not execute');
 if (!options.has('--output-dir')) fs.writeFileSync('target/pi-phase-bench-root.txt', root);
 const revision = spawnSync('git', ['rev-parse', 'HEAD'], {encoding:'utf8', maxBuffer:4096, windowsHide:true});
 const scripts = ['bench.mjs', 'bench-tasks.mjs', 'bench-process.mjs'].map(name => {
@@ -68,11 +100,12 @@ const scripts = ['bench.mjs', 'bench-tasks.mjs', 'bench-process.mjs'].map(name =
   return fs.readFileSync(file);
 });
 const report = { version: 1, root, started_at: new Date().toISOString(), source_commit: revision.status === 0 ? revision.stdout.trim() : null,
-  rook_version: execute(['--version'], process.env).stdout.trim(), scripts_sha256: createHash('sha256').update(Buffer.concat(scripts)).digest('hex'),
+  rook_version: pinnedVersion.stdout.trim(), scripts_sha256: createHash('sha256').update(Buffer.concat(scripts)).digest('hex'),
   analysis_source: options.get('--source'), implementation_source: options.get('--implementation-source') ?? null,
   analysis_model: analysis.model, implementation_model: implementation.model, repeats, window,
+  binary_sha256: binaryHash.digest('hex'), binary_bytes: binaryBytes,
   protocol: 'two-stage: inspect/write DESIGN.txt without changing code, then implement the same task',
-  limits: { steps_per_turn: 8, output_tokens_per_generation: 1536, seconds_per_turn: 900, subagents: 0 }, runs: [] };
+  limits: { steps_per_turn: 8, output_tokens_per_generation: outputTokens, seconds_per_turn: 900, subagents: 0 }, runs: [] };
 function save() { fs.writeFileSync(path.join(root, 'report.json'), JSON.stringify(report, null, 2)); }
 save();
 runs: for (let repeat = 0; repeat < repeats; repeat++) for (const task of selected) {
@@ -86,7 +119,7 @@ runs: for (let repeat = 0; repeat < repeats; repeat++) for (const task of select
     report.runs.push(run); save();
     assert(!score(task, workspace).passed, 'the seeded defect must fail the independent oracle');
     const policy = { ...analysis, implementation_model: arm === 'routed' ? 'implementation' : '' };
-    const written = table('agent', { model: 'analysis', max_steps: 8, max_output_tokens: 1536,
+    const written = table('agent', { model: 'analysis', max_steps: 8, max_output_tokens: outputTokens,
       effort: 'none', plan_first: false, one_script: false, install_servers: false,
       max_subagents_per_turn: 0, max_parallel_subagents: 1, stream_idle_timeout_secs: 120 }) +
       table('sandbox', { stance: 'auto', command_timeout_secs: 30, max_output_bytes: 16384,
