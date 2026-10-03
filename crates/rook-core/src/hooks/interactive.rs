@@ -11,6 +11,14 @@ impl Drop for Drain {
     }
 }
 
+// Struct fields drop in declaration order. On cancellation the hook must be
+// killed before stdin closes: a waiting extension can otherwise consume EOF
+// and write a result during the gap before the process-group guard runs.
+struct Input {
+    _group: HookGroup,
+    stdin: Option<tokio::process::ChildStdin>,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Frame<'a> {
@@ -62,14 +70,16 @@ pub(super) async fn invoke(
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()?;
-    let _group = HookGroup(rook_contain::Group::holding(child.id()));
-    let mut stdin = child.stdin.take().ok_or_else(|| std::io::Error::other("missing hook stdin"))?;
+    let mut input_pipe = Input {
+        _group: HookGroup(rook_contain::Group::holding(child.id())),
+        stdin: Some(child.stdin.take().ok_or_else(|| std::io::Error::other("missing hook stdin"))?),
+    };
     let mut stdout =
         BufReader::new(child.stdout.take().ok_or_else(|| std::io::Error::other("missing hook stdout"))?);
     let mut err = child.stderr.take();
     let mut drain = Drain(tokio::spawn(async move { bounded(&mut err).await }));
     let patience = Duration::from_secs(config.timeout_secs);
-    send(&mut stdin, &input, patience).await?;
+    send(input_pipe.stdin.as_mut().unwrap(), &input, patience).await?;
     let source = Source::hook(config, ordinal);
     let mut consumed = 0usize;
     let mut finished = None;
@@ -98,7 +108,7 @@ pub(super) async fn invoke(
                 &FormAnswer { form_answer: &answer },
                 settings.max_update_bytes.saturating_add(128),
             )?;
-            send(&mut stdin, &bytes, patience).await?;
+            send(input_pipe.stdin.as_mut().unwrap(), &bytes, patience).await?;
         } else if let Some(raw) = frame.reply {
             finished = Some(serde_json::from_str::<HookReply>(raw.get())?);
             break;
@@ -106,8 +116,8 @@ pub(super) async fn invoke(
     }
     let reply =
         finished.ok_or_else(|| std::io::Error::other("hook stream frame limit reached before reply"))?;
-    deadline(patience, stdin.shutdown()).await?;
-    drop(stdin);
+    deadline(patience, input_pipe.stdin.as_mut().unwrap().shutdown()).await?;
+    drop(input_pipe.stdin.take());
     let mut remainder = Some(stdout);
     let (tail, status, stderr) =
         deadline(patience, async { Ok(tokio::join!(bounded(&mut remainder), child.wait(), &mut drain.0)) })

@@ -521,3 +521,21 @@ in 902.1 seconds (`target/reference-long-task-ci.log`). The owned endpoint check
 the actual summarizer input before returning a controlled summary; this proves
 engine mechanics, not the quality of a particular model on real multi-day work.
 No installed daemon or operator state was used. This closes the final row.
+
+## v0.11.0 release validation follow-up
+
+The first full hosted matrix reached Unix-only TUI fixtures with stale expectations:
+local `/schema-retries` settings were expected in model steering, daemon `/context`
+was expected to refuse the store, and branch review text was mistaken for a durable
+summary receipt. The fixtures now assert the current behavior and wait for the
+actual save acknowledgment. Ordinary Stop identity checks wait for withheld model
+requests; timeout diagnostics retain a bounded last socket frame.
+
+FreeBSD exposed a cancellation race in interactive hooks: dropping stdin before
+the process-group guard allowed EOF to be treated as an answer. One owning input
+struct drops its group before its pipe. The existing cancellation and answered-form
+tests both exit 0 (`target/release-hook-focused.log`); the focused ordinary Stop
+scenario exits 0 (`target/release-stop-focused.log`). Hosted job deadlines are
+45 minutes because cold Windows/macOS builds plus the expanded suite exceed 25.
+Full local and hosted gates are being repeated before tagging. Store formats,
+stable wire shapes and operator state are unaffected.

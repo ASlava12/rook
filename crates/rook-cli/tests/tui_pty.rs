@@ -652,6 +652,9 @@ fn branch_navigation_reviews_and_carries_a_pinned_summary_without_submitting_the
         pty.send("cd");
         pty.screen_showing(100, 30, "review branch summary");
         pty.send("\u{15}REVIEWED_BRANCH_SUMMARY\u{13}"); // Ctrl+u replaces; Ctrl+s confirms.
+        // The review already shows the target and edited text before the save
+        // finishes. Wait for the durable receipt before closing the process.
+        pty.screen_showing(100, 30, "Saved historical summary from");
         let screen = pty.screen_showing(100, 30, "TARGET_HISTORY").join("\n");
         assert!(
             screen.contains("UNSENT_MAIN_PROMPT"),
@@ -1005,11 +1008,7 @@ fn steering_during_a_tool_reaches_the_next_request(through_daemon: bool) {
     pty.send("/followup AFTER_THIS_TURN\r");
     pty.screen_showing(100, 30, "↩ AFTER_THIS_TURN");
     pty.send("/schema-retries 1\r");
-    pty.screen_showing(100, 30, "↩ /schema-retries 1");
-    if through_daemon {
-        // Receipt by rookd, rather than only the TUI's optimistic local echo.
-        pty.screen_showing(100, 30, "↩ /schema-retries 1");
-    }
+    pty.screen_showing(100, 30, "repair attempts: 1");
     let expected_color = if through_daemon {
         rook_llm::init_tls();
         pty.send("WITHDRAW_BEFORE_ACCEPTANCE\r");
@@ -1078,7 +1077,8 @@ fn steering_during_a_tool_reaches_the_next_request(through_daemon: bool) {
         !next["messages"].to_string().contains("/diagnostics"),
         "local export is not a model instruction"
     );
-    for text in ["EARLY_NOTE", expected_color, "/schema-retries 1", "QUOTE_DRAFT"] {
+    assert!(!next["messages"].to_string().contains("/schema-retries"), "local settings are not steering");
+    for text in ["EARLY_NOTE", expected_color, "QUOTE_DRAFT"] {
         assert!(
             messages.iter().any(|m| m["role"] == "user"
                 && m["content"].as_str().is_some_and(|body| body.lines().any(|line| line == text))),
@@ -1256,8 +1256,8 @@ fn a_second_window_opens_and_browses_while_the_daemon_holds_the_store() {
     pty.send("q");
     pty.screen_showing(100, 30, "^p commands");
     pty.send("/context\r");
-    let chat = pty.screen_showing(100, 30, "holds the store").join("\n");
-    assert!(chat.contains("holds the store"), "a slash command says why it cannot run here:\n{chat}");
+    let chat = pty.screen_showing(100, 30, "Start or resume a conversation").join("\n");
+    assert!(chat.contains("context ·"), "the daemon-backed context pane opens:\n{chat}");
     drop(daemon);
 }
 

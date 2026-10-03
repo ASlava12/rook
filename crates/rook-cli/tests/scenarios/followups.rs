@@ -925,16 +925,18 @@ async fn socket_event(
     socket: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     kind: &str,
 ) -> Value {
+    let mut last = String::new();
     for _ in 0..128 {
         let frame = tokio::time::timeout(std::time::Duration::from_secs(30), socket.next())
             .await
-            .expect("socket response timed out")
+            .unwrap_or_else(|_| panic!("socket response {kind:?} timed out; last event: {last}"))
             .expect("socket closed")
             .expect("socket read failed");
         let event: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
         if event["type"] == kind {
             return event;
         }
+        last = frame.to_text().unwrap().chars().take(512).collect();
     }
     panic!("socket never sent {kind}")
 }
@@ -1456,6 +1458,7 @@ fn socket_stop_rejects_an_earlier_ordinary_turn() {
             .unwrap();
     });
     let first = runtime.block_on(socket_event(&mut socket, "turn"))["id"].as_str().unwrap().to_owned();
+    assert!(model.next()["messages"].to_string().contains("first turn"));
     runtime.block_on(async {
         socket
             .send(tokio_tungstenite::tungstenite::Message::Text(
@@ -1476,6 +1479,9 @@ fn socket_stop_rejects_an_earlier_ordinary_turn() {
     });
     let second = runtime.block_on(socket_event(&mut socket, "turn"))["id"].as_str().unwrap().to_owned();
     assert_ne!(first, second);
+    // Keep the actual model reply withheld throughout the identity checks,
+    // rather than racing cancellation against prompt-hook startup.
+    assert!(model.next()["messages"].to_string().contains("second turn"));
     runtime.block_on(async {
         socket
             .send(tokio_tungstenite::tungstenite::Message::Text(
