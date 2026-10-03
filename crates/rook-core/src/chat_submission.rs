@@ -324,6 +324,12 @@ mod tests {
         assert_eq!(claim(&rook, Some(two), "same-id", "second", &options).unwrap().status, Status::Created);
         assert!(claim(&rook, Some(one), "another", "third", &options).is_err());
         assert_eq!(claim(&rook, Some(one), "same-id", "first", &options).unwrap().status, Status::Pending);
+        rook.config.work.max_messages = 0;
+        let empty = rook.start_session("zero quota").unwrap();
+        assert!(claim(&rook, Some(empty), "new-id", "new prompt", &options).is_err());
+        assert!(read(&rook, empty, "new-id", "new prompt", &options).unwrap().is_none());
+        assert_eq!(claim(&rook, Some(one), "same-id", "first", &options).unwrap().status, Status::Pending);
+        assert!(claim(&rook, Some(two), "new-id", "new prompt", &options).is_err());
         rook.delete_session(one).unwrap();
         assert!(read(&rook, one, "same-id", "first", &options).unwrap().is_none());
     }

@@ -1,0 +1,413 @@
+{
+  "evidence_root": "target/phase-bench-e3360e9b-b50c-4696-a48d-eb4455e48741",
+  "source_commit": "7e18b4075829073dfccd1f8a02356898320f668d",
+  "rook_version": "rook 0.10.0",
+  "scripts_sha256": "62c8f9ec82807ee88ef1215c0f461294dd45ecf15089856f460d77d54196a8eb",
+  "binary_sha256": "30c801183f6ac39dfff8cbe154bc53f4c82f7a1592c82c9d7cea3e3b39893dbe",
+  "binary_bytes": 58360832,
+  "analysis_model": "huihui-ornith-1.5-35b-a3b-abliterated-i1",
+  "implementation_model": "google/gemma-4-e4b",
+  "protocol": "two-stage: inspect/write DESIGN.txt without changing code, then implement the same task",
+  "repeats": 1,
+  "window": 32768,
+  "limits": {
+    "steps_per_turn": 8,
+    "output_tokens_per_generation": 4096,
+    "seconds_per_turn": 900,
+    "subagents": 0
+  },
+  "started_at": "2026-10-03T01:37:29.608Z",
+  "finished_at": "2026-10-03T02:07:32.913Z",
+  "abort_reason": null,
+  "cost_scope": "confirmed native token usage includes auxiliary receipts; configured USD rates absent; no measured dollar savings",
+  "eligible_tasks": [
+    "rename",
+    "money"
+  ],
+  "runs": [
+    {
+      "task": "rename",
+      "arm": "fixed",
+      "plan_protocol_valid": true,
+      "implementation_dispatch_verified": true,
+      "quality_passed": true,
+      "quality_exit": 0,
+      "wall_seconds": 244.24881699999997,
+      "stages": [
+        {
+          "stage": "analysis",
+          "exit": 2,
+          "stop": "completion_unchecked",
+          "seconds": 133.6918473,
+          "tokens": {
+            "input": 12050,
+            "output": 2640
+          }
+        },
+        {
+          "stage": "implementation",
+          "exit": 0,
+          "stop": "end_turn",
+          "seconds": 110.55696969999998,
+          "tokens": {
+            "input": 55684,
+            "output": 2345
+          }
+        }
+      ],
+      "tokens": {
+        "input": 67734,
+        "output": 4985,
+        "missing_turn_outcome": false
+      },
+      "receipt_tokens": {
+        "confirmed_receipts": 13,
+        "known_input": 67734,
+        "known_output": 4985
+      },
+      "journal_receipts_complete": true,
+      "receipt_model_tokens": {
+        "huihui-ornith-1.5-35b-a3b-abliterated-i1": {
+          "receipts": 13,
+          "input_tokens": 67734,
+          "output_tokens": 4985,
+          "auxiliary_receipts": 2
+        }
+      },
+      "cost_usd": null,
+      "coverage": {
+        "main_receipts": 11,
+        "auxiliary_receipts": 2,
+        "priced_receipts": 0,
+        "unpriced_receipts": 13,
+        "attempts_started": 13,
+        "attempts_completed": 13,
+        "attempts_failed": 0,
+        "attempts_pending": 0
+      }
+    },
+    {
+      "task": "rename",
+      "arm": "routed",
+      "plan_protocol_valid": true,
+      "implementation_dispatch_verified": true,
+      "quality_passed": false,
+      "quality_exit": 1,
+      "wall_seconds": 143.66429449999998,
+      "stages": [
+        {
+          "stage": "analysis",
+          "exit": 0,
+          "stop": "end_turn",
+          "seconds": 88.25826180000001,
+          "tokens": {
+            "input": 16449,
+            "output": 3117
+          }
+        },
+        {
+          "stage": "implementation",
+          "exit": 2,
+          "stop": "max_steps",
+          "seconds": 55.40603269999998,
+          "tokens": {
+            "input": 68642,
+            "output": 3959
+          }
+        }
+      ],
+      "tokens": {
+        "input": 85091,
+        "output": 7076,
+        "missing_turn_outcome": false
+      },
+      "receipt_tokens": {
+        "confirmed_receipts": 14,
+        "known_input": 85091,
+        "known_output": 7076
+      },
+      "journal_receipts_complete": true,
+      "receipt_model_tokens": {
+        "huihui-ornith-1.5-35b-a3b-abliterated-i1": {
+          "receipts": 2,
+          "input_tokens": 6312,
+          "output_tokens": 1970,
+          "auxiliary_receipts": 0
+        },
+        "google/gemma-4-e4b": {
+          "receipts": 12,
+          "input_tokens": 78779,
+          "output_tokens": 5106,
+          "auxiliary_receipts": 2
+        }
+      },
+      "cost_usd": null,
+      "coverage": {
+        "main_receipts": 12,
+        "auxiliary_receipts": 2,
+        "priced_receipts": 0,
+        "unpriced_receipts": 14,
+        "attempts_started": 14,
+        "attempts_completed": 14,
+        "attempts_failed": 0,
+        "attempts_pending": 0
+      }
+    },
+    {
+      "task": "ports",
+      "arm": "fixed",
+      "plan_protocol_valid": false,
+      "implementation_dispatch_verified": true,
+      "quality_passed": true,
+      "quality_exit": 0,
+      "wall_seconds": 674.9351101000001,
+      "stages": [
+        {
+          "stage": "analysis",
+          "exit": 2,
+          "stop": "max_steps",
+          "seconds": 558.6321712,
+          "tokens": {
+            "input": 52476,
+            "output": 9633
+          }
+        },
+        {
+          "stage": "implementation",
+          "exit": 0,
+          "stop": "end_turn",
+          "seconds": 116.30293890000007,
+          "tokens": {
+            "input": 61341,
+            "output": 1695
+          }
+        }
+      ],
+      "tokens": {
+        "input": 113817,
+        "output": 11328,
+        "missing_turn_outcome": false
+      },
+      "receipt_tokens": {
+        "confirmed_receipts": 14,
+        "known_input": 113817,
+        "known_output": 11328
+      },
+      "journal_receipts_complete": true,
+      "receipt_model_tokens": {
+        "huihui-ornith-1.5-35b-a3b-abliterated-i1": {
+          "receipts": 14,
+          "input_tokens": 113817,
+          "output_tokens": 11328,
+          "auxiliary_receipts": 1
+        }
+      },
+      "cost_usd": null,
+      "coverage": {
+        "main_receipts": 13,
+        "auxiliary_receipts": 1,
+        "priced_receipts": 0,
+        "unpriced_receipts": 14,
+        "attempts_started": 14,
+        "attempts_completed": 14,
+        "attempts_failed": 0,
+        "attempts_pending": 0
+      }
+    },
+    {
+      "task": "ports",
+      "arm": "routed",
+      "plan_protocol_valid": true,
+      "implementation_dispatch_verified": true,
+      "quality_passed": true,
+      "quality_exit": 0,
+      "wall_seconds": 191.4646124,
+      "stages": [
+        {
+          "stage": "analysis",
+          "exit": 0,
+          "stop": "end_turn",
+          "seconds": 132.21868889999996,
+          "tokens": {
+            "input": 16916,
+            "output": 4386
+          }
+        },
+        {
+          "stage": "implementation",
+          "exit": 0,
+          "stop": "end_turn",
+          "seconds": 59.24592350000003,
+          "tokens": {
+            "input": 50668,
+            "output": 4350
+          }
+        }
+      ],
+      "tokens": {
+        "input": 67584,
+        "output": 8736,
+        "missing_turn_outcome": false
+      },
+      "receipt_tokens": {
+        "confirmed_receipts": 12,
+        "known_input": 67584,
+        "known_output": 8736
+      },
+      "journal_receipts_complete": true,
+      "receipt_model_tokens": {
+        "huihui-ornith-1.5-35b-a3b-abliterated-i1": {
+          "receipts": 2,
+          "input_tokens": 6399,
+          "output_tokens": 3190,
+          "auxiliary_receipts": 0
+        },
+        "google/gemma-4-e4b": {
+          "receipts": 10,
+          "input_tokens": 61185,
+          "output_tokens": 5546,
+          "auxiliary_receipts": 2
+        }
+      },
+      "cost_usd": null,
+      "coverage": {
+        "main_receipts": 10,
+        "auxiliary_receipts": 2,
+        "priced_receipts": 0,
+        "unpriced_receipts": 12,
+        "attempts_started": 12,
+        "attempts_completed": 12,
+        "attempts_failed": 0,
+        "attempts_pending": 0
+      }
+    },
+    {
+      "task": "money",
+      "arm": "fixed",
+      "plan_protocol_valid": true,
+      "implementation_dispatch_verified": true,
+      "quality_passed": true,
+      "quality_exit": 0,
+      "wall_seconds": 364.81102610000016,
+      "stages": [
+        {
+          "stage": "analysis",
+          "exit": 0,
+          "stop": "end_turn",
+          "seconds": 239.634375,
+          "tokens": {
+            "input": 18739,
+            "output": 3785
+          }
+        },
+        {
+          "stage": "implementation",
+          "exit": 0,
+          "stop": "end_turn",
+          "seconds": 125.17665110000013,
+          "tokens": {
+            "input": 59468,
+            "output": 2776
+          }
+        }
+      ],
+      "tokens": {
+        "input": 78207,
+        "output": 6561,
+        "missing_turn_outcome": false
+      },
+      "receipt_tokens": {
+        "confirmed_receipts": 13,
+        "known_input": 78207,
+        "known_output": 6561
+      },
+      "journal_receipts_complete": true,
+      "receipt_model_tokens": {
+        "huihui-ornith-1.5-35b-a3b-abliterated-i1": {
+          "receipts": 13,
+          "input_tokens": 78207,
+          "output_tokens": 6561,
+          "auxiliary_receipts": 2
+        }
+      },
+      "cost_usd": null,
+      "coverage": {
+        "main_receipts": 11,
+        "auxiliary_receipts": 2,
+        "priced_receipts": 0,
+        "unpriced_receipts": 13,
+        "attempts_started": 13,
+        "attempts_completed": 13,
+        "attempts_failed": 0,
+        "attempts_pending": 0
+      }
+    },
+    {
+      "task": "money",
+      "arm": "routed",
+      "plan_protocol_valid": true,
+      "implementation_dispatch_verified": true,
+      "quality_passed": false,
+      "quality_exit": 1,
+      "wall_seconds": 182.02433049999993,
+      "stages": [
+        {
+          "stage": "analysis",
+          "exit": 0,
+          "stop": "end_turn",
+          "seconds": 126.5973030999999,
+          "tokens": {
+            "input": 12556,
+            "output": 3916
+          }
+        },
+        {
+          "stage": "implementation",
+          "exit": 0,
+          "stop": "end_turn",
+          "seconds": 55.42702740000002,
+          "tokens": {
+            "input": 49902,
+            "output": 4095
+          }
+        }
+      ],
+      "tokens": {
+        "input": 62458,
+        "output": 8011,
+        "missing_turn_outcome": false
+      },
+      "receipt_tokens": {
+        "confirmed_receipts": 11,
+        "known_input": 62458,
+        "known_output": 8011
+      },
+      "journal_receipts_complete": true,
+      "receipt_model_tokens": {
+        "huihui-ornith-1.5-35b-a3b-abliterated-i1": {
+          "receipts": 2,
+          "input_tokens": 6623,
+          "output_tokens": 3403,
+          "auxiliary_receipts": 0
+        },
+        "google/gemma-4-e4b": {
+          "receipts": 9,
+          "input_tokens": 55835,
+          "output_tokens": 4608,
+          "auxiliary_receipts": 2
+        }
+      },
+      "cost_usd": null,
+      "coverage": {
+        "main_receipts": 9,
+        "auxiliary_receipts": 2,
+        "priced_receipts": 0,
+        "unpriced_receipts": 11,
+        "attempts_started": 11,
+        "attempts_completed": 11,
+        "attempts_failed": 0,
+        "attempts_pending": 0
+      }
+    }
+  ]
+}

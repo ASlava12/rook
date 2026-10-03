@@ -1278,6 +1278,9 @@ impl Store {
                 None => None,
             };
             if existing.is_none() {
+                if maximum_items == 0 {
+                    return Err(StoreError::Encoding("session admits no new prompt claims".into()));
+                }
                 let mut count = 0usize;
                 for entry in kv.range(prefix..)? {
                     let (found, _) = entry?;

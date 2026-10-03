@@ -20,6 +20,32 @@ fn tmp_store() -> (tempfile::TempDir, Store) {
 }
 
 #[test]
+fn zero_prompt_claim_quota_refuses_new_keys_but_keeps_saved_retries_readable() {
+    let (dir, store) = tmp_store();
+    let session = rook_store::new_session_id();
+    store.create_session(&SessionMeta::new(session, "quota", "/tmp", 0)).unwrap();
+    let prefix = format!("chat-prompt/session/{session:032x}/");
+    let first = format!("{prefix}first");
+    let second = format!("{prefix}second");
+
+    assert!(store.kv_claim_session_limited(session, &first, &prefix, b"first", 32, 0).is_err());
+    assert!(store.kv_get(&first).unwrap().is_none(), "zero quota must not publish its first key");
+    assert_eq!(store.kv_claim_session_limited(session, &first, &prefix, b"first", 32, 1).unwrap(), None);
+    assert!(store.kv_claim_session_limited(session, &second, &prefix, b"second", 32, 1).is_err());
+    assert!(store.kv_get(&second).unwrap().is_none());
+    assert_eq!(
+        store.kv_claim_session_limited(session, &first, &prefix, b"replacement", 32, 0).unwrap(),
+        Some(b"first".to_vec()),
+        "a reduced count quota must not replace or hide the saved retry receipt"
+    );
+    assert!(store.kv_claim_session_limited(session, &second, &prefix, b"second", 32, 0).is_err());
+    drop(store);
+    let reopened = Store::open(dir.path()).unwrap();
+    assert_eq!(reopened.kv_get(&first).unwrap(), Some(b"first".to_vec()));
+    assert!(reopened.kv_get(&second).unwrap().is_none());
+}
+
+#[test]
 fn session_key_pages_are_bounded_exclusive_and_survive_deleted_cursors() {
     let (_dir, store) = tmp_store();
     for id in [0, 2, 4, 6, u128::MAX] {

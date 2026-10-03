@@ -130,3 +130,66 @@ failed-session coverage and abort behavior. Invalid caps are refused before
 configuration/evidence creation. These controlled tests are harness evidence,
 not real-model quality or savings measurements. The real higher-budget profile
 remains outstanding; phase adoption is still in progress.
+
+## Three-task suite: 4096-token profile
+
+The higher-budget profile is terminal, runner exit **1**. It kept the same
+three tasks, prompts, eight-step limit and independent planning/quality checks;
+only the common output cap changed to 4096. Do not pool these results with the
+1536-token profile. All twelve native stages finished; there was no provider or
+process abort. Fixed ports violated the planning protocol, causing the runner's
+nonzero exit. A native exit 0 does not establish task correctness, and a valid
+plan does not turn native exit 2 into a successful completion.
+
+Authoritative report:
+`target/phase-bench-e3360e9b-b50c-4696-a48d-eb4455e48741/report.json`.
+Log: `target/pi-phase-gemma-4096-20261003.log`.
+[The committed bounded summary](pi-phase-comparison-4096-20261003.json) records
+the source commit `7e18b4075829073dfccd1f8a02356898320f668d`, script hash,
+58,360,832-byte CLI snapshot and its SHA-256, limits, exact stops and coverage.
+No measured stage from this profile remains live.
+
+| Task / arm | Native exits (analysis / implementation) | Plan valid | Oracle | Wall seconds | Reported input / output tokens |
+|---|---|---|---|---|---|
+| rename / fixed | 2 / 0 | Yes | Pass | 244.249 | 67,734 / 4,985 |
+| rename / routed | 0 / 2 | Yes | Fail | 143.664 | 85,091 / 7,076 |
+| ports / fixed | 2 / 0 | No | Pass | 674.935 | 113,817 / 11,328 |
+| ports / routed | 0 / 0 | Yes | Pass | 191.465 | 67,584 / 8,736 |
+| money / fixed | 0 / 0 | Yes | Pass | 364.811 | 78,207 / 6,561 |
+| money / routed | 0 / 0 | Yes | Fail | 182.024 | 62,458 / 8,011 |
+
+Rename and money have valid planning and verified dispatch in both arms, so
+their observed workflow comparisons are eligible. Fixed rename's analysis
+stopped `completion_unchecked` despite writing a valid DESIGN.txt; routed
+rename reached `max_steps`, wrote invalid JavaScript containing display line
+numbers/literal escape text, and failed the external oracle. Money's routed
+implementation stopped normally but rejected the valid amount `0`, failing
+the independent oracle. Fixed money passed. Fixed ports reached `max_steps`
+during planning and did not satisfy the protocol; its eventual implementation
+pass does not repair that missing planning evidence. Routed ports passed both
+native stages and the oracle, but the pair is excluded from controlled workflow
+comparisons because its fixed counterpart did not satisfy planning.
+
+Journals match all counted receipts (13, 14, 14, 12, 13 and 11 respectively).
+All counted physical attempts completed; failed/pending admissions are zero.
+All routed implementation targets are verified from native saved dispatch.
+Per-model confirmed token subtotals include auxiliary requests and are retained
+in the summary. Every receipt is unpriced: configured rates are absent, so USD
+is unknown, not zero. Never add cumulative coverage snapshots, stage tokens,
+receipt totals and attempt totals together.
+
+These measurements give a negative result for adopting this candidate as an
+automatic implementation default: both eligible higher-budget pairs fail
+routed correctness. Their shorter observed wall times are not equivalent
+completed work or evidence of savings. Keep routing opt-in and the existing
+default unchanged. The small fixed-first samples, model loading, caches,
+different tokenizers and concurrent local validation limit timing comparisons.
+The completed experiments retain failures rather than retrying until a pass;
+monetary savings and general model superiority remain unmeasured.
+
+The combined final adoption/zero-quota audit gate exited 0: `cargo xtask ci`,
+545.1 seconds (`target/pi-claim-zero-final-ci.log`), and `cargo xtask compaction`
+(`target/pi-claim-zero-compaction.log`, 4.02 MiB disk, 5.8x end-to-end).
+These successful source/storage gates do not change either real suite's exit 1
+or failed model quality. The [scope audit](pi-adoption-completion-20261003.md)
+records completion of the evaluation with these limitations preserved.

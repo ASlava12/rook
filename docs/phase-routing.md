@@ -316,4 +316,14 @@ rename oracle, but its second turn exited 2 at the step limit. The routed source
 could not load the target and returned HTTP 400. Its saved ledger correctly
 retains the failed target attempt; the missing final outcome is not zero usage.
 This failed pilot establishes neither paired quality nor savings or a latency
-improvement. A working target and completed paired cases are still required.
+improvement.
+
+A subsequent available Gemma target completed three-task suites at common 1536
+and 4096 output-token caps. The [comparison note](research/pi-phase-comparison-20261003.md)
+and separate committed summaries retain all cases, exact native exits,
+independent quality/planning checks, wall times and per-model token coverage.
+Both runners exited 1 due invalid planning cases. At the higher cap the eligible
+rename and money pairs passed fixed-source quality but failed routed quality;
+shorter observed failures do not establish equivalent completed work or savings.
+Configured prices are absent, so USD remains unknown. Routing stays opt-in;
+these measurements do not justify making this candidate an automatic default.

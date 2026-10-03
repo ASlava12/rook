@@ -2136,8 +2136,50 @@ fn first_socket_prompt_retries_join_then_acknowledge_without_another_session_or_
     drop(named_retry);
     drop(after);
     drop(daemon);
+    let empty_session = rook_store::new_session_id();
+    {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        store
+            .create_session(&rook_store::SessionMeta::new(
+                empty_session,
+                "zero receipt quota",
+                rook.workspace.path().to_str().unwrap(),
+                rook_store::now_unix(),
+            ))
+            .unwrap();
+    }
+    rook.write_config(&format!(
+        "{}\n[work]\nmax_messages=0\n",
+        config(&model.url, "initial", "ask", rook.workspace.path())
+    ));
+    let daemon = Daemon::start(&rook);
+    let address = format!("{}/api/chat", daemon.address.replacen("http", "ws", 1));
+    let mut limited = runtime.block_on(async {
+        let (mut socket, _) = tokio_tungstenite::connect_async(&address).await.unwrap();
+        socket.send(tokio_tungstenite::tungstenite::Message::Text(named.to_string().into())).await.unwrap();
+        socket
+    });
+    assert_eq!(runtime.block_on(socket_event(&mut limited, "done"))["stopped"], "already_admitted");
+    runtime.block_on(async {
+        limited
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                json!({"type":"prompt","session":rook_store::format_session_id(empty_session),
+                    "text":"REFUSED_ZERO_QUOTA_TASK","id":"zero-new"})
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+    });
+    let refused = runtime.block_on(socket_event(&mut limited, "failed"));
+    assert!(refused["message"].as_str().unwrap().contains("no new prompt claims"), "{refused}");
+    assert!(model.requests.try_recv().is_err(), "a zero-quota refusal and saved retry do not run inference");
+    drop(limited);
+    drop(daemon);
     let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
-    assert_eq!(store.list_sessions().unwrap().len(), 1);
+    assert_eq!(store.list_sessions().unwrap().len(), 2);
+    assert!(store.events(empty_session, 0, 10).unwrap().is_empty());
+    assert!(store.kv_get(&format!("chat-prompt/session/{empty_session:032x}/zero-new")).unwrap().is_none());
     let id = rook_store::parse_session_id(&session).unwrap();
     assert_eq!(
         store

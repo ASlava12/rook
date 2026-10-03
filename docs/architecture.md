@@ -306,7 +306,9 @@ a conflicting retry is rejected. A turn that ended before admission requires
 recovery inspection before a new request. Removing a session removes its claim. Frames
 without an ID keep their legacy behavior.
 Named-session claims share the configured `work.max_messages` receipt limit;
-existing IDs remain readable when the limit is reached.
+zero refuses every new claim, including the first in an empty session. Existing
+IDs remain readable when the limit is reached or lowered to zero, including
+after daemon restart; a saved retry must not trigger another model turn.
 After ordinary prompt admission commits, core reports its caller ID with the
 execution turn. The daemon adds optional `prompt_id` to the existing `turn`
 frame and retains it through bounded replay eviction. CLI, TUI and browser

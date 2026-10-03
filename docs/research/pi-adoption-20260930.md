@@ -4,6 +4,13 @@ Implementation tracker for [the Pi review](pi-reference-review-20260930.md).
 Source: Pi `ee602414c703be8da722ec56de7f2399e62581ac`; starting Rook:
 `f62c540`. This tracks the full requested transfer, not just the first patch.
 
+All nine main capabilities are now complete. The
+[final scope audit](pi-adoption-completion-20261003.md) maps the original
+requirements and user follow-ups to retained evidence, including negative
+experiment outcomes and unknown monetary prices. Earlier "next"/"pending"
+paragraphs below retain the history of each block; the table and final audit
+describe the current state.
+
 | Capability | State | Completion evidence needed |
 |---|---|---|
 | Bounded live delivery and snapshot recovery | Complete | Queue/replay/input limits, WebSocket backpressure, atomic recovery, current controls, PTY reconnect/goal checks, browser form preservation and full CI passed |
@@ -13,7 +20,7 @@ Source: Pi `ee602414c703be8da722ec56de7f2399e62581ac`; starting Rook:
 | Inline tool cards | Complete | Compact/live/saved results, attributed errors/duration/diffs and command/search/MCP facts, explicit bounded browser pixels, terminal text fallback, local/daemon and full CI passed |
 | Context provenance inspector | Complete | Request-specific sources and loaded skills, deferred MCP tools in CLI/API/TUI/browser; bounded notes, old-note compatibility, local/daemon and full CI passed |
 | Local HTML export | Complete | Inclusive saved ranges, bounded/escaped/attributed output, no overwrite/publication, CLI/REPL/local/shared TUI parity, actual browser download/rendering and full CI passed |
-| Opt-in phase-based model routing | In progress | Static policy, durable branch transition, historical receipts and compatible image/scoped-state handoffs implemented; native continuation/reopen/fork and automatic fallback verified; auxiliary/branch-summary receipts, physical-attempt lifecycle, saved rate estimates and frozen delegated aggregation implemented with explicit unknown facts; actual local/shared TUI and browser phase interactions verified; real comparison runner and failed target-availability pilot retained; finish completed same-task quality/cost/latency comparison without claiming unmeasured savings |
+| Opt-in phase-based model routing | Complete | Static policy, durable branch transition, historical receipts and compatible image/scoped-state handoffs; native continuation/reopen/fork/fallback, auxiliary/physical/delegated accounting and actual local/shared TUI/browser interactions verified; completed real same-task quality/token-usage/latency comparisons retain negative outcomes and explicitly unknown USD; no automatic candidate default or unmeasured savings claim; full CI passed |
 | Declarative extension UI | Complete | Opt-in bounded source-owned status/progress/forms/result/clear reports; persistent local/shared TUI and browser panels, legacy text fallback, cancellation/reconnect/reopen/fork restoration, before-copy count/byte bounds and actual frontend interactions verified; full CI/compaction passed |
 
 The regular-scrollback mechanism has been assessed with a bounded prototype and
@@ -4144,3 +4151,53 @@ executable was released, full `cargo xtask ci` exited 0 in 479.1 seconds,
 including fmt, Clippy, frontend builds, workspace tests and doctests
 (`target/pi-phase-gemma-comparison-final-ci.log`). No production storage changes
 were made. Main phase comparison and the full goal remain in progress.
+
+## Higher-budget comparison and prompt-claim quota audit
+
+The 4096-token real-model suite has now finished, runner exit **1**, with all
+twelve native stages retained and no provider/process abort. Fixed ports failed
+the planning protocol. Rename and money satisfy planning/verified dispatch in
+both arms, but routed implementations fail their independent correctness
+oracles: malformed JavaScript at the rename step bound and rejection of valid
+zero money despite native exit 0. Routed ports passes, but its fixed planning
+failure excludes that pair. See the [comparison note](pi-phase-comparison-20261003.md)
+and [new bounded summary](pi-phase-comparison-4096-20261003.json) for exact exits,
+times, tokens, binary/script hashes and receipt coverage. The earlier profiles
+and failures remain separate and unchanged.
+
+All counted journals are complete, physical attempts have zero failed/pending
+admissions and implementation dispatch is verified. USD remains explicitly
+unknown because configured prices are absent. The eligible pairs provide a
+negative correctness result for making Gemma an automatic implementation
+default; shorter unsuccessful runs do not establish equivalent completion or
+savings. Routing remains opt-in. No new measurement is scheduled to discard
+these failures, and no native stage from this profile is still live.
+
+The completion audit also found that the bounded named-session claim helper
+admitted the first key in an empty prefix when `work.max_messages=0`. It now
+refuses new claims before scanning/publishing, while existing IDs remain
+readable at the lowered zero quota. This changes no schema, event layout or
+wire format. Focused store and core regressions exited 0
+(`target/pi-claim-zero-focused.log`, `target/pi-claim-zero-core.log`): refusal,
+no saved key, unchanged existing bytes and reopen behavior are covered. The
+actual daemon retry scenario exited 0 (`target/pi-claim-zero-native.log`),
+verifying an acknowledged saved retry after restart, zero-quota refusal in a
+fresh named session, no model request and no UserMessage/claim persisted there.
+
+Mandatory `cargo xtask ci` exited **0** in 545.1 seconds
+(`target/pi-claim-zero-final-ci.log`), including fmt, Clippy, frontend builds,
+workspace tests and doctests. `cargo xtask compaction` exited **0**
+(`target/pi-claim-zero-compaction.log`): 23.31 MiB logical, 5.29 MiB distinct,
+0.14 MiB warm objects, 4.02 MiB disk, 37.1x dictionary and 5.8x end-to-end
+compression. Published storage claims and formats remain unchanged. Rust sources
+stayed unchanged during the gate.
+
+The [final scope audit](pi-adoption-completion-20261003.md) maps all original main
+requirements, optional experiment assessments and both user follow-ups to
+concrete evidence. The phase row is now Complete: all nine main capabilities
+are complete. Failed real-model planning/quality is retained, not counted as a
+green native benchmark. Configured prices remain absent and no monetary savings
+are claimed. There is no remaining mandatory transfer implementation or planned
+retry-to-pass measurement; possible production terminal adapters retain their
+separate future evidence requirements. This closes the full requested transfer
+after the completed block is committed and its working tree is verified clean.
