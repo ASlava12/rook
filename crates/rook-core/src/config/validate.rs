@@ -7,6 +7,7 @@ impl Config {
     /// so a broken file can still be inspected and repaired.
     pub fn validation_errors(&self) -> Vec<String> {
         let mut errors = Vec::new();
+        errors.extend(self.price_catalog.errors());
         if self.hooks.iter().any(|hook| hook.ui_stream && !hook.ui) {
             errors.push("hooks.ui_stream requires ui = true".into());
         }

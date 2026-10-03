@@ -1,5 +1,8 @@
 # Architecture
 
+Public operator price references and their frontend/identity contract are in
+[model-price-references.md](model-price-references.md). They are never a turn dependency.
+
 [English](architecture.md) · [Русский](ru/architecture.md)
 
 ## Extension reports

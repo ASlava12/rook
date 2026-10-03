@@ -7,6 +7,65 @@ use anyhow::{Context, Result};
 use rook_core::Rook;
 use std::path::PathBuf;
 
+pub(crate) fn cmd_prices(
+    json: bool,
+    source: Option<String>,
+    refresh: bool,
+    apply: Option<String>,
+    interactive: bool,
+) -> Result<()> {
+    if interactive {
+        anyhow::ensure!(!json, "the price form is interactive; omit --json");
+        return super::prices::run(source);
+    }
+    let path = rook_core::paths::config_file();
+    let cache = rook_core::paths::home().join("cache");
+    if refresh {
+        let settings = rook_core::Config::load()?.price_catalog;
+        eprintln!("Refreshing {} (at most {}s)…", rook_core::price_catalog::SOURCE, settings.timeout_secs);
+        tokio::runtime::Runtime::new()?
+            .block_on(rook_core::price_catalog::refresh(&cache, settings))
+            .map_err(anyhow::Error::msg)?;
+    }
+    let vault = rook_core::Vault::load()?;
+    let listing = if let Some(token) = apply {
+        rook_core::price_catalog::apply(&path, &cache, &vault, source.as_deref().unwrap_or_default(), &token)
+    } else {
+        rook_core::price_catalog::inspect(&path, &cache, &vault, source.as_deref())
+    }
+    .map_err(anyhow::Error::msg)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&listing)?);
+    } else {
+        println!(
+            "{} · observed {:?} · age {:?}s · stale {}",
+            listing.source_url, listing.observed_at, listing.age_secs, listing.stale
+        );
+        for notice in &listing.notices {
+            println!("{notice}");
+        }
+        for model in &listing.models {
+            println!(
+                "\n{} · {} · {}\nconfigured {}\nreference {}\n{}",
+                model.source,
+                model.model,
+                model.provider.as_deref().unwrap_or("unknown"),
+                super::prices::rates(model.configured),
+                model.reference.map(super::prices::rates).unwrap_or_else(|| "unknown".into()),
+                model.reason
+            );
+            if let Some(token) = &model.review_token {
+                println!(
+                    "missing: {}\napply with: rook prices --source {:?} --apply {token}",
+                    model.apply_fields.join(", "),
+                    model.source
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn cmd_init(workspace: Option<PathBuf>) -> Result<()> {
     let rook = Rook::open(workspace)?;
     rook.config.save().ok();

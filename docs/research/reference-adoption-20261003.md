@@ -12,7 +12,7 @@ Reference commits identify mechanisms, not code to copy wholesale.
 | Tool cycles without progress | Done | Bounded execution companions, content progress/live job and child checks, alternating calls/argument and background-ID churn, actual compaction/reopen and worker/new-instruction scopes; native CLI/daemon durable counts; CI and compaction exit 0 |
 | Browser rendering batches | Done | Bounded frame batching, final/error/Stop flush, socket/session/turn/view ownership and history races; actual Edge 1,134 to 36 parses with full fenced text; drafts/questions/queue receipts, Node/assets tests and CI exit 0 |
 | ACP child/compaction/error events | Done | Negotiated v1 object capabilities, directed tasks/answers, child editor bridges/states and restricted controls, bounded recovery and durable compaction IDs; actual owned wire/core/transport and reopen fixtures; CI and compaction exit 0 |
-| Model/price reference catalog | Pending | Explicit refresh and bounded cache, canonical/cloud identity, source/age, operator-applied rates, live/manual precedence, offline/account/corrupt-cache tests, frontend parity and CI |
+| Model/price reference catalog | Done | Bounded explicit models.dev refresh/offline cache, exact direct-cloud identity and source/age, reviewed missing-rate application across CLI/terminal/browser/daemon, manual/live precedence and frozen costs; reached bounds/contention, account/environment/cache/alias/reopen tests; CI and compaction exit 0 |
 | Delegated worktree recovery | Pending | Read-only diagnosis plus explicit restore, registered checkout identity, preservation of recreated/dirty files, leases/path/platform bounds, local/daemon checks and CI |
 | Delegation progress persistence audit | Pending | Measured write/queue behavior under streamed updates, no full-history snapshots, durable critical receipts, bounded delivery and CI |
 | Rooted runtime reuse audit | Pending | MCP/LSP/approval reuse, generation invalidation, execution-root trust isolation and delivery responsiveness during background preparation; fixes if needed and CI |
@@ -181,15 +181,15 @@ formats were unchanged, so a compaction remeasurement was not required.
 
 ## Continuation notes for the remaining scope
 
-Five behavioral rows are Done; five rows remain: the catalog, worktree recovery
-and the three audits. The next block is the model/price reference catalog.
-Do not mark the entire goal complete after this finished ACP block.
+Six behavioral rows are Done; four rows remain: worktree recovery and the three
+audits. The next block is delegated worktree recovery.
+Do not mark the entire goal complete after this finished catalog block.
 
 The completed guard lives in `agent/tool_cycles.rs`. Its execution companion is
 separate from prompt compaction and commits with operation completion; keep the
 run/root/generation boundary and don't replace content proof with tool names or
-timestamps in later runtime/delegation work. The catalog and worktree recovery
-are still Pending; no audit is implicitly closed by the ACP transport changes.
+timestamps in later runtime/delegation work. Worktree recovery is still Pending;
+no audit is implicitly closed by ACP transport or catalog changes.
 
 The ACP block uses the inspected v1 capability shapes:
 `clientCapabilities.subagents` and `clientCapabilities.session.compaction`
@@ -274,11 +274,84 @@ exited 0 (`target/reference-acp-compaction.log`); corpus measurements remain
 23.31 MiB logical, 5.29 MiB distinct, 0.14 MiB warm and 4.02 MiB on disk, with
 37.1x dictionary and 5.8x end-to-end compression.
 
-For the next catalog block, extend the existing bounded endpoint catalog and
-configuration editor rather than replacing them: `model_catalog.rs` and its
-runtime snapshot already preserve offline/live observation scopes, while
-`model_route::Prices` freezes operator rates into physical receipts. Native model
-listing lives in `rook-cli/src/commands/config.rs`. Reference cloud identity,
-public source/age, explicit refresh/apply, unknown local/proxy pricing and all
-frontend paths still need implementing and verifying. No remaining audit is
-closed by the ACP observer or delivery fixtures.
+The catalog block extends the existing bounded endpoint catalog and configuration
+editor rather than replacing them. `model_catalog.rs` and its runtime snapshot
+preserve offline/live observation scopes; `model_route::Prices` still freezes
+operator rates into physical receipts. Public references live separately in
+`price_catalog.rs`, and cannot affect an ordinary turn until explicitly applied
+to missing configured rates. No remaining audit is closed by this catalog work.
+
+## Sixth block: explicit public model/price references
+
+Added the bounded models.dev provider reference with a fixed public destination,
+source/observation age, explicit refresh, private atomic cache and offline
+inspection. No endpoint credentials or external credential helpers participate
+in a public fetch. Byte, provider/model count and UTF-8 identity bounds apply
+before retaining entries; unknown metadata remains borrowed raw data. Redirects,
+invalid rates, duplicate/differing identities and unsupported cost schema refuse
+refresh and preserve the previous cache. Corrupt/oversized/future-dated caches
+remain unknown; stale references are visible but cannot be applied.
+
+Named inline/shared endpoints use the existing structural resolver and an exact,
+conservative direct-cloud identity table. Local/custom/proxied sources and aliases
+cannot inherit public prices by model name. Capabilities/context are display-only.
+Tiered/context/modality rates and provider/experimental overrides cannot be
+flattened into runtime accounting. Manual values (including zero) retain priority;
+the operator can review and fill only missing input/output/cache rates. Unknown
+cache rates remain unknown. Last application source/age/fields are attributed in
+an optional configuration string, not used to select runtime rates.
+
+Reviews bind the whole config revision, source/endpoint/passive-account scope and
+cache revision. Inline and vault-backed environment-key rotations are included
+without executing command/keychain helpers. Passive credential hashing streams
+JSON into the digest instead of allocating a credential copy. The shared config
+editor and `config set` take the same explicitly released write lock; the editor
+checks external changes under it before atomic replacement. Config set also
+admits its existing file and writes atomically. Literal dotted source names,
+comments, manual values and the resolver's trimmed endpoint spelling are retained.
+Saved store structs and wire enums are unchanged, and frozen physical cost
+snapshots/old numeric receipts are not recalculated after a refresh or config edit.
+
+The same core inspection/application is exposed by `rook prices`, the terminal
+form (`--interactive` or `p` in a clean `rook config edit` draft), and the browser
+Prices tab/daemon endpoints. Terminal refresh has a visible deadline/cancellation;
+browser actions belong to their original view/review and discard late responses.
+Daemon cache/config work runs outside engine locks, admits two catalog operations,
+and limits apply request bodies to 4 KiB. The product contract and exact limits
+are in [model-price-references.md](../model-price-references.md).
+
+Owned fixtures cover actual finite HTTP header/chunk overflow and failed refresh,
+count/string/alias/duplicate limits, corrupt/future/stale/offline cache behavior,
+command-helper nonexecution, direct/proxy/local identity, actual CLI and daemon
+application, credential/environment/config/cache rotations, preserved comments
+and manual context/rates, reached cooperative write contention, physical cached
+token costs and old rate snapshots. Browser fixtures cover plain-text untrusted
+names, explicit/declined application, one in-flight action, stale review errors,
+and late responses/detached buttons across new views and tab changes.
+Focused checks exited 0: `target/reference-prices-core-verified.log`,
+`target/reference-prices-native.log`, and `target/reference-prices-browser-fixed.log`.
+Initial new-test compilation/Clippy findings (private Dispatch import, a needless
+Usage update and literal format calls) and a mock-DOM text predicate were corrected.
+A real explicit upstream refresh also exited 0 in an owned ROOK_HOME fixture
+(`target/reference-prices-live-refresh.log`); it does not claim account prices or
+live provider capabilities. The first full CI exited 0 in 912.6 seconds
+(`target/reference-prices-ci.log`). Inspection then corrected trimmed endpoint
+compatibility, avoided copying helper definitions during passive environment scope
+inspection, and made terminal metadata show plain values/unknown. The reached
+write-contention/trimmed-endpoint regression and other core checks exited 0.
+The final full `cargo xtask ci` exited 0 in 911.8 seconds
+(`target/reference-prices-ci-verified.log`), covering the final code and all
+existing native/daemon/frontend/storage checks. `cargo xtask compaction` exited 0
+(`target/reference-prices-compaction.log`); measurements remain 23.31 MiB logical,
+5.29 MiB distinct, 0.14 MiB warm and 4.02 MiB disk, with 37.1x dictionary and
+5.8x end-to-end compression. This closes the catalog row only.
+
+For the next worktree block, `worktrees.rs` persists path/repository/base before
+`git worktree add --detach` and retains finished/removed markers. Its current
+status/diff paths assume the directory exists; missing checkout diagnosis and
+explicit registered restoration still need implementing. Admission must precede
+KV/metadata copies, verify the registered Git admin/root identity, and preserve
+recreated/dirty/untracked files. The existing lease also excludes resumed turns;
+reuse that boundary and cover local/daemon paths and Windows/path/symlink bounds.
+In particular, a missing path must not change a live lease's identity when
+canonicalization falls back to its stored spelling (including Windows prefixes).

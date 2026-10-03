@@ -8,6 +8,7 @@ pub(crate) mod html_export;
 pub(crate) mod knowledge;
 pub(crate) mod lsp;
 pub(crate) mod mcp;
+mod prices;
 pub(crate) mod queue;
 pub(crate) mod run;
 pub(crate) mod secrets;

@@ -53,6 +53,7 @@ pub mod paths;
 mod persistence;
 mod phase_routing;
 pub mod plugins;
+pub mod price_catalog;
 mod recipes;
 mod results;
 pub mod schedules;

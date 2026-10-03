@@ -4,12 +4,14 @@ import { renderChat } from './chat.js';
 import { renderTasks } from './tasks.js';
 import { renderSessions } from './sessions.js';
 import { renderContext } from './context.js';
+import { renderPrices } from './prices.js';
 import { renderSearch, renderMemory, renderSkills, renderJobs, renderStore, renderCheckpoints, renderDocs, renderSecrets } from './views.js';
 
 const tabs = {
   chat: renderChat,
   sessions: renderSessions,
   context: renderContext,
+  prices: renderPrices,
   tasks: renderTasks,
   search: renderSearch,
   memory: renderMemory,

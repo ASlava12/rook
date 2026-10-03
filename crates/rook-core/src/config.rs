@@ -32,6 +32,8 @@ pub struct Config {
     pub web: WebConfig,
     /// Bounds for endpoint model and capability discovery.
     pub model_catalog: crate::model_catalog::Settings,
+    /// Public price references, fetched only by an explicit operator action.
+    pub price_catalog: crate::price_catalog::Settings,
     /// Bounds for model-visible external tools; overflow stays discoverable.
     pub mcp_catalog: rook_tools::mcp::CatalogLimits,
     pub mcp_connections: crate::mcp_connections::Settings,
@@ -208,6 +210,9 @@ pub struct ModelSource {
     pub output_usd_per_million: Option<f64>,
     pub cache_read_usd_per_million: Option<f64>,
     pub cache_write_usd_per_million: Option<f64>,
+    /// Last reference application, for attribution only. Configured rates may
+    /// have been edited since then; this never selects prices at runtime.
+    pub price_reference: String,
     /// A name from `[endpoints]` to ask, where the address is written down once
     /// and several models share it.
     ///
@@ -311,6 +316,7 @@ impl Default for Config {
             memory: MemoryConfig::default(),
             web: WebConfig::default(),
             model_catalog: Default::default(),
+            price_catalog: Default::default(),
             mcp_catalog: Default::default(),
             mcp_connections: Default::default(),
             transcript: Default::default(),
@@ -1418,17 +1424,16 @@ impl Config {
     /// answered by the code that will have to read it rather than by a second
     /// opinion about types.
     pub fn set_in(path: &std::path::Path, key: &str, value: &str) -> Result<(), String> {
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_owned());
+        let path = canonical.as_path();
+        let _lock = edit::lock(path)?;
         let known = every_key().ok_or("this build cannot describe its own settings")?;
         at_key(&known, key).ok_or_else(|| match Self::nearest_to(key) {
             Some(meant) => format!("{key} is not a setting — did you mean {meant}?"),
             None => format!("{key} is not a setting"),
         })?;
 
-        let text = match std::fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(e) => return Err(format!("could not read {}: {e}", path.display())),
-        };
+        let text = edit::read(path)?.unwrap_or_default();
         let doc = text
             .parse::<toml_edit::DocumentMut>()
             .map_err(|e| format!("{} is not valid TOML, so nothing was changed: {e}", path.display()))?;
@@ -1445,12 +1450,24 @@ impl Config {
             let written = doc.to_string();
             match toml::from_str::<Self>(&written) {
                 Ok(_) => {
+                    if written.len() > 1024 * 1024 {
+                        return Err("configuration exceeds 1 MiB".into());
+                    }
                     if let Some(parent) = path.parent() {
                         crate::paths::private_dir(parent)
                             .map_err(|e| format!("{}: {e}", parent.display()))?;
                     }
-                    return std::fs::write(path, &written)
-                        .map_err(|e| format!("could not write {}: {e}", path.display()));
+                    let parent = path
+                        .parent()
+                        .filter(|p| !p.as_os_str().is_empty())
+                        .unwrap_or(std::path::Path::new("."));
+                    let filename = path.file_name().ok_or("configuration needs a filename")?;
+                    return rook_contain::files::write_private(
+                        parent,
+                        std::path::Path::new(filename),
+                        written.as_bytes(),
+                    )
+                    .map_err(|e| format!("could not write {}: {e}", path.display()));
                 }
                 // The first refusal and not the last, because the candidates
                 // run most particular first: told `max_steps true`, "expected

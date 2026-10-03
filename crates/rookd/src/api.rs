@@ -62,6 +62,12 @@ pub fn router(state: Shared) -> Router {
         .route("/api/memory/diff", get(memory_diff))
         .route("/api/memory/since", get(memory_since))
         .route("/api/models/recheck", post(recheck_models))
+        .route("/api/models/prices", get(price_references))
+        .route("/api/models/prices/refresh", post(refresh_prices))
+        .route(
+            "/api/models/prices/apply",
+            post(apply_prices).layer(axum::extract::DefaultBodyLimit::max(4096)),
+        )
         .route("/api/secrets", get(secrets).post(set_secret))
         .route("/api/secrets/forget", post(forget_secret))
         .route("/api/docs", get(docs_kept).post(gather_docs))
@@ -641,6 +647,75 @@ async fn recheck_models(State(s): State<Shared>) -> ApiResult<Page<rook_core::mo
     let vault = rook_core::Vault::load().unwrap_or_else(|_| rook_core::Vault::empty());
     let config = s.rook.read().await.config.clone();
     Ok(Json(Page::new(rook_core::models::recheck(&config, &vault).await)))
+}
+
+static PRICE_OPS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
+fn price_fail(message: impl Into<String>) -> Fail {
+    Fail(StatusCode::CONFLICT, ApiError::new("price_reference", message.into()))
+}
+fn price_permit() -> Result<tokio::sync::OwnedSemaphorePermit, Fail> {
+    PRICE_OPS
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| price_fail("price reference work is busy; retry after it finishes"))
+}
+async fn price_references() -> ApiResult<rook_core::price_catalog::Listing> {
+    let permit = price_permit()?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let vault = rook_core::Vault::load().map_err(|e| price_fail(e.to_string()))?;
+        rook_core::price_catalog::inspect(
+            &rook_core::paths::config_file(),
+            &rook_core::paths::home().join("cache"),
+            &vault,
+            None,
+        )
+        .map(Json)
+        .map_err(price_fail)
+    })
+    .await
+    .map_err(|e| price_fail(e.to_string()))?
+}
+async fn refresh_prices() -> ApiResult<rook_core::price_catalog::Listing> {
+    let permit = price_permit()?;
+    let settings =
+        tokio::task::spawn_blocking(|| rook_core::Config::load().map(|config| config.price_catalog))
+            .await
+            .map_err(|e| price_fail(e.to_string()))?
+            .map_err(|e| price_fail(e.to_string()))?;
+    rook_core::price_catalog::refresh(&rook_core::paths::home().join("cache"), settings)
+        .await
+        .map_err(price_fail)?;
+    drop(permit);
+    price_references().await
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApplyPrices {
+    source: String,
+    review_token: String,
+}
+async fn apply_prices(Json(body): Json<ApplyPrices>) -> ApiResult<rook_core::price_catalog::Listing> {
+    if body.source.len() > 256 || body.review_token.len() != 64 {
+        return Err(price_fail("invalid source or review token; inspect again"));
+    }
+    let permit = price_permit()?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let vault = rook_core::Vault::load().map_err(|e| price_fail(e.to_string()))?;
+        rook_core::price_catalog::apply(
+            &rook_core::paths::config_file(),
+            &rook_core::paths::home().join("cache"),
+            &vault,
+            &body.source,
+            &body.review_token,
+        )
+        .map(Json)
+        .map_err(price_fail)
+    })
+    .await
+    .map_err(|e| price_fail(e.to_string()))?
 }
 
 /// What is set and whether it answers. There is no endpoint that returns a

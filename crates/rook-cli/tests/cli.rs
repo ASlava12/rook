@@ -3478,3 +3478,6 @@ mod accounting;
 
 #[path = "scenarios/tool_cycles.rs"]
 mod tool_cycles;
+
+#[path = "scenarios/prices.rs"]
+mod prices;

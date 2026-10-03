@@ -28,7 +28,14 @@ use crate::source::Source;
 /// sandbox rule that will not compile, a lock read through after a panic, a
 /// note that the log itself could not be opened.
 fn draws_the_screen(command: &Option<Command>) -> bool {
-    matches!(command, Some(Command::Tui { .. } | Command::Config(args::ConfigCmd::Edit)))
+    matches!(
+        command,
+        Some(
+            Command::Tui { .. }
+                | Command::Config(args::ConfigCmd::Edit)
+                | Command::Prices { interactive: true, .. }
+        )
+    )
 }
 
 fn main() -> Result<()> {
@@ -81,6 +88,9 @@ fn main() -> Result<()> {
             commands::config::cmd_models(cli.workspace, cli.json, recheck, source, mode, metadata)
         }
         Some(Command::Config(cmd)) => commands::config::cmd_config(cmd, cli.json),
+        Some(Command::Prices { source, refresh, apply, interactive }) => {
+            commands::config::cmd_prices(cli.json, source, refresh, apply, interactive)
+        }
         Some(Command::Eval { json }) => commands::work::cmd_eval(cli.workspace, json || cli.json),
         Some(Command::Task(cmd)) => commands::tasks::run(cmd, cli.workspace, cli.yes, cli.json),
         Some(Command::Work { goal, most, tokens, keep_going, yes, resume }) => commands::work::cmd_work(

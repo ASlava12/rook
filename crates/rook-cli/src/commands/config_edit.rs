@@ -30,6 +30,16 @@ pub(super) fn run() -> Result<()> {
         if event::poll(Duration::from_millis(100))? {
             app.event(event::read()?)?;
         }
+        if app.prices {
+            app.prices = false;
+            let result = super::prices::form(&mut terminal, None);
+            app.status = result
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "Returned from public price references.".into());
+            app.editor = Editor::open(rook_core::paths::config_file()).map_err(anyhow::Error::msg)?;
+            app.reload()?;
+        }
     }
     Ok(())
 }
@@ -117,6 +127,7 @@ struct App {
     mode: Mode,
     status: String,
     quit: bool,
+    prices: bool,
 }
 impl App {
     fn new(editor: Editor) -> Result<Self> {
@@ -129,6 +140,7 @@ impl App {
             mode: Mode::Browse,
             status: "Choose a section. Changes are saved only with Ctrl+S.".into(),
             quit: false,
+            prices: false,
         };
         app.reload()?;
         Ok(app)
@@ -323,6 +335,14 @@ impl App {
             }
         }
         match key.code {
+            KeyCode::Char('p') => {
+                if self.editor.dirty() {
+                    self.status =
+                        "Save or discard draft changes before opening public price references.".into();
+                } else {
+                    self.prices = true;
+                }
+            }
             KeyCode::Up | KeyCode::Char('k') => self.selected = self.selected.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => {
                 self.selected += 1;
@@ -509,7 +529,7 @@ impl App {
         );
         f.render_widget(
             Paragraph::new(
-                "↑↓ choose · Enter edit/open · / find · a add · d remove · ^S save · Esc back · q quit",
+                "↑↓ choose · Enter edit/open · / find · a add · d remove · p prices · ^S save · Esc back · q quit",
             ),
             footer,
         );

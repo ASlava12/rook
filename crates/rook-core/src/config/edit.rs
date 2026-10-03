@@ -38,6 +38,15 @@ pub struct Editor {
 }
 
 impl Editor {
+    pub(crate) fn config(&self) -> Result<Config, String> {
+        toml::from_str(&self.doc.to_string()).map_err(|e| e.to_string())
+    }
+
+    pub(crate) fn revision(&self) -> String {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(self.original.as_deref().unwrap_or_default().as_bytes()))
+    }
+
     /// Open the file without taking the store lock or contacting any provider.
     pub fn open(path: PathBuf) -> Result<Self, String> {
         // Editing a symlinked dotfile updates its target, not the symlink.
@@ -225,6 +234,9 @@ impl Editor {
     /// Validate and atomically replace only the file this draft was based on.
     pub fn save(&mut self) -> Result<(), String> {
         let text = self.doc.to_string();
+        if text.len() as u64 > MAX_CONFIG {
+            return Err("configuration exceeds 1 MiB".into());
+        }
         let config: Config = toml::from_str(&text).map_err(|e| format!("not saved: {}", e.message()))?;
         let errors = config.validation_errors();
         if !errors.is_empty() {
@@ -233,6 +245,7 @@ impl Editor {
         if !self.dirty() {
             return Ok(());
         }
+        let _lock = lock(&self.path)?;
         if read(&self.path)? != self.original {
             return Err(
                 "file changed outside this editor; nothing overwritten. Reopen it to use the newer file"
@@ -357,7 +370,7 @@ fn check_sizes(value: &Value) -> Result<(), String> {
     Ok(())
 }
 
-fn read(path: &Path) -> Result<Option<String>, String> {
+pub(crate) fn read(path: &Path) -> Result<Option<String>, String> {
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -369,6 +382,23 @@ fn read(path: &Path) -> Result<Option<String>, String> {
         return Err("configuration exceeds 1 MiB".into());
     }
     String::from_utf8(bytes).map(Some).map_err(|_| "configuration must be UTF-8".into())
+}
+
+pub(crate) struct WriteLock(std::fs::File);
+impl Drop for WriteLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+pub(crate) fn lock(path: &Path) -> Result<WriteLock, String> {
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    crate::paths::private_dir(parent).map_err(|e| e.to_string())?;
+    let name = path.file_name().ok_or("configuration needs a filename")?;
+    let mut name = name.to_os_string();
+    name.push(".lock");
+    let file = rook_contain::files::lock_file(parent, Path::new(&name)).map_err(|e| e.to_string())?;
+    file.try_lock().map_err(|_| "configuration is being updated; inspect again".to_string())?;
+    Ok(WriteLock(file))
 }
 
 fn kind(value: &Value) -> &str {

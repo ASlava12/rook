@@ -264,7 +264,7 @@ fn read(directory: &Path, settings: Settings) -> io::Result<Vec<Entry>> {
 
 /// A bounded serializer does not first allocate an oversize JSON string and
 /// check it afterward. The same cap covers escaped model names and metadata.
-fn encode(value: &impl Serialize, maximum: usize) -> io::Result<Vec<u8>> {
+pub(crate) fn encode(value: &impl Serialize, maximum: usize) -> io::Result<Vec<u8>> {
     struct Buffer {
         bytes: Vec<u8>,
         maximum: usize,

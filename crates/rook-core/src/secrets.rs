@@ -229,11 +229,27 @@ impl Vault {
     /// run for an offline cache lookup; the live credential is checked separately.
     pub(crate) fn cache_scope(&self, name: &str) -> String {
         use sha2::{Digest, Sha256};
-        self.entries
-            .get(name.trim())
-            .and_then(|entry| serde_json::to_vec(entry).ok())
-            .map(|bytes| hex::encode(Sha256::digest(bytes)))
-            .unwrap_or_default()
+        let Some(entry) = self.entries.get(name.trim()) else { return String::new() };
+        struct Hash(Sha256);
+        impl std::io::Write for Hash {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.update(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut hash = Hash(Sha256::new());
+        if serde_json::to_writer(&mut hash, entry).is_err() {
+            return String::new();
+        }
+        // Passive environment rotations are observable without executing a
+        // command/keychain helper. Helper definitions remain the offline scope.
+        if let Some(variable) = entry.source.as_deref().and_then(|s| s.trim().strip_prefix("env:")) {
+            hash.0.update(std::env::var(variable.trim()).unwrap_or_default().as_bytes());
+        }
+        hex::encode(hash.0.finalize())
     }
 
     /// The value, and remembered as handed out so it can be taken back out of

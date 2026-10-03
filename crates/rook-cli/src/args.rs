@@ -81,6 +81,19 @@ pub(crate) enum Command {
     /// Read the configuration, fill in what it does not say, and check it.
     #[command(subcommand)]
     Config(ConfigCmd),
+    /// Inspect public price references offline; explicitly refresh or apply missing rates.
+    Prices {
+        #[arg(long)]
+        source: Option<String>,
+        #[arg(long, conflicts_with_all = ["apply", "interactive"])]
+        refresh: bool,
+        /// Token from a reviewed listing. Requires an exact named source.
+        #[arg(long, requires = "source", conflicts_with = "interactive")]
+        apply: Option<String>,
+        /// Open the terminal price form.
+        #[arg(long)]
+        interactive: bool,
+    },
     /// Scheduled tasks: create schedules and inspect their sessions.
     #[command(subcommand)]
     Task(TaskCmd),

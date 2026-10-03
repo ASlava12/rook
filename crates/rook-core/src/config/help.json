@@ -692,6 +692,13 @@
     "kind": "array",
     "help": "Repositories or directories used by skills search and install. One source per entry."
   },
+  "price_catalog": {"kind":"object", "help":"Public model/price references. Only an explicit refresh contacts models.dev. Inspection and application are offline; runtime never imports capabilities or prices automatically."},
+  "price_catalog.max_bytes": {"kind":"integer", "help":"Maximum admitted reference body bytes (1024–16777216; default 8388608). Failed refresh preserves the previous cache."},
+  "price_catalog.max_providers": {"kind":"integer", "help":"Maximum reference providers admitted before retaining entries (1–1024; default 512)."},
+  "price_catalog.max_models": {"kind":"integer", "help":"Maximum total reference model offerings (1–65536; default 32768)."},
+  "price_catalog.timeout_secs": {"kind":"integer", "help":"Overall deadline for this finite reference fetch (1–60 seconds; default 30)."},
+  "price_catalog.max_age_secs": {"kind":"integer", "help":"Maximum reference age allowed for application (0–2592000 seconds; default 604800). Stale data remains visible offline."},
+  "models.*.price_reference": {"kind":"string", "help":"Attribution of the last explicit reference application. Display only; manually edited rates retain priority and receipts already saved never change."},
   "model_catalog": {
     "kind": "object",
     "help": "Limits for reading model lists and capabilities from endpoints."

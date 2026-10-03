@@ -424,6 +424,34 @@ fn key_for(at: &str, written: &str, vault: &Vault) -> Result<Option<String>, Llm
     Ok(Some(written.to_string()))
 }
 
+/// An explicit cloud endpoint can select a provider offering. Dialects and
+/// shorthand aliases cannot prove billing identity.
+pub(crate) fn reference_identity(config: &Config, name: &str) -> Result<Option<&'static str>, LlmError> {
+    let Some(source) = config.models.get(name) else { return Ok(None) };
+    let (address, api) = checked_address(config, name, source)?;
+    let proxy = rook_llm::Proxy::parse(address.proxy).or(config.proxy.for_models());
+    let environment_proxy =
+        ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]
+            .iter()
+            .any(|name| std::env::var(name).is_ok_and(|value| !value.is_empty()));
+    if matches!(proxy, rook_llm::Proxy::Through(_))
+        || (proxy == rook_llm::Proxy::AsTheEnvironmentSays && environment_proxy)
+    {
+        return Ok(None);
+    }
+    // An API dialect or a model alias says nothing about billing identity.
+    // Exact, deliberately small direct-cloud addresses keep gateways unknown.
+    Ok(match (api, address.url.trim().trim_end_matches('/')) {
+        (Api::OpenAi | Api::Responses, "https://api.openai.com/v1") => Some("openai"),
+        (Api::Anthropic, "https://api.anthropic.com") => Some("anthropic"),
+        (Api::Google, "https://generativelanguage.googleapis.com/v1beta") => Some("google"),
+        (Api::OpenAi, "https://api.deepseek.com" | "https://api.deepseek.com/v1") => Some("deepseek"),
+        (Api::OpenAi, "https://api.x.ai/v1") => Some("xai"),
+        (Api::OpenAi, "https://openrouter.ai/api/v1") => Some("openrouter"),
+        _ => None,
+    })
+}
+
 /// Cache namespaces describe configuration without executing credential helpers.
 pub(crate) fn catalog_scope(config: &Config, vault: &Vault, name: &str) -> Result<String, LlmError> {
     use sha2::{Digest, Sha256};
