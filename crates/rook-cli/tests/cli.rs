@@ -3475,3 +3475,6 @@ mod phase_state;
 
 #[path = "scenarios/accounting.rs"]
 mod accounting;
+
+#[path = "scenarios/tool_cycles.rs"]
+mod tool_cycles;

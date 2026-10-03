@@ -123,6 +123,11 @@ impl<'a> AgentLoop<'a> {
             .ok_or_else(|| CoreError::Other("execution receipt is missing".into()))?;
         let background = call.name == "run_command"
             && call.arguments.get("background").and_then(serde_json::Value::as_bool) == Some(true);
+        let before = if self.rook.config.agent.tool_cycle_guard && self.cycle_may_write(call) {
+            self.cycle_workspace()
+        } else {
+            None
+        };
         journal.begin(
             &call.name,
             &self.vault.redact(&call.arguments.to_string()),
@@ -131,6 +136,7 @@ impl<'a> AgentLoop<'a> {
             self.tool_ctx.jobs.as_deref(),
         )?;
         *self.launched_job.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.tool_cycle_outcome.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let result = self.dispatch(call, outcome, on_progress, crew, nursery).await;
         let job = self.launched_job.lock().unwrap_or_else(|e| e.into_inner()).take();
         let phase = self.routing.as_ref().filter(|_| {
@@ -139,11 +145,13 @@ impl<'a> AgentLoop<'a> {
                 && self.depth == 0
                 && super::CHANGES_FILES.contains(&call.name.as_str())
         });
-        let seq = journal.complete_with_phase(
+        let companion = self.cycle_observe(call, &result.0, result.1, before, nursery.live_poll(call))?;
+        let seq = journal.complete_with_companion(
             &result.0,
             self.tool_ctx.jobs.as_deref(),
             job.as_deref(),
             phase.map(|(selected, target)| (self.rook, selected.as_str(), target.as_str())),
+            companion.as_ref().map(|(key, bytes)| (key.as_str(), bytes.as_slice())),
         )?;
         Ok((result.0, result.1, Some(seq)))
     }
@@ -501,6 +509,11 @@ impl<'a> AgentLoop<'a> {
             Ok(o) => o,
             Err(e) => rook_tools::ToolOutcome::error(format!("tool error: {e}")),
         };
+        // Hash the typed answer before hooks, elapsed-time prose and source
+        // envelopes can make the same operation appear to have progressed.
+        if let Err(why) = self.cycle_semantic_result(&call.name, &outcome) {
+            return (why.to_string(), true);
+        }
         // A command names no paths, so what it wrote is discovered rather than
         // declared — and is checked the same way.
         let wrote = match watching {

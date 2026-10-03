@@ -81,6 +81,9 @@ impl Config {
         if !(16_000..=262_144).contains(&self.agent.max_stream_repetition_chars) {
             errors.push("agent.max_stream_repetition_chars: expected 16000..=262144".into());
         }
+        if !(20..=128).contains(&self.agent.max_tool_cycle_observations) {
+            errors.push("agent.max_tool_cycle_observations: expected 20..=128".into());
+        }
         for (name, valid, range) in [
             ("max_bytes", (4096..=1048576).contains(&self.mcp_catalog.max_bytes), "4096..=1048576"),
             ("max_tools", (2..=64).contains(&self.mcp_catalog.max_tools), "2..=64"),

@@ -115,7 +115,8 @@ impl FileSet {
             .git_exclude(limits.respect_ignore_files)
             .follow_links(false);
 
-        for entry in walker.build().flatten() {
+        for entry in walker.build() {
+            let entry = entry.map_err(|why| CoreError::Capture(why.to_string()))?;
             if rook_contain::files::is_write_temporary(entry.path()) {
                 continue;
             }
@@ -163,11 +164,25 @@ impl FileSet {
     /// skill ever offered into the store, most of which nobody installed.
     /// Hashed as it is read, so no file is ever held whole.
     pub fn content_of(root: &Path, limits: &CaptureLimits) -> Result<BTreeMap<String, String>> {
+        use std::io::Read;
+        let mut actual_total = 0u64;
         Self::walk(root, limits, |path| {
             let file = std::fs::File::open(path)
                 .map_err(|e| CoreError::Io { path: path.to_path_buf(), source: e })?;
-            let id = ObjectId::of_reader(file)
+            // Metadata admission alone does not bound a file growing while
+            // hashed. The extra byte distinguishes EOF from hitting the cap.
+            let allowance = limits.max_file_bytes.min(limits.max_total_bytes.saturating_sub(actual_total));
+            let mut reader = file.take(allowance.saturating_add(1));
+            let id = ObjectId::of_reader(&mut reader)
                 .map_err(|e| CoreError::Io { path: path.to_path_buf(), source: e })?;
+            let read = allowance.saturating_add(1) - reader.limit();
+            if read > allowance {
+                return Err(CoreError::CaptureTooBig {
+                    what: format!("{} grew while hashing", path.display()),
+                    limit: "max_file_bytes/max_total_bytes".into(),
+                });
+            }
+            actual_total += read;
             Ok(id.to_hex())
         })
         .map(|(files, _)| files)

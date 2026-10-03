@@ -188,6 +188,15 @@ impl Jobs {
         running.get(id).map(|r| r.seen_as(id))
     }
 
+    /// Test actual liveness without cloning captured output for a guard.
+    pub fn is_running(&self, id: Option<&str>) -> bool {
+        let running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+        match id {
+            Some(id) => running.get(id).is_some_and(|job| !job.finished()),
+            None => running.values().any(|job| !job.finished()),
+        }
+    }
+
     /// The job once it has finished, or as it stands when the wait runs out.
     ///
     /// Polled rather than signalled: a signal has to be armed before the thing

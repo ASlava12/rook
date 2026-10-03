@@ -910,6 +910,75 @@ fn read() -> rook_llm::Result<Response> {
     Ok(response)
 }
 
+#[tokio::test]
+async fn tool_cycle_receipts_survive_worker_iterations_and_reset_for_accepted_steering_and_new_generations() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("evidence.txt"), "unchanged").unwrap();
+    let rook = engine(workspace.path(), store.path());
+    let session = rook.start_session("goal cycle scope").unwrap();
+    let run = conversation_goal(&rook, session, "Read evidence without spinning");
+    for n in 0..3 {
+        let provider = Script::new(vec![read(), read(), answer("remaining work")]);
+        let result = work::advance(
+            &rook,
+            &run.id,
+            |session| {
+                let mut agent = AgentLoop::new(&rook, provider.clone(), session);
+                agent.max_steps = 2;
+                Ok(agent)
+            },
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert_ne!(result.status, Status::Completed, "a cycle never completes a goal");
+        let outcome = rook.completed_turn(session).unwrap().unwrap();
+        assert_eq!(outcome.tools_called.len(), if n == 0 { 2 } else { 0 }, "iteration {n}: {outcome:?}");
+        if n == 2 {
+            assert_eq!(outcome.stopped, "looping");
+        }
+    }
+    // Resume the same generation if its existing no-progress supervisor has
+    // blocked it, then accept a correction at the usual durable boundary.
+    if work::read(&rook, &run.id).unwrap().run.status == Status::Blocked {
+        work::control(&rook, &run.id, Action::Resume).unwrap();
+    }
+    work::steer(&rook, &run.id, correction("new-check", "Recheck evidence for this correction")).unwrap();
+    let provider = Script::new(vec![read(), read(), answer("still more work")]);
+    work::advance(
+        &rook,
+        &run.id,
+        |session| {
+            let mut agent = AgentLoop::new(&rook, provider.clone(), session);
+            agent.max_steps = 2;
+            Ok(agent)
+        },
+        |_| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(rook.completed_turn(session).unwrap().unwrap().tools_called.len(), 2);
+    assert!(work::read(&rook, &run.id).unwrap().run.instructions[0].applied_at.is_some());
+    work::control(&rook, &run.id, Action::Cancel).unwrap();
+    let replacement = conversation_goal(&rook, session, "New goal in the same conversation");
+    assert_ne!(run.generation, replacement.generation);
+    let provider = Script::new(vec![read(), read(), answer("new generation work remains")]);
+    work::advance(
+        &rook,
+        &replacement.id,
+        |session| {
+            let mut agent = AgentLoop::new(&rook, provider.clone(), session);
+            agent.max_steps = 2;
+            Ok(agent)
+        },
+        |_| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(rook.completed_turn(session).unwrap().unwrap().tools_called.len(), 2);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_provider_outage_resumes_the_saved_session_and_a_correction_reaches_verification() {
     let workspace = tempfile::tempdir().unwrap();

@@ -856,6 +856,7 @@ pub async fn advance<'a>(
         }
     };
     agent.managed_work = Some(saved.run.identity());
+    agent.managed_iteration = true;
     if saved.run.autonomous && saved.run.conversation.is_none() {
         agent.allow_everything_not_denied();
     }

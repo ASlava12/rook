@@ -398,6 +398,16 @@ impl<'f> Nursery<'f> {
         !self.running.is_empty()
     }
 
+    pub(super) fn live_poll(&self, call: &rook_llm::ToolCall) -> bool {
+        if call.name != super::SUBAGENTS || call.arguments.get("say").is_some() {
+            return false;
+        }
+        match call.arguments.get("id").and_then(|id| id.as_str()) {
+            Some(id) => self.index_of(id).is_some_and(|at| self.landed[at].is_none()),
+            None => self.busy(),
+        }
+    }
+
     fn index_of(&self, name: &str) -> Option<usize> {
         (0..self.tasks.len()).find(|at| name_of(*at) == name)
     }

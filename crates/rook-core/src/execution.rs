@@ -529,6 +529,14 @@ impl Journal {
     }
 
     fn update(&self, change: impl FnOnce(&mut Execution) -> Result<()>) -> Result<()> {
+        self.update_with_companion(None, change)
+    }
+
+    fn update_with_companion(
+        &self,
+        companion: Option<(&str, &[u8])>,
+        change: impl FnOnce(&mut Execution) -> Result<()>,
+    ) -> Result<()> {
         let _active = ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
         let mut state = load(&self.store, self.session)?
             .ok_or_else(|| CoreError::Other("execution receipt disappeared".into()))?;
@@ -538,7 +546,7 @@ impl Journal {
             ));
         }
         change(&mut state)?;
-        save(&self.store, self.session, &mut state)
+        save_with_claim(&self.store, self.session, &mut state, companion)
     }
 
     pub(crate) fn admit(&self, task: &str) -> Result<()> {
@@ -719,8 +727,19 @@ impl Journal {
         new_job: Option<&str>,
         phase: Option<(&Rook, &str, &str)>,
     ) -> Result<u64> {
+        self.complete_with_companion(result, jobs, new_job, phase, None)
+    }
+
+    pub(crate) fn complete_with_companion(
+        &self,
+        result: &str,
+        jobs: Option<&rook_tools::jobs::Jobs>,
+        new_job: Option<&str>,
+        phase: Option<(&Rook, &str, &str)>,
+        companion: Option<(&str, &[u8])>,
+    ) -> Result<u64> {
         let mut result_seq = 0;
-        self.update(|state| {
+        self.update_with_companion(companion, |state| {
             let operation = state
                 .pending
                 .take()

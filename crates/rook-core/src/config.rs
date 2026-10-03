@@ -555,6 +555,10 @@ pub struct AgentConfig {
     pub stream_repetition_guard: bool,
     /// Per-channel Unicode characters retained for repetition checks.
     pub max_stream_repetition_chars: usize,
+    /// Detect repeated tool results without verified progress.
+    pub tool_cycle_guard: bool,
+    /// Fingerprints retained across continuation/compaction (20–128).
+    pub max_tool_cycle_observations: usize,
     /// How many skills the catalog names in the system prompt. The catalog is
     /// paid for on every request, and a machine that has collected skills for a
     /// year would otherwise pay for all of them; the ones left out are still
@@ -937,6 +941,8 @@ impl Default for AgentConfig {
             stream_idle_timeout_secs: 90,
             stream_repetition_guard: true,
             max_stream_repetition_chars: 64_000,
+            tool_cycle_guard: true,
+            max_tool_cycle_observations: 30,
             answer_timeout_secs: 600,
             decide_alone_after_secs: 1800,
             compaction_model: String::new(),

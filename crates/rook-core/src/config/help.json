@@ -82,6 +82,8 @@
   },
   "agent.stream_repetition_guard": {"kind":"boolean","help":"Interrupt long exact repetition loops in streamed text/reasoning (default true). Short repeats and distinct rows remain allowed. Disable for deliberately large repetitive output. Interrupted text is retained as bounded diagnostic excerpts and a neutral marker is replayed."},
   "agent.max_stream_repetition_chars": {"kind":"integer","help":"Unicode characters retained per narrative channel for repetition checks (16000..=262144; default 64000). Checks begin after 16000 characters and sample bounded tails; tool arguments and signed/encrypted state are not interpreted."},
+  "agent.tool_cycle_guard": {"kind":"boolean","help":"Interrupt repeated tool calls or changing arguments with the same result and no verified file progress. Defaults to true; disable for deliberately repetitive operations. Continuation and compaction preserve the receipt; new accepted instructions reset it."},
+  "agent.max_tool_cycle_observations": {"kind":"integer","help":"Bounded tool fingerprints retained per execution scope (20..=128; default 30). Identical calls are refused after two equal results; result churn warns at 10 observations and stops at 20. Live background polling uses the actual process registry."},
   "agent.answer_timeout_secs": {
     "kind": "integer",
     "help": "Seconds to wait for an answer to a user question or approval request before treating it as unanswered."

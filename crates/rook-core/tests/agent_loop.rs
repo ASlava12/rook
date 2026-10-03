@@ -8843,3 +8843,422 @@ async fn collecting_a_completed_child_again_does_not_duplicate_its_saved_costs_o
     assert_eq!(u64::from(outcome.input_tokens), parent_meta.tokens_in + child_meta.tokens_in);
     assert_eq!(u64::from(outcome.output_tokens), parent_meta.tokens_out + child_meta.tokens_out);
 }
+
+#[tokio::test]
+async fn tool_cycles_do_not_reset_for_commands_or_presentation_argument_churn() {
+    let f = fixture();
+    let session = f.rook.start_session("commands without progress").unwrap();
+    let mut script: Vec<_> = (0..5).map(|n| call("run_command", serde_json::json!({
+        "command":"echo stable", "title":format!("checking {n}"), "description":format!("attempt {n}")
+    }))).collect();
+    script.push(reply("stopped without completing the task"));
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    agent.allow_everything_not_denied();
+    let out = agent.run("verify once").await.unwrap();
+    assert_eq!(out.stopped, "looping", "{out:?}");
+    assert_eq!(out.tools_called.len(), 2, "no command name alone erases evidence");
+    let text = f.rook.transcript(session, 0, 1000, 4000).unwrap();
+    assert!(text.iter().any(|e| e.body.contains("repeated_call")));
+    assert!(!rook_core::agent::finished(&out.stopped));
+}
+
+#[tokio::test]
+async fn tool_cycles_warn_then_stop_command_result_churn_and_unknown_tool_churn() {
+    for unknown in [false, true] {
+        let f = fixture();
+        let session = f.rook.start_session("changing arguments without progress").unwrap();
+        let mut script: Vec<_> = (0..20)
+            .map(|n| {
+                if unknown {
+                    call(&format!("missing_tool_{n}"), serde_json::json!({"n":n}))
+                } else {
+                    call(
+                        "run_command",
+                        serde_json::json!({"command":format!("{}echo stable", " ".repeat(n))}),
+                    )
+                }
+            })
+            .collect();
+        script.push(reply("the task remains open"));
+        let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+        agent.allow_everything_not_denied();
+        let out = agent.run("do real work").await.unwrap();
+        assert_eq!(out.stopped, "looping", "unknown={unknown}: {out:?}");
+        assert_eq!(out.steps, 20, "the critical threshold must actually be reached");
+        assert_eq!(out.tools_called.len(), 20);
+        let notes: Vec<_> = f
+            .rook
+            .transcript(session, 0, 1000, 4000)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.label == "looping" && e.body.starts_with("tool-cycle guard:"))
+            .collect();
+        assert_eq!(notes.len(), 2, "one warning followed by one stop: {notes:?}");
+        assert!(notes[0].body.contains("use the evidence"));
+        assert!(notes[1].body.contains(if unknown { "unknown_tool_repeat" } else { "argument_churn" }));
+    }
+}
+
+#[tokio::test]
+async fn tool_cycles_catch_alternating_reads_and_no_op_or_failed_writes() {
+    for write in [None, Some("same"), Some("failed")] {
+        let f = fixture();
+        std::fs::write(f.workspace.path().join("a.txt"), "alpha").unwrap();
+        let session = f.rook.start_session("alternating without progress").unwrap();
+        let mut script = Vec::new();
+        for _ in 0..6 {
+            script.push(call("read_file", serde_json::json!({"path":"a.txt"})));
+            script.push(match write {
+                None => call("list_dir", serde_json::json!({"path":"."})),
+                Some("same") => call("write_file", serde_json::json!({"path":"a.txt","content":"alpha"})),
+                _ => call("edit_file", serde_json::json!({"path":"a.txt","old":"absent","new":"beta"})),
+            });
+        }
+        // Final requests are tool-free; use a provider that answers that request
+        // independently of how many refused operations the guard needs.
+        let provider =
+            Arc::new(CycleScript { script: Mutex::new(script.into()), seen: Mutex::new(Vec::new()) });
+        let mut agent = AgentLoop::new(&f.rook, provider, session);
+        agent.allow_everything_not_denied();
+        let out = agent.run("inspect and change something").await.unwrap();
+        assert_eq!(out.stopped, "looping", "write={write:?}: {out:?}");
+        assert!(out.steps <= 7, "{out:?}");
+        assert_eq!(out.tools_called.len(), 4, "no-op/failed writes cannot erase the earlier reads");
+        assert_eq!(std::fs::read_to_string(f.workspace.path().join("a.txt")).unwrap(), "alpha");
+    }
+}
+
+struct CycleScript {
+    script: Mutex<std::collections::VecDeque<Response>>,
+    seen: Mutex<Vec<Request>>,
+}
+
+#[async_trait::async_trait]
+impl Provider for CycleScript {
+    fn id(&self) -> &str {
+        "cycle-script"
+    }
+    fn context_window(&self) -> usize {
+        128_000
+    }
+    async fn complete(&self, request: Request) -> rook_llm::Result<Response> {
+        if let Some(answer) = completion_answer(&request) {
+            return Ok(answer);
+        }
+        self.seen.lock().unwrap().push(request.clone());
+        let response = if request.tools.is_empty() {
+            reply("task remains open")
+        } else {
+            self.script.lock().unwrap().pop_front().unwrap_or_else(|| reply("script ended"))
+        };
+        Ok(response)
+    }
+}
+
+#[tokio::test]
+async fn tool_cycles_survive_continuation_reopen_and_actual_compaction_but_new_prompts_reset() {
+    let f = fixture();
+    let session = f.rook.start_session("durable fingerprints").unwrap();
+    let mut agent = AgentLoop::new(
+        &f.rook,
+        Arc::new(ScriptedProvider::new(vec![
+            call("list_dir", serde_json::json!({"path":"."})),
+            call("list_dir", serde_json::json!({"path":"."})),
+            reply("limited"),
+        ])),
+        session,
+    );
+    agent.max_steps = 2;
+    assert_eq!(agent.run("inspect once").await.unwrap().stopped, "max_steps");
+    drop(agent);
+    let Fixture { _store_dir, _skill_dir, workspace, rook } = f;
+    let config = rook.config.clone();
+    let env = rook.env().clone();
+    let skills = rook.skills().clone();
+    drop(rook);
+    let rook = Rook::from_parts(
+        Store::open(_store_dir.path()).unwrap(),
+        config,
+        env,
+        skills,
+        workspace.path().into(),
+    );
+    for n in 0..12 {
+        rook.log(session, rook_store::EventKind::UserMessage, "", &format!("finding {n}")).unwrap();
+        rook.log(
+            session,
+            rook_store::EventKind::AssistantMessage,
+            "",
+            &format!("Established finding {n}: {}", "a supported distinct observation. ".repeat(80)),
+        )
+        .unwrap();
+    }
+    let summary = Arc::new(ScriptedProvider::new(vec![reply(
+        "One listing obtained; do not repeat it. Task remains open.",
+    )]));
+    let seen = summary.share();
+    AgentLoop::new(&rook, summary, session).compact_now().await;
+    assert!(rook.last_compaction(session).unwrap().0 > 0, "actual replacement must occur");
+    assert_eq!(seen.lock().unwrap().len(), 1, "actual summary request must occur");
+    let provider = Arc::new(CycleScript {
+        script: Mutex::new((0..4).map(|_| call("list_dir", serde_json::json!({"path":"."}))).collect()),
+        seen: Mutex::new(Vec::new()),
+    });
+    let out = AgentLoop::new(&rook, provider, session).run("/continue").await.unwrap();
+    assert_eq!(out.stopped, "looping", "{out:?}");
+    assert!(out.tools_called.is_empty(), "old fingerprints survive real summary/replacement/reopen");
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("list_dir", serde_json::json!({"path":"."})),
+        reply("fresh instruction"),
+    ]));
+    let out =
+        AgentLoop::new(&rook, provider, session).run("inspect again for this new question").await.unwrap();
+    assert_eq!(out.tools_called, ["list_dir"]);
+    assert!(rook_core::agent::finished(&out.stopped));
+}
+
+#[tokio::test]
+async fn tool_cycles_reset_when_a_new_correction_is_actually_heard() {
+    use rook_core::agent::Progress;
+    let f = fixture();
+    let session = f.rook.start_session("corrected scope").unwrap();
+    let mut script: Vec<_> = (0..4).map(|_| call("list_dir", serde_json::json!({"path":"."}))).collect();
+    script.push(reply("new instruction completed"));
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    let saying = agent.interjections.clone();
+    let mut done = 0;
+    let out = agent
+        .run_with("inspect", |p| {
+            if matches!(p, Progress::ToolDone { .. }) {
+                done += 1;
+                if done == 2 {
+                    saying.say("Recheck now; this is a new correction.");
+                }
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(out.tools_called.len(), 4, "each accepted instruction gets its own evidence");
+    assert!(rook_core::agent::finished(&out.stopped));
+}
+
+#[tokio::test]
+async fn tool_cycles_allow_actual_command_edits_and_external_file_progress() {
+    for external in [false, true] {
+        let f = fixture();
+        std::fs::write(f.workspace.path().join("a.txt"), "alpha").unwrap();
+        let session = f.rook.start_session("content progress").unwrap();
+        let read = || call("read_file", serde_json::json!({"path":"a.txt"}));
+        let mut script = vec![read(), read()];
+        if !external {
+            script.push(call("run_command", serde_json::json!({"command":"echo beta > a.txt"})));
+        }
+        script.extend([read(), read(), reply("beta verified")]);
+        let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+        agent.allow_everything_not_denied();
+        let mut done = 0;
+        let out = agent
+            .run_with("make progress", |p| {
+                if matches!(p, rook_core::agent::Progress::ToolDone { .. }) {
+                    done += 1;
+                    if external && done == 2 {
+                        std::fs::write(f.workspace.path().join("a.txt"), "beta").unwrap();
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        assert!(rook_core::agent::finished(&out.stopped), "external={external}: {out:?}");
+        assert_eq!(out.tools_called.len(), if external { 4 } else { 5 });
+    }
+}
+
+#[tokio::test]
+async fn tool_cycles_exempt_real_live_polling_but_not_finished_or_foreign_running_prose() {
+    let f = fixture();
+    let session = f.rook.start_session("live process").unwrap();
+    let jobs = Arc::new(rook_tools::jobs::Jobs::new(4, 4096));
+    let command =
+        if cfg!(windows) { "powershell -NoProfile -Command Start-Sleep -Seconds 120" } else { "sleep 120" };
+    let id = jobs.start(command, f.workspace.path(), None).unwrap();
+    assert!(jobs.get(&id).unwrap().exit_code.is_none(), "real live process precondition");
+    let mut script: Vec<_> =
+        (0..5).map(|n| call("job", serde_json::json!({"id":id,"wait_secs":0,"title":n}))).collect();
+    script.push(reply("still waiting"));
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    agent.tool_ctx.jobs = Some(jobs.clone());
+    agent.tools.register(Arc::new(rook_tools::jobs::JobTool));
+    let out = agent.run("inspect the background process").await.unwrap();
+    assert_eq!(out.tools_called.len(), 5, "identical silent live polling is allowed");
+    assert!(rook_core::agent::finished(&out.stopped));
+    assert!(jobs.stop(&id));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while jobs.get(&id).unwrap().exit_code.is_none() {
+        assert!(std::time::Instant::now() < deadline);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let mut script: Vec<_> =
+        (0..5).map(|n| call("job", serde_json::json!({"id":id,"wait_secs":n}))).collect();
+    script.push(reply("finished process provides no new evidence"));
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    agent.tool_ctx.jobs = Some(jobs);
+    agent.tools.register(Arc::new(rook_tools::jobs::JobTool));
+    let out = agent.run("inspect the finished process").await.unwrap();
+    assert_eq!(out.stopped, "looping");
+    assert_eq!(
+        out.tools_called.len(),
+        2,
+        "wait duration and elapsed prose cannot defeat finished-poll detection"
+    );
+
+    let mut agent = AgentLoop::new(
+        &f.rook,
+        Arc::new(CycleScript {
+            script: Mutex::new((0..5).map(|_| call("foreign_running", serde_json::json!({}))).collect()),
+            seen: Mutex::new(Vec::new()),
+        }),
+        session,
+    );
+    agent.tools.register(Arc::new(ForeignRunning));
+    let out = agent.run("inspect an untrusted status").await.unwrap();
+    assert_eq!(out.stopped, "looping", "foreign running metadata is not process liveness");
+    assert_eq!(out.tools_called.len(), 2);
+}
+
+struct ForeignRunning;
+#[async_trait]
+impl rook_tools::Tool for ForeignRunning {
+    fn name(&self) -> &str {
+        "foreign_running"
+    }
+    fn spec(&self) -> rook_llm::ToolSpec {
+        rook_llm::ToolSpec {
+            name: self.name().into(),
+            description: "Reports a foreign status.".into(),
+            parameters: serde_json::json!({"type":"object"}),
+        }
+    }
+    async fn call(
+        &self,
+        _: &rook_tools::ToolContext,
+        _: &serde_json::Value,
+    ) -> rook_tools::Result<rook_tools::ToolOutcome> {
+        Ok(rook_tools::ToolOutcome::ok("running").with("running", true))
+    }
+    fn risk(&self, _: &serde_json::Value) -> rook_tools::policy::Risk {
+        rook_tools::policy::Risk::ReadOnly
+    }
+}
+
+#[tokio::test]
+async fn tool_cycles_refuse_corrupt_or_oversized_receipts_before_decoding_and_allow_explicit_opt_out() {
+    for bytes in [b"not json".to_vec(), vec![b' '; 128 * 1024 + 1]] {
+        let f = fixture();
+        let session = f.rook.start_session("bad fingerprint receipt").unwrap();
+        f.rook.store.kv_set(&format!("rook:tool-cycles:session:{session}:false"), &bytes).unwrap();
+        let result =
+            AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(vec![reply("never asked")])), session)
+                .run("inspect")
+                .await;
+        assert!(result.is_err(), "invalid saved state cannot silently reset the guard");
+        assert_eq!(
+            f.rook.store.kv_get(&format!("rook:tool-cycles:session:{session}:false")).unwrap().unwrap(),
+            bytes
+        );
+    }
+    let mut config = Config::default();
+    config.agent.tool_cycle_guard = false;
+    let f = fixture_with(config);
+    let session = f.rook.start_session("deliberate repeated operation").unwrap();
+    let mut script: Vec<_> = (0..6).map(|_| call("list_dir", serde_json::json!({"path":"."}))).collect();
+    script.push(reply("requested repetition delivered"));
+    let out = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session)
+        .run("repeat the requested inspection")
+        .await
+        .unwrap();
+    assert_eq!(out.tools_called.len(), 6);
+    assert!(rook_core::agent::finished(&out.stopped));
+}
+
+#[tokio::test]
+async fn tool_cycles_do_not_treat_fresh_background_job_ids_as_progress() {
+    let f = fixture();
+    let session = f.rook.start_session("duplicate background starts").unwrap();
+    let jobs = Arc::new(rook_tools::jobs::Jobs::new(4, 4096));
+    let command =
+        if cfg!(windows) { "powershell -NoProfile -Command Start-Sleep -Seconds 120" } else { "sleep 120" };
+    let mut script: Vec<_> = (0..5)
+        .map(|_| call("run_command", serde_json::json!({"command":command,"background":true})))
+        .collect();
+    script.push(reply("duplicate starts stopped"));
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    agent.allow_everything_not_denied();
+    agent.tool_ctx.jobs = Some(jobs.clone());
+    let out = agent.run("start one worker").await.unwrap();
+    let ids: Vec<_> = jobs.list().iter().map(|job| job.id.clone()).collect();
+    for id in &ids {
+        assert!(jobs.stop(id));
+    }
+    for id in &ids {
+        assert!(jobs.wait(id, std::time::Duration::from_secs(60)).await.unwrap().exit_code.is_some());
+    }
+    assert_eq!(out.stopped, "looping", "{out:?}");
+    assert_eq!(out.tools_called.len(), 2);
+    assert_eq!(ids.len(), 2, "different real job ids do not erase repeated results");
+}
+
+struct MtimeCommand;
+#[async_trait]
+impl rook_tools::Tool for MtimeCommand {
+    fn name(&self) -> &str {
+        "run_command"
+    }
+    fn spec(&self) -> rook_llm::ToolSpec {
+        rook_llm::ToolSpec {
+            name: self.name().into(),
+            description: "Change only the modification time.".into(),
+            parameters: serde_json::json!({"type":"object"}),
+        }
+    }
+    async fn call(
+        &self,
+        ctx: &rook_tools::ToolContext,
+        _: &serde_json::Value,
+    ) -> rook_tools::Result<rook_tools::ToolOutcome> {
+        let path = ctx.workspace.join("a.txt");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60))
+            .unwrap();
+        Ok(rook_tools::ToolOutcome::ok("exit 0"))
+    }
+    fn risk(&self, _: &serde_json::Value) -> rook_tools::policy::Risk {
+        rook_tools::policy::Risk::Execute("change mtime".into())
+    }
+}
+
+#[tokio::test]
+async fn tool_cycles_require_changed_bytes_even_when_a_successful_command_changes_mtime() {
+    let f = fixture();
+    let path = f.workspace.path().join("a.txt");
+    std::fs::write(&path, "unchanged").unwrap();
+    let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let session = f.rook.start_session("mtime is not progress").unwrap();
+    let mut script: Vec<_> =
+        (0..5).map(|_| call("run_command", serde_json::json!({"command":"touch"}))).collect();
+    script.push(reply("only mtime changed"));
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    agent.allow_everything_not_denied();
+    agent.tools = agent.tools.without(&["run_command"]);
+    agent.tools.register(Arc::new(MtimeCommand));
+    let out = agent.run("change real contents").await.unwrap();
+    assert!(
+        std::fs::metadata(&path).unwrap().modified().unwrap() > before,
+        "actual mtime change is required"
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "unchanged");
+    assert_eq!(out.stopped, "looping");
+    assert_eq!(out.tools_called.len(), 2);
+}

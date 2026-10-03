@@ -38,6 +38,7 @@ mod routing;
 mod setup;
 mod stream;
 mod tool_catalog;
+mod tool_cycles;
 mod tools;
 
 use budget::{cacheable, images_in, measure, measured};
@@ -445,11 +446,6 @@ async fn saying_it_waits<T>(
     }
 }
 
-/// How many times a turn may be told it is asking the same thing again before
-/// the turn ends. Three: the first is a slip, the second is a habit, and the
-/// third is the rest of the step budget.
-const STUCK_ON_ONE_CALL: usize = 3;
-
 /// Pseudo-tools: implemented by the loop rather than the toolbox, because they
 /// need the agent's own state.
 pub const LOAD_SKILL: &str = "load_skill";
@@ -526,6 +522,10 @@ pub struct AgentLoop<'a> {
     /// build a fresh loop and never inherit its caller identity.
     pub submission_key: Option<String>,
     launched_job: std::sync::Mutex<Option<String>>,
+    tool_cycles: std::sync::Mutex<Option<tool_cycles::Guard>>,
+    tool_cycle_outcome: std::sync::Mutex<Option<[u8; 32]>>,
+    pub(crate) managed_iteration: bool,
+    fresh_cycle_instruction: bool,
     pub options: rook_proto::TurnOptions,
     effective_options: Option<rook_proto::TurnOptions>,
     recipe_skill: Option<String>,
@@ -695,6 +695,10 @@ impl<'a> AgentLoop<'a> {
             reserved_execution: None,
             submission_key: None,
             launched_job: Default::default(),
+            tool_cycles: Default::default(),
+            tool_cycle_outcome: Default::default(),
+            managed_iteration: false,
+            fresh_cycle_instruction: false,
             options: Default::default(),
             effective_options: None,
             recipe_skill: None,
@@ -897,6 +901,8 @@ impl<'a> AgentLoop<'a> {
     ) -> Result<TurnOutcome> {
         let _workspace = crate::worktrees::Lease::acquire(&self.rook.workspace, false)?;
         let prepared_prompt = self.prepare_recipe(prompt)?;
+        self.fresh_cycle_instruction = !self.managed_iteration
+            && !(prepared_prompt.is_none() && (carrying_on(prompt) || prompt == CARRY_ON));
         let continuing = self.depth == 0
             && !self.checking
             && self.managed_work.is_none()
@@ -974,6 +980,7 @@ impl<'a> AgentLoop<'a> {
         mut on_progress: F,
     ) -> Result<TurnOutcome> {
         let loaded_recipe_skill = self.begin_turn(prompt, &mut on_progress).await?;
+        self.init_tool_cycles()?;
         let (mut messages, mut source_manifest) = self.request_messages(prompt)?;
         let mut outcome = TurnOutcome {
             steps: 0,
@@ -1007,11 +1014,7 @@ impl<'a> AgentLoop<'a> {
         let mut asked_to_say = false;
         let mut asked_to_go_on = false;
         let mut handed_left = false;
-        let mut repeated: std::collections::BTreeMap<(String, String), (String, u32)> =
-            std::collections::BTreeMap::new();
-        // How many calls this turn were refused as a repeat of one already
-        // answered, and whether that was what ended it.
-        let mut looping = 0usize;
+        let mut cycle_warning_reported = false;
         let mut stuck = false;
         let mut checked_goal = false;
         let mut completion_retries = 0;
@@ -1680,59 +1683,27 @@ impl<'a> AgentLoop<'a> {
                 // result is the test, so a command run again after an edit is
                 // not caught by it.
                 crate::provider_history::begin(self.rook, self.session, assistant_state, &call.id)?;
-                let key = (call.name.clone(), call.arguments.to_string());
                 let mut timing = crate::diagnostics::Timer::start(
                     self.rook,
                     self.session,
                     crate::diagnostics::Phase::ToolDispatch,
                 );
-                let (mut result, failed, recorded_seq) = match repeated.get(&key) {
-                    Some((_, times)) if *times >= 2 => {
-                        let said = format!(
-                            "`{}` with these same arguments was made {times} times this turn and \
-                             answered the same each time; the answer is above — act on it, or ask \
-                             something different",
-                            call.name
-                        );
-                        // Logged, not only answered. The refusal is written
-                        // here rather than by `dispatch`, so a turn spent in
-                        // one was a transcript of nothing but the model's own
-                        // messages: a hundred and seventy-five identical
-                        // replies with no visible cause, and the one thing
-                        // that would have explained them never recorded.
-                        self.rook.log(self.session, EventKind::ToolResult, &call.name, &said).ok();
-                        looping += 1;
-                        (said, true, None)
-                    }
-                    _ => {
-                        let done = self
-                            .dispatch_recorded(call, &mut outcome, &mut on_progress, &crew, &mut nursery)
-                            .await;
-                        let done = match done {
-                            Ok(done) => done,
-                            Err(error) => {
-                                timing.finish(crate::diagnostics::Status::Failed, None);
-                                return Err(error);
+                let (mut result, failed, recorded_seq) =
+                    match self.cycle_refusal(call, nursery.live_poll(call))? {
+                        Some((said, seq)) => (said, true, Some(seq)),
+                        _ => {
+                            let done = self
+                                .dispatch_recorded(call, &mut outcome, &mut on_progress, &crew, &mut nursery)
+                                .await;
+                            match done {
+                                Ok(done) => done,
+                                Err(error) => {
+                                    timing.finish(crate::diagnostics::Status::Failed, None);
+                                    return Err(error);
+                                }
                             }
-                        };
-                        // A call that changed the workspace makes every earlier
-                        // answer stale: the file read twice reads differently
-                        // after the edit, and the count starts over. Not the
-                        // loop's own tools — a claim verified twice to the same
-                        // verdict is the loop this exists for.
-                        if CHANGES_FILES.contains(&call.name.as_str()) || call.name == "run_command" {
-                            repeated.clear();
                         }
-                        repeated
-                            .entry(key)
-                            .and_modify(|(last, times)| {
-                                *times = if *last == done.0 { *times + 1 } else { 1 };
-                                *last = done.0.clone();
-                            })
-                            .or_insert((done.0.clone(), 1));
-                        done
-                    }
-                };
+                    };
                 let recorded_body = rook_store::ObjectId::of(result.as_bytes());
                 for (_, name) in dropped.iter().filter(|(id, _)| *id == call.id) {
                     result.push_str(&format!(
@@ -1801,19 +1772,32 @@ impl<'a> AgentLoop<'a> {
             // it — a hundred and ninety-four steps and six hundred thousand
             // tokens to arrive at "stopped at the step limit", which says
             // nothing about what went wrong. Ending here says it.
-            if looping >= STUCK_ON_ONE_CALL {
-                let said = "the same call was made over and over and answered the same way each \
-                            time, so the turn was ended rather than spending the rest of its \
-                            steps on it";
-                self.rook.log(self.session, EventKind::Note, "looping", said).ok();
-                self.report(Reported::Open(said.to_string()));
-                stuck = true;
-                // Out through the same door as the step limit, rather than
-                // returning here: a turn that looped has usually already found
-                // the answer — the live one had four passages of the
-                // documentation it was asked for — and ending on the loop
-                // leaves the person with the loop instead of the answer.
-                break;
+            if let Some((reason, stop)) = self.cycle_status() {
+                let said = format!(
+                    "tool-cycle guard: {reason}; no verified progress. {} The task is not marked complete.",
+                    if stop {
+                        "The turn was stopped; a new instruction or verified file change can reset this guard."
+                    } else {
+                        "Repeated results despite changing arguments; use the evidence already obtained."
+                    }
+                );
+                if stop || !cycle_warning_reported {
+                    self.rook.log(self.session, EventKind::Note, "looping", &said)?;
+                    self.report(Reported::Open(said.clone()));
+                    messages.push(Message::user(format!("[Rook tool-cycle guard]\n{said}")));
+                    cycle_warning_reported = true;
+                }
+                if stop {
+                    stuck = true;
+                    // Out through the same door as the step limit, rather than
+                    // returning here: a turn that looped has usually already found
+                    // the answer — the live one had four passages of the
+                    // documentation it was asked for — and ending on the loop
+                    // leaves the person with the loop instead of the answer.
+                    break;
+                }
+            } else {
+                cycle_warning_reported = false;
             }
         }
 

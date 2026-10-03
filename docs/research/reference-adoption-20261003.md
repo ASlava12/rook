@@ -9,7 +9,7 @@ Reference commits identify mechanisms, not code to copy wholesale.
 |---|---|---|
 | Responses streamed retry advice | Done | Bounded nested header decoding, transient/terminal classification, shared retry before content only, real HTTP delay/cancellation/partial-output/attempt tests; native CLI/daemon durable receipts; full CI exit 0 |
 | Repetition in streamed text | Done | Bounded Unicode-aware detector, legitimate repetition/opt-out fixtures, attributed interruption, local/daemon physical accounting, clean reopen and actual compaction replay; CI and storage compaction exit 0 |
-| Tool cycles without progress | Pending | Bounded run-scoped fingerprints, polling liveness, alternating calls/argument churn, compaction/restart/new-instruction behavior, observable warning/stop reasons and CI |
+| Tool cycles without progress | Done | Bounded execution companions, content progress/live job and child checks, alternating calls/argument and background-ID churn, actual compaction/reopen and worker/new-instruction scopes; native CLI/daemon durable counts; CI and compaction exit 0 |
 | Browser rendering batches | Pending | Frame batching, final/error/Stop flush, branch/reconnect ownership, actual long-response rendering measurements, preserved drafts/questions/queue and CI |
 | ACP child/compaction/error events | Pending | Explicit negotiated preview capabilities, legacy fallback, child IDs/ownership, duplicate/recovery and restricted cancellation, wire tests and CI |
 | Model/price reference catalog | Pending | Explicit refresh and bounded cache, canonical/cloud identity, source/age, operator-applied rates, live/manual precedence, offline/account/corrupt-cache tests, frontend parity and CI |
@@ -95,13 +95,81 @@ exceeding the shortening threshold; its focused test exited 0
 (`target/reference-repetition-legitimate-thought.log`). The final `cargo xtask ci`
 exited 0 in 625.4 seconds (`target/reference-repetition-ci-final.log`).
 
+## Third block: tool cycles without verified progress
+
+Replaced the turn-local full-string map with bounded SHA-256 observations in
+`agent/tool_cycles.rs`. Arguments serialize directly into a hasher; typed text
+and image results are hashed before hook/source decoration. Command titles and
+descriptions, poll wait durations and fresh background job IDs cannot bypass an
+otherwise identical result. Two equal results refuse a third identical call;
+three refusals stop the turn. Changing arguments with equal outcomes warns at
+10 observations and stops at 20, with distinct saved stop diagnostics for
+repeated calls, argument churn and unknown tool names. The live warning also
+reaches the next provider request. Refused calls retain matched durable call and
+result entries; no operation is started and task completion is never inferred.
+
+The default window is 30 fingerprints, configured within 20–128; admission checks
+the 128 KiB JSON companion limit before copying/decoding. One companion slot per
+session/run is scoped to the canonical execution root plus completion boundary
+or managed generation. It commits in the execution journal's existing durable
+operation-completion transaction. Explicit continuation, actual compaction and
+reopening preserve it. Accepted corrections, new admitted prompts and goal
+generations reset it, including recovery of an acceptance committed before live
+delivery. Automatic managed iteration is explicitly distinguished from a new
+human prompt. No postcard struct, wire field or format version is changed.
+
+Successful command/file-tool names and modification times do not reset evidence.
+Complete bounded content proofs admit 500 workspace files, 32 MiB total and 8 MiB
+per file; declared read inputs admit 32 paths with matching byte limits. Hashing
+also bounds a file growing after metadata admission. Incomplete/unreadable input
+proofs skip the fast refusal and never certify progress; result-churn detection
+still applies. Snapshot walks start with actual tool use, avoiding workspace
+hashing on pure chat. Live jobs use a registry liveness query with no captured
+output copy; live child polling uses the nursery. Polling does not evict history
+or erase a stall in another tool. Foreign `running` text/metadata does not exempt
+calls, and finished polls stay guarded.
+
+Focused evidence so far: the full agent-loop suite exited 0
+(`target/reference-tool-cycles-all-engine.log`), worker iteration/accepted
+steering/new-generation checks exited 0 (`target/reference-tool-cycles-goals.log`),
+and native CLI/daemon continuation checks exited 0
+(`target/reference-tool-cycles-native-verified.log`). The native fixture verifies
+actual saved execution counts `[2, 0, 1]` for the initial loop, continuation and
+fresh instruction after reopening. Additional targeted fixtures cover live versus
+finished/foreign polling, no-op/failed writes, changed file bytes, background job
+identity churn, corrupt/oversized receipts and explicit opt-out. An added mtime
+fixture initially used the real built-in ahead of its substitute in the toolbox;
+its precondition correctly failed. Removing the original before registering the
+substitute made the actual mtime-only test pass
+(`target/reference-tool-cycles-mtime.log`). The first full CI exited 1 on an
+orphaned doc comment and a redundant let-and-return; both corrected. Early native
+fixture failures incorrectly counted checker requests as main work, assumed the
+same CLI/daemon JSON shape and decoded a saved turn tuple as a naked outcome;
+the fixture now checks the actual existing shapes and durable outcomes. Final
+The final `cargo xtask ci` exited 0 in 680.1 seconds
+(`target/reference-tool-cycles-ci-final.log`), including the added background-ID,
+mtime, configured-window and large-input fingerprint fixtures and all existing
+frontend/storage/replay tests. `cargo xtask compaction` exited 0
+(`target/reference-tool-cycles-compaction.log`); the existing corpus
+measurement is unchanged: 23.31 MiB logical, 5.29 MiB distinct, 0.14 MiB warm,
+4.02 MiB disk, 37.1x dictionary and 5.8x end-to-end compression.
+
 ## Continuation notes for the remaining scope
 
-The next behavioral block is the tool-cycle guard: the existing `repeated` map
-in `agent.rs` is per turn and clears for `run_command`/file-changing tool names,
-without proving a changed workspace. Replace retained full results with bounded
-fingerprints and distinguish actual progress and live polling; keep new user
-instructions and goal generations separate. Do not infer completion from a stop.
+Three behavioral rows are Done; seven rows remain, including the required audits.
+The next block is browser rendering batching in the hand-written
+`web/dist/chat.js`. Flush versus discard on completion and session/turn ownership
+changes must preserve drafts, questions and queue state. Measure actual Markdown
+parsing/rendering, handle a pending frame on Done/Error/Stop and reconnect, and
+retain full final fenced text. `web/tests/chat-input-recovery.mjs` is an existing
+real-source harness; native browser probes under `xtask/probes/` demonstrate the
+owned scratch daemon/Edge approach. Do not touch the installed daemon/profile.
+
+The completed guard lives in `agent/tool_cycles.rs`. Its execution companion is
+separate from prompt compaction and commits with operation completion; keep the
+run/root/generation boundary and don't replace content proof with tool names or
+timestamps in later runtime/delegation work. The catalog, ACP previews and
+worktree recovery are still Pending; no audit is implicitly closed by this block.
 
 For the later delegation audit, `agent/delegation.rs` forwards ToolCall progress,
 not every text delta, through two unbounded channels bounded indirectly by child

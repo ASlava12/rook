@@ -103,6 +103,38 @@ unseen usage. A durable atomic pair retains redacted original tail excerpts as a
 diagnostic note and a neutral assistant marker. Only the marker reaches replay,
 context inspection, branch summaries and compaction; it never claims task completion.
 
+Tool cycles use a separate bounded execution companion, rather than retaining
+complete argument/result strings in a per-turn map. SHA-256 fingerprints are
+written with operation completion in the execution journal's existing durable
+transaction. One slot per session or managed run is scoped to the canonical
+execution root and completion boundary/goal generation. Continuation, actual
+compaction and reopening preserve it; new admitted prompts, accepted steering
+and goal generations reset it. Recovery checks committed steering labels as well
+as live delivery, and refuses corrupt or oversized receipts before copying them.
+`agent.tool_cycle_guard` defaults to true; disable it for deliberately repetitive
+operations. `agent.max_tool_cycle_observations` defaults to 30 (20–128); the JSON
+companion has a 128 KiB hard admission cap and changes no postcard/wire layout.
+
+Two equal answers refuse a third identical call; three refusals stop with
+`stopped=looping`, never task completion. Alternating calls share the same history;
+changing arguments/tool spellings with equal outcomes warns at 10 observations
+and stops at 20, with visible reason notes and an instruction to the next request.
+Command titles/descriptions, poll wait durations and newly allocated background
+job IDs do not establish progress. Actual live job and child registries exempt
+polling without cloning job output, erasing another tool's stall or occupying its
+history window. Finished polling and foreign `running` metadata remain guarded.
+Narrative/image tool output fingerprints precede hooks and source envelopes.
+
+Only verified content differences reset workspace evidence. Read input hashes
+also cover bounded declared files outside the workspace snapshot. Snapshots
+admit at most 500 files, 32 MiB total and 8 MiB per file, honoring capture exclusions;
+file inputs admit 32 paths with the same byte caps. Hashing streams have an extra
+byte to distinguish EOF from growing past admission. Incomplete/unreadable proofs
+and mtime-only changes never count as verified progress. Unknown inputs skip the
+fast third-call refusal and still receive result-churn checks. Workspace walking
+starts when tools are used, rather than on pure chat turns. The guard is deliberately
+conservative: arbitrary changing external results are not a claim of task progress.
+
 Provider-owned assistant state is stored as a bounded companion note paired
 atomically with the visible reply or usage record. Tool bindings preserve original
 call IDs through interrupted turns and forks. Transcript views omit opaque
@@ -601,7 +633,7 @@ step ordering. Its private modules in `agent/` separate the responsibilities:
 | `lifecycle`, `setup` | Admission, recipes, hooks, execution receipts, installation and closing |
 | `prompt`, `history`, `budget`, `compaction` | Stable instructions, source context, replay and context limits |
 | `stream` | Provider progress, partial answers and releasing the endpoint before follow-up requests |
-| `tool_catalog`, `tools`, `effects` | Tool schemas, dispatch, approvals, checkpoints and change tracking |
+| `tool_catalog`, `tools`, `effects`, `tool_cycles` | Tool schemas, dispatch, approvals, checkpoints, change tracking and bounded execution-cycle receipts |
 | `delegation` | Child execution, isolation, steering and collection of results |
 | `checks`, `output` | Verification, structured answers and final artifact writes |
 

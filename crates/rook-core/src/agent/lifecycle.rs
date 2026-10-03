@@ -112,6 +112,7 @@ impl AgentLoop<'_> {
                 (accepted.text, Some(accepted.receipt))
             }
         };
+        self.reset_tool_cycles()?;
         progress(Progress::Heard { text: &text, receipt: receipt.as_ref() });
         messages.push(rook_llm::Message::user(text));
         Ok(())
