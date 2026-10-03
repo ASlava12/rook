@@ -10,7 +10,7 @@ Reference commits identify mechanisms, not code to copy wholesale.
 | Responses streamed retry advice | Done | Bounded nested header decoding, transient/terminal classification, shared retry before content only, real HTTP delay/cancellation/partial-output/attempt tests; native CLI/daemon durable receipts; full CI exit 0 |
 | Repetition in streamed text | Done | Bounded Unicode-aware detector, legitimate repetition/opt-out fixtures, attributed interruption, local/daemon physical accounting, clean reopen and actual compaction replay; CI and storage compaction exit 0 |
 | Tool cycles without progress | Done | Bounded execution companions, content progress/live job and child checks, alternating calls/argument and background-ID churn, actual compaction/reopen and worker/new-instruction scopes; native CLI/daemon durable counts; CI and compaction exit 0 |
-| Browser rendering batches | Pending | Frame batching, final/error/Stop flush, branch/reconnect ownership, actual long-response rendering measurements, preserved drafts/questions/queue and CI |
+| Browser rendering batches | Done | Bounded frame batching, final/error/Stop flush, socket/session/turn/view ownership and history races; actual Edge 1,134 to 36 parses with full fenced text; drafts/questions/queue receipts, Node/assets tests and CI exit 0 |
 | ACP child/compaction/error events | Pending | Explicit negotiated preview capabilities, legacy fallback, child IDs/ownership, duplicate/recovery and restricted cancellation, wire tests and CI |
 | Model/price reference catalog | Pending | Explicit refresh and bounded cache, canonical/cloud identity, source/age, operator-applied rates, live/manual precedence, offline/account/corrupt-cache tests, frontend parity and CI |
 | Delegated worktree recovery | Pending | Read-only diagnosis plus explicit restore, registered checkout identity, preservation of recreated/dirty files, leases/path/platform bounds, local/daemon checks and CI |
@@ -145,7 +145,7 @@ substitute made the actual mtime-only test pass
 orphaned doc comment and a redundant let-and-return; both corrected. Early native
 fixture failures incorrectly counted checker requests as main work, assumed the
 same CLI/daemon JSON shape and decoded a saved turn tuple as a naked outcome;
-the fixture now checks the actual existing shapes and durable outcomes. Final
+the fixture now checks the actual existing shapes and durable outcomes.
 The final `cargo xtask ci` exited 0 in 680.1 seconds
 (`target/reference-tool-cycles-ci-final.log`), including the added background-ID,
 mtime, configured-window and large-input fingerprint fixtures and all existing
@@ -154,22 +154,51 @@ frontend/storage/replay tests. `cargo xtask compaction` exited 0
 measurement is unchanged: 23.31 MiB logical, 5.29 MiB distinct, 0.14 MiB warm,
 4.02 MiB disk, 37.1x dictionary and 5.8x end-to-end compression.
 
+## Fourth block: browser rendering batches
+
+Browser chat now owns pending work by socket/session/turn/viewport, flushes
+versus discards at explicit boundaries, releases completed source strings and
+admits text before copy. It keeps one bounded prefix, one frame and one background
+fallback, with no token-chunk queue or full source attribute. Per-answer admission
+is 1,048,576 UTF-16 units; rendered scrollback is at most 4,194,304 model-source
+units plus the existing 2,000-block bound. Shortening preserves surrogate pairs
+and points to the source session's saved history. Equal final replies avoid a
+duplicate parse; authoritative changes replace the current partial answer.
+Historical answers render synchronously and late successful/failed overlapping
+loads cannot overwrite the selected view.
+
+The complete Node suite, syntax checks and embedded-module tests exited 0
+(`target/reference-browser-node.log`, `target/reference-browser-assets.log`).
+Actual Edge measurements reduced 1,134 Markdown parses to 36 on the same fully
+verified fenced answer. The final browser probe exited 0
+(`target/reference-browser-edge-final.log`) for error, Stop, snapshot, branch
+selection/old socket, disconnect, queue receipt revisions and private
+question/composer drafts. See [the measurements](browser-rendering-20261003.md)
+and `xtask/probes/browser-rendering.mjs`. No installed daemon/profile was used;
+owned scratch process termination is checked. Final `cargo xtask ci` exited 0
+in 540.7 seconds (`target/reference-browser-ci.log`). Storage and daemon wire
+formats were unchanged, so a compaction remeasurement was not required.
+
 ## Continuation notes for the remaining scope
 
-Three behavioral rows are Done; seven rows remain, including the required audits.
-The next block is browser rendering batching in the hand-written
-`web/dist/chat.js`. Flush versus discard on completion and session/turn ownership
-changes must preserve drafts, questions and queue state. Measure actual Markdown
-parsing/rendering, handle a pending frame on Done/Error/Stop and reconnect, and
-retain full final fenced text. `web/tests/chat-input-recovery.mjs` is an existing
-real-source harness; native browser probes under `xtask/probes/` demonstrate the
-owned scratch daemon/Edge approach. Do not touch the installed daemon/profile.
+Four behavioral rows are Done; six rows remain, including the required audits.
+The next block is ACP child/compaction/error previews, followed by the catalog,
+worktree recovery and the three audits. Do not mark the entire goal complete
+after this finished browser block.
 
 The completed guard lives in `agent/tool_cycles.rs`. Its execution companion is
 separate from prompt compaction and commits with operation completion; keep the
 run/root/generation boundary and don't replace content proof with tool names or
 timestamps in later runtime/delegation work. The catalog, ACP previews and
 worktree recovery are still Pending; no audit is implicitly closed by this block.
+
+The next ACP block must use the inspected v1 capability shapes:
+`clientCapabilities.subagents` and `clientCapabilities.session.compaction`
+are enabled by a non-null object, not a boolean. Missing/null retain the legacy
+path. Upstream `59172ba`'s root post-admission error stop reason concerns v2;
+ordinary v1 prompt error responses are unchanged. Its v1 change is the negotiated
+subagent idle snapshot's error stop reason. Do not invent a v1 root capability or
+silently apply the v2 prompt lifecycle to the existing stable v1 adapter.
 
 For the later delegation audit, `agent/delegation.rs` forwards ToolCall progress,
 not every text delta, through two unbounded channels bounded indirectly by child

@@ -11,16 +11,18 @@ import { promptRetry } from './prompt-retry.js';
 import { stopRetry } from './stop-retry.js';
 import { admitDraftFiles, imageFile } from './draft-files.js';
 import { extensionPanel, readExtension } from './extension-ui.js';
+import { streamedMarkdown } from './streamed-markdown.js';
 
 // Scrollback, not the record: the session holds every word of this and the
 // sessions tab reads it back, so a tab left open for a day need not keep an
 // afternoon of turns in the document to stay recoverable.
 const MAX_SCROLLBACK_BLOCKS = 2000;
+const MAX_SCROLLBACK_MODEL_CHARACTERS = 4 << 20;
 
 let socket = null;
-// The assistant's current block, re-rendered from its whole text on every
-// delta so a fence or a list that arrives in pieces still ends up drawn.
+// Its full admitted text is parsed once per frame, with explicit ownership.
 let current = null;
+let historyLoad = 0;
 let retainedInputs = new Map();
 const retryPrompt = promptRetry();
 const retryStop = stopRetry();
@@ -61,6 +63,7 @@ async function restoreExtensions(session) {
 const chatOut = () => $('#stream');
 
 function block(kind, ...kids) {
+  if (kind !== 'md') finishModel();
   const out = chatOut();
   if (!out) return null;
   const n = el('div', { class: kind }, ...kids);
@@ -71,7 +74,7 @@ function block(kind, ...kids) {
 }
 
 function say(kind, text) {
-  current = null;
+  finishModel();
   return block(kind, text);
 }
 
@@ -90,7 +93,7 @@ function receiptNotice(receipt, text) {
   row.dataset.revision = String(receipt.revision);
   row.dataset.status = receipt.status;
   row.textContent = `[${receipt.reference} · r${receipt.revision} · ${receipt.status}] ${text}`;
-  current = null;
+  finishModel();
 }
 
 function receiveQueueReceipt(session, entry, submittedText) {
@@ -105,18 +108,49 @@ function receiveQueueReceipt(session, entry, submittedText) {
     status: r.applied_at !== null ? 'accepted' : r.withdrawn_at !== null ? 'withdrawn' : 'queued' }, r.text);
 }
 
-function saidByModel(text) {
-  if (!current || !current.isConnected) {
-    current = block('md', '');
+function finishModel(flush = true) {
+  if (!flush) historyLoad++;
+  if (flush) current?.writer.flush();
+  current?.writer.discard();
+  current = null;
+}
+
+document.addEventListener?.('visibilitychange', () => current?.writer.flush());
+
+function modelSpace(node, length) {
+  node.dataset.modelCharacters = String(length);
+  const out = chatOut();
+  let total = 0;
+  for (const child of out.children) total += Number(child.dataset?.modelCharacters || 0);
+  // Retire old rendered answers before building the next tree. Only numeric
+  // admission metadata stays on nodes; completed source strings are released.
+  while (total > MAX_SCROLLBACK_MODEL_CHARACTERS && out.firstElementChild !== node) {
+    const oldest = out.firstElementChild;
+    total -= Number(oldest.dataset?.modelCharacters || 0);
+    oldest.remove();
+  }
+}
+
+function saidByModel(text, replace = false) {
+  if (current && !current.owns()) finishModel(false);
+  if (!current) {
+    const node = block('md', '');
     // A running turn keeps streaming while history is open on another tab.
     // Its durable events remain readable even when there is no chat viewport.
-    if (!current) return;
-    current.dataset.text = '';
+    if (!node) return;
+    const connection = socket, session = state.chat.session, turn = turnId, out = chatOut();
+    const owns = () => node.isConnected && chatOut() === out && socket === connection &&
+      state.chat.session === session && turnId === turn;
+    const writer = streamedMarkdown({ isCurrent: owns, render: (source, clipped) => {
+      modelSpace(node, source.length);
+      node.replaceChildren(md(source));
+      if (clipped) node.append(el('p', { class: 'warn' },
+        `Displayed answer shortened; inspect the saved response in Sessions (${session || 'current session'}).`));
+      out.scrollTop = out.scrollHeight;
+    } });
+    current = { writer, owns };
   }
-  current.dataset.text += text;
-  current.replaceChildren(md(current.dataset.text));
-  const out = chatOut();
-  if (out) out.scrollTop = out.scrollHeight;
+  if (replace) current.writer.replace(text); else current.writer.append(text);
 }
 
 function setTitle() {
@@ -164,7 +198,7 @@ function stillGoing(text) {
 }
 
 function toolStarted(e) {
-  current = null; callStatus = null;
+  finishModel(); callStatus = null;
   const summary = el('summary', {}, `· ${e.doing || e.name}`);
   const meta = el('p', { class: 'sub' }, 'Running; saved result is available in history after completion.');
   const card = el('details', { class: 'live-tool-card' }, summary, meta);
@@ -189,7 +223,7 @@ function toolFinished(e) {
     saved.open = call.card.open;
     call.container.replaceChildren(call.meta, saved);
   }
-  current = null;
+  finishModel();
 }
 
 function clearPendingCalls() {
@@ -198,11 +232,11 @@ function clearPendingCalls() {
 }
 
 function done(keepInputs = false) {
+  finishModel();
   clearPendingCalls();
   if (!keepInputs) retainedInputs.clear();
   state.chat.busy = false;
   state.chat.waiting = false;
-  current = null;
   // Whatever the turn was waiting for goes with it. An `Allow once` button for
   // a turn that has ended is a control that does nothing, and nothing about it
   // says so — the terminal had the same fault, where it was worse, because an
@@ -242,6 +276,7 @@ export function connect() {
         break;
       }
       case 'snapshot': {
+        finishModel(false);
         if (state.chat.session !== e.session) resetExtensions();
         goalGeneration = null;
         goalObserved = false;
@@ -255,7 +290,7 @@ export function connect() {
         const candidates = [...retainedInputs, ...visible.map(node => [node.dataset.inputKey, node])];
         retainedInputs = new Map(candidates.filter(([key]) => active.has(key)));
         if (out) out.replaceChildren();
-        current = null; callStatus = null; pendingCalls = [];
+        callStatus = null; pendingCalls = [];
         state.chat.session = e.session;
         state.chat.spent = null; state.chat.context = null; state.chat.modelRequest = null;
         state.chat.waiting = false;
@@ -265,12 +300,13 @@ export function connect() {
         renderSettings(); renderPicker();
         break;
       }
-      case 'started': if (state.chat.session !== e.session) resetExtensions(); clearPendingCalls(); goalGeneration = null; goalObserved = false; turnId = null; retryPrompt.started(e.session); state.chat.session = e.session; state.chat.spent = null; state.chat.context = null; state.chat.modelRequest = null; renderSettings(); renderPicker(); break;
+      case 'started': finishModel(false); if (state.chat.session !== e.session) resetExtensions(); clearPendingCalls(); goalGeneration = null; goalObserved = false; turnId = null; retryPrompt.started(e.session); state.chat.session = e.session; state.chat.spent = null; state.chat.context = null; state.chat.modelRequest = null; renderSettings(); renderPicker(); break;
       // Joined a turn this page did not start. Said out loud either way: a
       // page that quietly starts streaming looks like it is answering
       // something you did not ask, and one that says nothing after asking
       // cannot be told from a daemon that did not hear.
       case 'attached':
+        finishModel(false);
         if (state.chat.session !== e.session) resetExtensions();
         if (state.chat.session !== e.session) clearPendingCalls();
         goalGeneration = null;
@@ -287,6 +323,7 @@ export function connect() {
         break;
       case 'goal': goalGeneration = e.generation; goalObserved = true; break;
       case 'turn':
+        if (turnId !== e.id) finishModel(false);
         turnId = e.id;
         if (e.prompt_id) retryPrompt.admitted(e.prompt_id, state.chat.session);
         break;
@@ -295,6 +332,7 @@ export function connect() {
         renderStopRetry();
         break;
       case 'follow_up':
+        finishModel();
         turnId = null;
         say('stat', `Starting follow-up ${e.id}`); callStatus = null;
         state.chat.spent = null; state.chat.context = null; state.chat.modelRequest = null;
@@ -342,10 +380,8 @@ export function connect() {
       case 'done': {
         if (e.stopped === 'already_admitted') { retryPrompt.settled(); done(); break; }
         retryPrompt.completed(state.chat.session);
-        if (typeof e.reply === 'string' && current?.dataset.text !== e.reply) {
-          current = null;
-          saidByModel(e.reply);
-        }
+        if (typeof e.reply === 'string') saidByModel(e.reply, true);
+        finishModel();
         // A turn that ran out of steps and one that finished read the same
         // without this, and they are not the same thing to whoever asked.
         if (e.stopped && e.stopped !== 'end_turn' && e.stopped !== 'stop') {
@@ -503,6 +539,7 @@ function reuseInput(kind, id, shape) {
 }
 
 function askApproval(request) {
+  finishModel();
   const shape = inputShape(request);
   if (reuseInput('approval', request.id, shape)) return;
   waitingOn(`${request.tool} wants to ${request.action}`);
@@ -528,6 +565,7 @@ function askApproval(request) {
 // One form for every question in the call: the agent asked them together
 // because they are independent, and a chain of dialogs would undo that.
 function askUser(request) {
+  finishModel();
   const shape = inputShape(request.questions);
   if (reuseInput('question', request.id, shape)) return;
   waitingOn(request.questions[0] ? request.questions[0].question : 'a question');
@@ -661,20 +699,24 @@ function renderPicker() {
 // seen and not only continued.
 export async function resume(session) {
   if (state.chat.busy) return;
+  finishModel(false);
   state.chat.session = session;
   resetExtensions();
   const out = chatOut();
   if (out) out.replaceChildren();
-  current = null;
+  const load = historyLoad;
+  const ownsHistory = () => load === historyLoad && state.chat.session === session &&
+    !state.chat.busy && chatOut() === out;
   renderPicker();
   if (!session) return;
   await restoreExtensions(session);
+  if (!ownsHistory()) return;
   try {
     const { items } = await api(`/api/sessions/${session}/history`);
-    if (state.chat.session !== session || state.chat.busy) return;
+    if (!ownsHistory()) return;
     for (const e of items) {
       if (e.kind === 'user') say('you', `› ${e.body}`);
-      else if (e.kind === 'assistant') { current = null; saidByModel(e.body); current = null; }
+      else if (e.kind === 'assistant') { saidByModel(e.body); finishModel(); }
       else if (e.kind === 'tool-call' || e.kind === 'tool-result') block('tool', savedToolCard(session, e));
       // `wrote` is JSON for `changes` to read, not prose for anybody. The same
       // question is `note_is_for_a_person` in rook-core, which the window asks.
@@ -682,7 +724,7 @@ export async function resume(session) {
     }
     say('stat', `— ${items.length} earlier entries; the next prompt continues this session —`);
   } catch (e) {
-    say('err', e.error || String(e));
+    if (ownsHistory()) say('err', e.error || String(e));
   }
 }
 
@@ -990,6 +1032,7 @@ export function continueIn(session, prepared = null) {
   // Detach this observer before choosing another conversation. A queued frame
   // from the old socket must not change the selected session or its controls.
   const previous = socket;
+  finishModel(false);
   socket = null;
   previous?.close();
   state.chat.draft = prepared ? prepared.text : ($('#chat-input')?.value ?? state.chat.draft ?? '');

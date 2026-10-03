@@ -341,6 +341,27 @@ into it. Its `/api/chat` websocket runs a turn and streams it back, including th
 approval round-trip, so the browser is a way to use the agent and not only to
 read what it did.
 
+Browser chat reparses streamed Markdown once per animation frame, from one
+bounded source buffer; split code fences remain intact. A 100 ms fallback serves
+background tabs. Done, errors, Stop, tool/question boundaries and disconnect
+flush synchronously; snapshot, branch selection and session/turn replacement
+discard obsolete scheduled work. Each callback owns its socket, session, turn
+and connected viewport. Final replies replace the current partial answer without
+duplicating it. Historical loads use the same ownership rule, including failed
+and overlapping loads of the same session. Question forms and composer drafts
+retain their existing independent recovery.
+
+Admission bounds an answer to 1,048,576 UTF-16 units before substring or
+concatenation, preserving complete surrogate pairs. The rendered scrollback
+retains at most 4,194,304 model-source units and 2,000 blocks; older nodes retire
+before constructing the next tree. A shortened answer identifies its session
+and points to saved history. Completed source strings are released, and DOM
+attributes retain numeric bounds metadata only. These are view bounds; saved
+transcript, queue admissions and critical receipts keep their existing contracts.
+The controlled Edge probe `xtask/probes/browser-rendering.mjs` measures actual
+Markdown parses and DOM delivery against an owned scratch daemon/profile; see
+[the measurements](research/browser-rendering-20261003.md).
+
 Each chat socket bounds queued and in-flight JSON by both frame count and encoded
 bytes (`server.chat_queue_events`, `server.chat_queue_bytes`). Byte admission
 counts JSON escaping before allocating the encoded frame. Permits remain held
