@@ -61,12 +61,25 @@ async fn scripted_server(
             }
             let checker =
                 request["input"].to_string().contains("Classify whether an assistant's proposed last reply");
+            let child = request["input"].as_array().is_some_and(|items| {
+                items.iter().any(|item| {
+                    item["role"] == "user" && item["content"].to_string().contains("DELEGATED_REPORT_")
+                })
+            });
             let output = if checker {
                 text_output(r#"{"action":"finish"}"#)
             } else {
                 assert!(record.lock().unwrap().len() < 64, "fixture request budget reached");
                 record.lock().unwrap().push(request.clone());
-                outputs.pop_front().unwrap_or_else(|| text_output("The requested inspection is complete."))
+                // Child requests may arrive before the parent's next request.
+                // They have their own reply rather than consuming its script.
+                if child {
+                    text_output("The delegated report is complete.")
+                } else {
+                    outputs
+                        .pop_front()
+                        .unwrap_or_else(|| text_output("The requested inspection is complete."))
+                }
             };
             let response = json!({"status":"completed","model":"gpt-6-astra","output":output,"usage":{"input_tokens":1,"output_tokens":1}});
             let (kind, body) = if request["stream"] == true {
@@ -102,6 +115,68 @@ fn rook_at(root: &std::path::Path) -> Rook {
 }
 fn provider(url: &str) -> Arc<Responses> {
     Arc::new(Responses::new("test", "gpt-6-astra", HttpConfig::new(url.into(), None, 128_000)).unwrap())
+}
+
+#[tokio::test]
+async fn asynchronous_delegates_finish_on_an_endpoint_with_one_request_slot() {
+    let _serial = HISTORY_SERIAL.lock().await;
+    let home = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("ROOK_HOME", home.path()) };
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("note.txt"), "parent evidence").unwrap();
+    let rook = rook_at(root.path());
+    let call = |id: &str, name: &str, arguments: Value| {
+        json!([{"type":"function_call","id":id,"call_id":id,"name":name,
+            "arguments":arguments.to_string()}])
+    };
+    let (url, seen, server) = scripted_server(vec![
+        call(
+            "delegate",
+            "delegate",
+            json!({
+                "tasks":["DELEGATED_REPORT_1","DELEGATED_REPORT_2","DELEGATED_REPORT_3",
+                    "DELEGATED_REPORT_4","DELEGATED_REPORT_5","DELEGATED_REPORT_6"],
+                "wait":false
+            }),
+        ),
+        call("read", "read_file", json!({"path":"note.txt"})),
+    ])
+    .await;
+    let endpoint = rook_llm::Endpoint {
+        name: url.clone(),
+        api: rook_llm::Api::Responses,
+        metadata_api: rook_llm::MetadataApi::default(),
+        assumed_context_window: None,
+        url,
+        key: None,
+        model: "gpt-6-astra".into(),
+        context_window: Some(128_000),
+        parallel: Some(1),
+        key_in_the_clear: false,
+        proxy: rook_llm::Proxy::default(),
+        queue: None,
+    };
+    let provider = Arc::from(
+        rook_llm::from_endpoints_with(
+            vec![endpoint],
+            std::time::Duration::from_secs(2),
+            rook_llm::Prefer::AsConfigured,
+        )
+        .unwrap(),
+    );
+    let session = rook.start_session("parent with asynchronous delegates").unwrap();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        AgentLoop::new(&rook, provider, session).run("Delegate six reports, read note.txt, then finish"),
+    )
+    .await;
+    server.abort();
+    let outcome =
+        result.expect("parent and children must advance while waiting for the endpoint slot").unwrap();
+    assert_eq!(outcome.delegated.len(), 6, "every delegate must finish and be collected");
+    assert_eq!(outcome.tools_called, ["delegate", "read_file"]);
+    assert_eq!(rook.store.list_sessions().unwrap().iter().filter(|s| s.parent == Some(session)).count(), 6);
+    assert!(seen.lock().unwrap().len() >= 9, "the parent and all six children reached the endpoint");
 }
 fn assert_batch(request: &Value, incomplete: bool) {
     let items = request["input"].as_array().unwrap();

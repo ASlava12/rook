@@ -1252,7 +1252,19 @@ impl<'a> AgentLoop<'a> {
                 patience,
                 &mut on_progress,
             );
-            let asked = match answering.await {
+            // A child can own the endpoint's next request slot. Keep driving
+            // it while opening the parent's stream, rather than waiting for
+            // receive() to poll it after the parent has acquired that slot.
+            let asked = {
+                tokio::pin!(answering);
+                loop {
+                    tokio::select! {
+                        result = &mut answering => break result,
+                        Some(()) = nursery.collect_next(), if nursery.busy() => {}
+                    }
+                }
+            };
+            let asked = match asked {
                 Ok(stream) => Ok(stream),
                 // The window was an assumption and the endpoint has just
                 // disagreed with it. Believing the refusal costs a
