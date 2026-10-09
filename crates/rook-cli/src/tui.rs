@@ -1482,6 +1482,7 @@ struct App {
     /// deadline beside it, the same line says the wait is bounded and when.
     patience: std::time::Duration,
     sessions: Vec<SessionSummary>,
+    session_rows: Vec<rook_core::session_list::Row>,
     session_state: ListState,
     /// The newest bounded calls, with what they were given and what came back.
     /// Read from the log so a window attached mid-turn sees earlier calls too.
@@ -1663,6 +1664,7 @@ impl App {
             palette_at: 0,
             model: rook_core::Config::load().map(|c| c.agent.model).unwrap_or_default(),
             sessions: Vec::new(),
+            session_rows: Vec::new(),
             session_state: ListState::default(),
             calls: Vec::new(),
             calls_older: false,
@@ -1711,7 +1713,15 @@ impl App {
 
     fn reload(&mut self) {
         let workspace = self.source.workspace().to_path_buf();
-        self.sessions = self.source.sessions().unwrap_or_default();
+        let selected = self.session_state.selected().and_then(|i| self.sessions.get(i)).map(|s| s.meta.id);
+        let sessions = self.source.sessions().unwrap_or_default();
+        self.session_rows = rook_core::session_list::rows(&sessions);
+        self.sessions = self.session_rows.iter().map(|row| sessions[row.index].clone()).collect();
+        self.session_state.select(
+            selected
+                .and_then(|id| self.sessions.iter().position(|s| s.meta.id == id))
+                .or_else(|| (!self.sessions.is_empty()).then_some(0)),
+        );
         self.skills = self.source.catalog(&workspace).unwrap_or_default();
         let here = workspace.display().to_string();
         self.facts = self
@@ -4916,18 +4926,23 @@ impl App {
         let items: Vec<ListItem> = self
             .sessions
             .iter()
-            .map(|s| {
+            .zip(&self.session_rows)
+            .map(|(s, row)| {
                 ListItem::new(vec![
-                    Line::from(Span::styled(
-                        match s.meta.title.trim().is_empty() {
-                            true => "(untitled)".to_string(),
-                            false => s.meta.title.chars().take(40).collect::<String>(),
-                        },
-                        Style::default().add_modifier(Modifier::BOLD),
-                    )),
+                    Line::from(vec![
+                        Span::styled(row.prefix.as_str(), Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            match s.meta.title.trim().is_empty() {
+                                true => "(untitled)".to_string(),
+                                false => s.meta.title.chars().take(40).collect::<String>(),
+                            },
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
                     Line::from(Span::styled(
                         format!(
-                            "  {} · {} events · {}",
+                            "{}  {} · {} events · {}",
+                            row.continuation,
                             fmt::ago(s.meta.updated_at),
                             s.meta.event_count,
                             // The pane is a third of the width and only one of

@@ -40,6 +40,15 @@ submit a prompt or restore files; lowercase `b` still navigates back in history.
 The tree's `e` edits a branch name. In history, `m` labels the selected event
 and `l` opens bookmarks; Enter jumps to one, `m` edits it, `x` removes it, and
 `b` returns to history.
+
+The Sessions pane groups each conversation with its children and grandchildren,
+using tree guides. Families with recent child activity rise together, so a
+waiting parent remains easy to find. Reload preserves the selected session when
+families move. `rook session ls` and the browser's Sessions view use the same
+ordering; `/api/sessions?tree=true` includes each row's depth and tree guides.
+Plain `/api/sessions` and `rook session ls --json` retain their flat recent-first
+listing. A missing parent does not hide its remaining children.
+
 `/summary TARGET_SESSION reviewed text` copies an explicitly sourced historical
 summary from the open conversation into another branch; it does not switch or
 restore files. See [conversation branches](conversation-branches.md).

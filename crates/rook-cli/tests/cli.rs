@@ -13,6 +13,50 @@ struct Rook {
 }
 
 #[test]
+fn session_listing_groups_nested_children_locally_and_through_the_daemon() {
+    let _one = one_at_a_time();
+    let rook = Rook::new();
+    {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        for (id, parent, title, updated) in [
+            (1, None, "ROOT_FAMILY", 1),
+            (2, Some(1), "CHILD_FAMILY", 80),
+            (3, Some(2), "GRANDCHILD_FAMILY", 100),
+            (4, Some(1), "SIBLING_FAMILY", 70),
+            (5, None, "OTHER_FAMILY", 90),
+        ] {
+            let mut meta =
+                rook_store::SessionMeta::new(id, title, rook.workspace.path().display().to_string(), updated);
+            meta.parent = parent;
+            store.create_session(&meta).unwrap();
+        }
+    }
+    let check = || {
+        let text = rook.ok(&["session", "ls"]);
+        let positions: Vec<_> =
+            ["ROOT_FAMILY", "CHILD_FAMILY", "GRANDCHILD_FAMILY", "SIBLING_FAMILY", "OTHER_FAMILY"]
+                .iter()
+                .map(|title| text.find(title).unwrap())
+                .collect();
+        assert!(positions.windows(2).all(|p| p[0] < p[1]), "families must stay together: {text}");
+        assert!(text.contains("├─ CHILD_FAMILY"), "{text}");
+        assert!(text.contains("│  └─ GRANDCHILD_FAMILY"), "{text}");
+        assert!(text.contains("└─ SIBLING_FAMILY"), "{text}");
+        let json = rook.json(&["session", "ls"]);
+        assert_eq!(
+            json[0]["id"],
+            rook_store::format_session_id(3),
+            "JSON keeps its flat recent-first contract"
+        );
+        text
+    };
+    let local = check();
+    drop(_one); // The daemon fixture takes the same gate for its lifetime.
+    let _daemon = Daemon::start(&rook);
+    assert_eq!(check(), local);
+}
+
+#[test]
 fn oversized_saved_queue_and_work_refuse_local_and_daemon_reads_without_changes() {
     rook_llm::init_tls();
     let cap = 8 * 1024 * 1024;
@@ -1800,10 +1844,14 @@ fn rookd() -> PathBuf {
     });
 
     BUILT.call_once(|| {
-        let built = Command::new(env!("CARGO"))
-            .args(["build", "-p", "rookd"])
-            .current_dir(env!("CARGO_MANIFEST_DIR"))
-            .status();
+        let mut build = Command::new(env!("CARGO"));
+        build.args(["build", "-p", "rookd"]);
+        // The fixture launches the daemon beside this test's CLI, including
+        // in release-profile runs; rebuilding debug leaves that binary stale.
+        if path.parent().and_then(|p| p.file_name()).is_some_and(|p| p == "release") {
+            build.arg("--release");
+        }
+        let built = build.current_dir(env!("CARGO_MANIFEST_DIR")).status();
         assert!(built.is_ok_and(|s| s.success()), "could not build rookd for the daemon tests");
     });
     assert!(path.exists(), "{} is still not there after building it", path.display());

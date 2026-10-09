@@ -1572,6 +1572,98 @@ fn a_skill_can_be_captured_and_rolled_back_where_it_is_listed() {
     assert!(body.contains("sweep"), "the captured body is back: {body}");
 }
 
+#[test]
+fn the_session_list_keeps_nested_children_under_their_parent_and_continues_the_selected_child() {
+    let _one = one_at_a_time();
+    for remote in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        {
+            let store = rook_store::Store::open(home.path().join("store")).unwrap();
+            for (id, parent, title, updated) in [
+                (1, None, "ROOT_FAMILY", 1),
+                (2, Some(1), "CHILD_FAMILY", 80),
+                (3, Some(2), "GRANDCHILD_FAMILY", 100),
+                (4, Some(1), "SIBLING_FAMILY", 70),
+                (5, None, "OTHER_FAMILY", 90),
+            ] {
+                let mut meta =
+                    rook_store::SessionMeta::new(id, title, workspace.path().display().to_string(), updated);
+                meta.parent = parent;
+                store.create_session(&meta).unwrap();
+                store
+                    .append_event(
+                        id,
+                        rook_store::NewEvent::new(
+                            rook_store::EventKind::UserMessage,
+                            rook_store::Kind::Message,
+                            format!("HISTORY_OF_{title}").as_bytes(),
+                        ),
+                    )
+                    .unwrap();
+                store.update_session(id, |meta| meta.updated_at = updated).unwrap();
+            }
+        }
+        let daemon = remote.then(|| Daemon::start(home.path(), workspace.path()));
+        let mut pty = if remote {
+            Pty::spawn(
+                std::path::Path::new(env!("CARGO_BIN_EXE_rook")),
+                &["--workspace", workspace.path().to_str().unwrap(), "tui"],
+                &[
+                    ("ROOK_HOME", home.path().to_str().unwrap()),
+                    ("ROOK_LOG", "error"),
+                    ("TERM", "xterm-256color"),
+                ],
+                100,
+                30,
+            )
+        } else {
+            tui(home.path(), workspace.path())
+        };
+        pty.screen(100, 30);
+        pty.send("\u{10}");
+        pty.send("sessions\r");
+        let screen = pty.screen_showing(100, 30, "OTHER_FAMILY").join("\n");
+        assert!(screen.contains("├─ CHILD_FAMILY"), "the parent leads its children: {screen}");
+        assert!(screen.contains("│  └─ GRANDCHILD_FAMILY"), "nested branches are visible: {screen}");
+        assert!(screen.contains("└─ SIBLING_FAMILY"), "siblings stay in their family: {screen}");
+        assert!(
+            screen.contains("▌ROOT_FAMILY"),
+            "the original conversation starts under the cursor: {screen}"
+        );
+        pty.send("j");
+        pty.screen_showing(100, 30, "HISTORY_OF_CHILD_FAMILY");
+        if remote {
+            let changed = Command::new(env!("CARGO_BIN_EXE_rook"))
+                .env("ROOK_HOME", home.path())
+                .env("ROOK_LOG", "error")
+                .args(["--workspace", workspace.path().to_str().unwrap(), "session", "rename"])
+                .args([&rook_store::format_session_id(5), "UPDATED_OTHER_FAMILY"])
+                .output()
+                .unwrap();
+            assert!(changed.status.success(), "{changed:?}");
+        }
+        pty.send("r");
+        let reloaded = pty
+            .screen_showing(100, 30, if remote { "UPDATED_OTHER_FAMILY" } else { "HISTORY_OF_CHILD_FAMILY" })
+            .join("\n");
+        assert!(
+            reloaded.contains("HISTORY_OF_CHILD_FAMILY"),
+            "reordering families must preserve the selected child: {reloaded}"
+        );
+        pty.send("\r");
+        let continued = pty.screen_showing(100, 30, "continuing").join("\n");
+        assert!(
+            continued.contains("HISTORY_OF_CHILD_FAMILY"),
+            "Enter must continue the child under the cursor: {continued}"
+        );
+        drop(pty);
+        drop(daemon);
+        let store = rook_store::Store::open(home.path().join("store")).unwrap();
+        assert_eq!(store.get_session(2).unwrap().unwrap().next_seq, 1, "browsing never submits a prompt");
+    }
+}
+
 /// The Sessions tab is where a session is found, and the id was the only way
 /// to take it up: read it there, then type it into the chat.
 #[test]

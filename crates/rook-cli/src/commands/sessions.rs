@@ -414,28 +414,24 @@ pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, js
 
 fn show_sessions(sessions: &[SessionSummary], workspace: &Path, all: bool, json: bool) -> Result<()> {
     let here = workspace.display().to_string();
-    let shown: Vec<&SessionSummary> = sessions.iter().filter(|s| all || s.meta.workspace == here).collect();
+    let shown: Vec<SessionSummary> =
+        sessions.iter().filter(|s| all || s.meta.workspace == here).cloned().collect();
     let elsewhere = sessions.len() - shown.len();
     let sessions = shown;
     if json {
         println!("{}", serde_json::to_string_pretty(&sessions)?);
         return Ok(());
     }
-    let rows: Vec<Vec<String>> = sessions
+    let rows: Vec<Vec<String>> = rook_core::session_list::rows(&sessions)
         .iter()
-        .map(|s| {
+        .map(|row| {
+            let s = &sessions[row.index];
             vec![
                 rook_store::format_session_id(s.meta.id),
-                // Sub-tasks and forks are listed alongside what they came
-                // from; the marker is what tells them apart at a glance, and a
-                // fork says where in the parent it diverged.
                 format!(
-                    "{}{}",
-                    match (s.meta.parent, s.forked_at) {
-                        (Some(_), Some(at)) => format!("↳@{at} "),
-                        (Some(_), None) => "↳ ".into(),
-                        _ => String::new(),
-                    },
+                    "{}{}{}",
+                    row.prefix,
+                    s.forked_at.map(|at| format!("@{at} ")).unwrap_or_default(),
                     match s.meta.title.trim().is_empty() {
                         true => "(untitled)".into(),
                         false => s.meta.title.chars().take(40).collect::<String>(),

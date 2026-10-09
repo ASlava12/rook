@@ -61,6 +61,7 @@ pub mod script;
 pub mod search;
 pub mod secrets;
 pub mod service;
+pub mod session_list;
 mod sources;
 pub mod telemetry;
 pub mod transcript;

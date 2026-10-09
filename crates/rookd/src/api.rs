@@ -388,8 +388,33 @@ async fn acknowledge_operation(
     Ok(Json(serde_json::json!({"acknowledged":body.operation})))
 }
 
-async fn sessions(State(s): State<Shared>) -> ApiResult<Page<rook_core::SessionSummary>> {
-    let items = s.rook.read().await.session_summaries()?;
+#[derive(Deserialize)]
+struct SessionListQuery {
+    #[serde(default)]
+    tree: bool,
+}
+
+#[derive(serde::Serialize)]
+struct ListedSession {
+    #[serde(flatten)]
+    session: rook_core::SessionSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tree: Option<rook_core::session_list::Row>,
+}
+
+async fn sessions(
+    State(s): State<Shared>,
+    Query(query): Query<SessionListQuery>,
+) -> ApiResult<Page<ListedSession>> {
+    let summaries = s.rook.read().await.session_summaries()?;
+    let items = if query.tree {
+        rook_core::session_list::rows(&summaries)
+            .into_iter()
+            .map(|row| ListedSession { session: summaries[row.index].clone(), tree: Some(row) })
+            .collect()
+    } else {
+        summaries.into_iter().map(|session| ListedSession { session, tree: None }).collect()
+    };
     Ok(Json(Page::new(items)))
 }
 
@@ -1727,6 +1752,39 @@ mod tests {
             stopping: tokio::sync::Notify::new(),
         });
         Fixture { _home: home, _workspace: workspace, router: router(state.clone()), state, session }
+    }
+
+    #[tokio::test]
+    async fn session_listing_can_group_nested_children_without_changing_the_legacy_listing() {
+        let f = fixture();
+        {
+            let rook = f.state.rook.read().await;
+            rook.store.update_session(f.session, |meta| meta.updated_at = 1).unwrap();
+            for (id, parent, updated) in [(2, Some(f.session), 70), (3, Some(2), 100), (4, None, 90)] {
+                let mut meta = rook_store::SessionMeta::new(id, "nested session", "workspace", updated);
+                meta.parent = parent;
+                rook.store.create_session(&meta).unwrap();
+            }
+        }
+        let (status, flat) = get(&f, "/api/sessions").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(flat["items"][0]["id"], rook_store::format_session_id(3));
+        assert!(flat["items"].as_array().unwrap().iter().all(|s| s.get("tree").is_none()));
+        let (status, tree) = get(&f, "/api/sessions?tree=true").await;
+        assert_eq!(status, StatusCode::OK);
+        let rows = tree["items"].as_array().unwrap();
+        assert_eq!(
+            rows.iter().map(|s| s["id"].as_str().unwrap()).collect::<Vec<_>>(),
+            [f.session, 2, 3, 4].map(rook_store::format_session_id)
+        );
+        assert_eq!(rows[0]["tree"]["depth"], 0);
+        assert_eq!(rows[1]["tree"]["prefix"], "└─ ");
+        assert_eq!(rows[2]["tree"]["prefix"], "   └─ ");
+        assert_eq!(rows[2]["parent"], rook_store::format_session_id(2));
+        assert!(rows[2]["tree"].get("index").is_none());
+        for row in rows {
+            let _: rook_core::SessionSummary = serde_json::from_value(row.clone()).unwrap();
+        }
     }
 
     #[tokio::test]

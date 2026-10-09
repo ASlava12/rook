@@ -686,7 +686,7 @@ function renderPicker() {
   const options = [el('option', { value: '', selected: !current }, 'new session')];
   for (const s of state.chat.sessions) {
     options.push(el('option', { value: s.id, selected: String(s.id) === String(current) },
-      `${s.title || '(untitled)'} · ${ago(s.updated_at)}`));
+      `${s.tree?.prefix || ''}${s.title || '(untitled)'} · ${ago(s.updated_at)}`));
   }
   if (current && !state.chat.sessions.some(s => String(s.id) === String(current))) {
     options.push(el('option', { value: current, selected: true }, `session ${current}`));
@@ -787,7 +787,7 @@ async function offer(input, row) {
 }
 
 export async function renderChat() {
-  try { state.chat.sessions = (await api('/api/sessions')).items.slice(0, 30); } catch { state.chat.sessions = []; }
+  try { state.chat.sessions = (await api('/api/sessions?tree=true')).items.slice(0, 30); } catch { state.chat.sessions = []; }
   const stream = el('div', { class: 'stream', id: 'stream' });
   const input = el('textarea', { id: 'chat-input', rows: 3, 'aria-label': 'Prompt', placeholder: 'Ask the agent… (Enter sends, Shift+Enter adds a line, Esc stops)', autofocus: true }, state.chat.draft || '');
   const sendButton = el('button', { id: 'send', type: 'submit' }, 'Send');

@@ -22,13 +22,15 @@ async function rewindTo(seq) {
 
 export async function renderSessions() {
   const token = ++follow;
-  const { items } = await api('/api/sessions');
+  const { items } = await api('/api/sessions?tree=true');
   if (!state.session && items.length) state.session = items[0].id;
   const list = el('ul', { class: 'list' }, items.map(s => el('li', {
       'aria-current': String(String(s.id) === String(state.session)),
       onclick: () => { state.session = s.id; renderSessions(); }
     },
-    el('div', { class: 'name' }, s.title || '(untitled)'),
+    el('div', { class: 'name' },
+      el('span', { class: 'session-tree-prefix', 'aria-hidden': true }, s.tree?.prefix || ''),
+      s.title || '(untitled)'),
     el('div', { class: 'sub' }, `${ago(s.updated_at)} · ${s.event_count} events · ${s.model || '—'}`),
     s.forked_at != null ? el('div', { class: 'sub' }, `forked at event ${s.forked_at}`) : null,
     s.goal ? el('div', { class: 'sub' }, `goal: ${s.goal}`) : null)));
