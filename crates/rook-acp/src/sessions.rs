@@ -24,6 +24,12 @@ pub(crate) fn list(rook: &Rook, params: serde_json::Value) -> Result<serde_json:
     {
         return Err(Error::invalid_params("cwd must be an absolute path of at most 4096 bytes"));
     }
+    // Session setup canonicalizes cwd. Match Windows verbatim paths and Unix
+    // aliases the same way, while retaining discovery of a removed directory.
+    let cwd = request.cwd.as_ref().map(|cwd| {
+        let path = std::path::PathBuf::from(cwd);
+        path.canonicalize().unwrap_or(path)
+    });
     let after = request
         .cursor
         .as_deref()
@@ -47,11 +53,14 @@ pub(crate) fn list(rook: &Rook, params: serde_json::Value) -> Result<serde_json:
             .get_session_limited(id, META_BYTES)
             .map_err(|error| Error::internal(error.to_string()))?;
         let Some(meta) = meta else { continue };
-        if request.cwd.as_ref().is_some_and(|cwd| cwd != &meta.workspace) {
-            continue;
-        }
         if meta.workspace.len() > 4096 {
             return Err(Error::internal("stored session workspace exceeds 4096 bytes"));
+        }
+        if let Some(cwd) = &cwd {
+            let stored = std::path::Path::new(&meta.workspace);
+            if cwd != stored && !stored.canonicalize().is_ok_and(|stored| &stored == cwd) {
+                continue;
+            }
         }
         sessions.push(serde_json::json!({
             "sessionId": rook_store::format_session_id(meta.id),

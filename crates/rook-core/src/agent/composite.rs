@@ -294,7 +294,7 @@ impl<'a> AgentLoop<'a> {
             super::observe::Child::start(self.observer.clone(), self.session, session, &ready.id);
         let (doing, mut steps) =
             super::delegation_progress::channel(self.rook.config.agent.delegation_progress_entries);
-        let future = crew.run_subtask_in(
+        let future = Box::pin(crew.run_subtask_in(
             session,
             "Complete the explicitly selected recipe stage",
             None,
@@ -311,7 +311,7 @@ impl<'a> AgentLoop<'a> {
             doing,
             ready.index,
             Default::default(),
-        );
+        ));
         tokio::pin!(future);
         let result = loop {
             tokio::select! {biased;Some((at,doing))=steps.recv()=>progress(Progress::Delegating{at,doing:&doing}),result=&mut future=>break result}

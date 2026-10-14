@@ -10,11 +10,15 @@ pub(crate) async fn submit(state: &Arc<AppState>, input: &Input) -> Result<Strin
     let session = rook_store::parse_session_id(&input.session).ok_or("Invalid Telegram session")?;
     let live = state.live.read().await.get(&session).filter(|l| l.running()).cloned();
     let rook = engine.read().await;
+    // Routing records the canonical directory, while the daemon may have been
+    // started through an alias (for example /var on macOS).
+    let workspace =
+        rook.workspace.canonicalize().map_err(|e| format!("Telegram workspace unavailable: {e}"))?;
     if rook
         .store
         .get_session(session)
         .map_err(|e| e.to_string())?
-        .is_none_or(|m| std::path::Path::new(&m.workspace) != rook.workspace)
+        .is_none_or(|m| std::path::Path::new(&m.workspace) != workspace)
     {
         return Err("Telegram session workspace changed; inspect routing".into());
     }

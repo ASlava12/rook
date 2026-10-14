@@ -158,6 +158,16 @@ fn telegram_http_routes_followups_live_approvals_stop_and_uncertain_results_surv
     });
     let _release_on_drop = ReleaseOnDrop(release.clone());
     let fixture = Rook::new();
+    // Canonical routing must still reach the daemon opened through an alias.
+    #[cfg(unix)]
+    let daemon_workspace = {
+        let alias = fixture.home.path().join("workspace-alias");
+        std::os::unix::fs::symlink(fixture.workspace.path(), &alias).unwrap();
+        assert_ne!(alias, alias.canonicalize().unwrap());
+        alias
+    };
+    #[cfg(not(unix))]
+    let daemon_workspace = fixture.workspace.path().to_path_buf();
     fixture.write_config(&format!("[agent]\nmodel='local'\ninstall_servers=false\none_script=false\nplan_first=false\n[memory]\nenabled=false\n[web]\nenabled=false\n[sandbox]\nstance='assist'\n[models.local]\napi='openai'\nmodel='test'\nurl='{}/v1'\ncontext_window=128000\n[telegram]\nenabled=true\nsecret='bot'\napi_url='{}'\nworkspace={}\nallowed_users=[1,2]\nallowed_chats=[-10]\nmax_turn_secs=120\n",model.url,bot.url,serde_json::to_string(fixture.workspace.path().to_str().unwrap()).unwrap()));
     let mut vault = rook_core::Vault::load_from(fixture.home.path().join("secrets.toml")).unwrap();
     vault.keep("bot", "123:fixture-telegram-token").unwrap();
@@ -165,7 +175,7 @@ fn telegram_http_routes_followups_live_approvals_stop_and_uncertain_results_surv
         input(1, 7, 99, "untrusted"),
         input(2, 7, 1, "Write TELEGRAM_NATIVE_42 to telegram-result"),
     ]);
-    let daemon = Daemon::start(&fixture);
+    let daemon = Daemon::start_in(&fixture, &daemon_workspace);
     wait(
         || outgoing.lock().unwrap().iter().any(|m| m.get("reply_markup").is_some()),
         "live tool approval was never published",
@@ -233,7 +243,7 @@ fn telegram_http_routes_followups_live_approvals_stop_and_uncertain_results_surv
         "lost response was not retained as an uncertain delivery",
     );
     drop(daemon);
-    let restarted = Daemon::start(&fixture);
+    let restarted = Daemon::start_in(&fixture, &daemon_workspace);
     incoming.lock().unwrap().push(input(6, 8, 1, "/status"));
     wait(
         || {

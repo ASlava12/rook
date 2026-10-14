@@ -1892,6 +1892,10 @@ impl Daemon {
     /// Port 0: the OS picks a free one and rookd writes where it landed, so two
     /// tests can never collide over a number someone chose.
     fn start(rook: &Rook) -> Self {
+        Self::start_in(rook, rook.workspace.path())
+    }
+
+    fn start_in(rook: &Rook, workspace: &std::path::Path) -> Self {
         let one = one_at_a_time();
         // Killing a fixture bypasses the daemon's address-file cleanup. A
         // restart must wait for this child, rather than read the previous port.
@@ -1908,7 +1912,7 @@ impl Daemon {
         let mut child = Command::new(rookd())
             .env("ROOK_HOME", rook.home.path())
             .env("ROOK_LOG", "error")
-            .args(["--workspace", rook.workspace.path().to_str().unwrap()])
+            .args(["--workspace", workspace.to_str().unwrap()])
             .args(["--port", "0"])
             .stdout(std::process::Stdio::null())
             .stderr(std::fs::File::create(&complaints).unwrap())

@@ -160,7 +160,9 @@ impl<'a> AgentLoop<'a> {
         self.tool_execution_uncertain.store(false, std::sync::atomic::Ordering::Release);
         *self.launched_job.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.tool_cycle_outcome.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        let result = self.dispatch(call, outcome, on_progress, crew, nursery).await;
+        // A dispatch can poll another agent. Keep each suspended dispatch off
+        // the caller's stack, including the Windows CLI's 1 MiB main stack.
+        let result = Box::pin(self.dispatch(call, outcome, on_progress, crew, nursery)).await;
         if self.tool_execution_uncertain.load(std::sync::atomic::Ordering::Acquire) {
             journal.retain_unknown()?;
         }
@@ -359,7 +361,7 @@ impl<'a> AgentLoop<'a> {
             return result;
         }
         if call.name == crate::composite_recipes::TOOL {
-            let result = match self.compose(call, outcome, on_progress).await {
+            let result = match Box::pin(self.compose(call, outcome, on_progress)).await {
                 Ok(result) => result,
                 Err(e) => (e.to_string(), true),
             };
@@ -367,7 +369,7 @@ impl<'a> AgentLoop<'a> {
             return result;
         }
         if call.name == DELEGATE {
-            let text = self.delegate(&call.arguments, outcome, on_progress, crew, nursery).await;
+            let text = Box::pin(self.delegate(&call.arguments, outcome, on_progress, crew, nursery)).await;
             self.rook.log(self.session, EventKind::ToolResult, DELEGATE, &text).ok();
             return (text, false);
         }

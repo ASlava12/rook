@@ -955,7 +955,7 @@ impl<'a> AgentLoop<'a> {
     ) -> Result<TurnOutcome> {
         let original_provider = self.provider.clone();
         let original_limits = (self.max_steps, self.max_turn_tokens, self.max_turn_secs);
-        let outcome = self.run_once(prompt, &mut on_progress).await?;
+        let outcome = Box::pin(self.run_once(prompt, &mut on_progress)).await?;
         if self.depth == 0
             && !self.checking
             && crate::agent::finished(&outcome.stopped)

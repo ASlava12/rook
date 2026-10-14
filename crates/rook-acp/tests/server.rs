@@ -166,6 +166,15 @@ async fn advertised_session_discovery_pages_without_duplicates_and_filters_works
     }
     assert_eq!(seen, created);
     assert!(second["result"].get("nextCursor").is_none());
+    #[cfg(unix)]
+    {
+        let aliases = tempfile::tempdir().unwrap();
+        let alias = aliases.path().join("project");
+        std::os::unix::fs::symlink(&editor.workspace, &alias).unwrap();
+        assert_ne!(alias, alias.canonicalize().unwrap());
+        let listed = editor.call(77, "session/list", serde_json::json!({"cwd":alias})).await;
+        assert_eq!(listed["result"]["sessions"], first["result"]["sessions"], "{listed}");
+    }
     let absent = editor.call(74, "session/list", serde_json::json!({"cwd":"/not-this-project"})).await;
     assert!(absent["result"]["sessions"].as_array().unwrap().is_empty());
     let invalid = editor.call(75, "session/list", serde_json::json!({"cursor":"not-a-cursor"})).await;

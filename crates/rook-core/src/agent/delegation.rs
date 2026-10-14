@@ -260,7 +260,8 @@ impl Crew<'_> {
     ) -> Result<(String, TurnOutcome)> {
         let session = self.rook.fork_for_subtask(self.parent, task)?;
         let mut observation = super::observe::Child::start(self.observer.clone(), self.parent, session, task);
-        let result = self.run_subtask_in(session, task, inherited, bounds, doing, index, said).await;
+        let result =
+            Box::pin(self.run_subtask_in(session, task, inherited, bounds, doing, index, said)).await;
         observation.finish(&result);
         result
     }
