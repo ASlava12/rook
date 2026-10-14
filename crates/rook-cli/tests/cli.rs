@@ -3951,6 +3951,9 @@ fn prepared_learning_source(fixture: &Rook) -> (String, u64, u64) {
     let mut c = rook_core::Config::default();
     c.memory.enabled = false;
     c.web.enabled = false;
+    // The fixture's Rust file must not make task provenance depend on whether
+    // this runner has rust-analyzer or somebody to answer an install question.
+    c.agent.install_servers = false;
     let engine = rook_core::Rook::from_parts(
         rook_store::Store::open(fixture.home.path().join("store")).unwrap(),
         c,
@@ -3960,12 +3963,16 @@ fn prepared_learning_source(fixture: &Rook) -> (String, u64, u64) {
     );
     let owner = engine.start_session("review skill").unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    runtime
+    let outcome = runtime
         .block_on(
             rook_core::agent::AgentLoop::new(&engine, std::sync::Arc::new(Finish), owner)
                 .run("Update the reusable procedure after reviewing this source."),
         )
         .unwrap();
+    assert!(
+        rook_core::agent::finished(&outcome.stopped) && outcome.open_questions.is_empty(),
+        "learning source must be a completed task: {outcome:?}"
+    );
     let events = engine.store.events(owner, 0, 128).unwrap();
     (
         rook_store::format_session_id(owner),
