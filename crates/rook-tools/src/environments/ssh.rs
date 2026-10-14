@@ -56,12 +56,14 @@ impl Resource {
     ) -> Result<Self> {
         let owner = ulid::Ulid::generate().to_string();
         let socket_dir = std::env::temp_dir().join(format!("rook-ssh-{}", &owner[10..]));
-        let mut builder = std::fs::DirBuilder::new();
+        let builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
-        {
+        let builder = {
             use std::os::unix::fs::DirBuilderExt;
+            let mut builder = builder;
             builder.mode(0o700);
-        }
+            builder
+        };
         builder.create(&socket_dir).map_err(|e| invalid(e.to_string()))?;
         let socket = socket_dir.join("c");
         if socket.as_os_str().len() > 90 {
