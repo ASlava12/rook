@@ -367,6 +367,7 @@ mod tests {
         assert!(!root.path().join("a").exists());
     }
     #[test]
+    #[cfg(unix)] // Managed SSH execution requires a Unix client and Unix path/mode sources.
     fn publication_handles_file_directory_replacements_and_repeated_observed_recovery() {
         let root = tempfile::tempdir().unwrap();
         let settings = Settings::default();

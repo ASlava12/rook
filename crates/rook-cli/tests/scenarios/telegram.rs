@@ -144,7 +144,11 @@ fn telegram_http_routes_followups_live_approvals_stop_and_uncertain_results_surv
                 (json!({"content":"TELEGRAM_NATIVE_42 was written."}), "stop")
             } else {
                 (
-                    json!({"tool_calls":[{"index":0,"id":"bot-command","type":"function","function":{"name":"run_command","arguments":json!({"command":"printf TELEGRAM_NATIVE_42 > telegram-result"}).to_string()}}]}),
+                    json!({"tool_calls":[{"index":0,"id":"bot-command","type":"function","function":{"name":"run_command","arguments":json!({"command":if cfg!(windows) {
+                        "powershell -NoProfile -NonInteractive -Command \"[IO.File]::WriteAllText('telegram-result','TELEGRAM_NATIVE_42')\""
+                    } else {
+                        "printf TELEGRAM_NATIVE_42 > telegram-result"
+                    }}).to_string()}}]}),
                     "tool_calls",
                 )
             };
@@ -219,7 +223,10 @@ fn telegram_http_routes_followups_live_approvals_stop_and_uncertain_results_surv
     assert!(!fixture.workspace.path().join("telegram-result").exists());
     incoming.lock().unwrap().push(callback(5, 1));
     wait(
-        || fixture.workspace.path().join("telegram-result").exists(),
+        || {
+            std::fs::read_to_string(fixture.workspace.path().join("telegram-result"))
+                .is_ok_and(|text| text == "TELEGRAM_NATIVE_42")
+        },
         "authorized approval never released the ordinary tool",
     );
     assert_eq!(

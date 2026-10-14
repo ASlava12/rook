@@ -2,6 +2,18 @@ use rook_contain::files::RecoveryFiles;
 use std::path::Path;
 
 #[test]
+fn planned_permissions_match_a_real_publication_and_allow_its_checked_inverse() {
+    let root = tempfile::tempdir().unwrap();
+    let files = RecoveryFiles::open(root.path(), Path::new("."), false).unwrap();
+    let path = Path::new("reviewed");
+    let mode = rook_contain::files::restored_file_mode(0o600);
+    assert!(files.replace_checked(path, None, None, Some(b"reviewed"), mode).unwrap());
+    assert_eq!(rook_contain::files::file_mode(&files.metadata(path).unwrap()), mode);
+    assert!(files.replace_checked(path, Some(b"reviewed"), Some(mode), None, mode).unwrap());
+    assert!(!files.exists(path).unwrap());
+}
+
+#[test]
 fn recovery_publication_preserves_existing_entries_and_refuses_input_before_copy() {
     let root = tempfile::tempdir().unwrap();
     assert!(RecoveryFiles::open(root.path(), Path::new("missing"), false).is_err());

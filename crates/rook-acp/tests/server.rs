@@ -175,7 +175,9 @@ async fn advertised_session_discovery_pages_without_duplicates_and_filters_works
         let listed = editor.call(77, "session/list", serde_json::json!({"cwd":alias})).await;
         assert_eq!(listed["result"]["sessions"], first["result"]["sessions"], "{listed}");
     }
-    let absent = editor.call(74, "session/list", serde_json::json!({"cwd":"/not-this-project"})).await;
+    let absent = editor
+        .call(74, "session/list", serde_json::json!({"cwd":editor.workspace.join("not-this-project")}))
+        .await;
     assert!(absent["result"]["sessions"].as_array().unwrap().is_empty());
     let invalid = editor.call(75, "session/list", serde_json::json!({"cursor":"not-a-cursor"})).await;
     assert_eq!(invalid["error"]["code"], -32602);

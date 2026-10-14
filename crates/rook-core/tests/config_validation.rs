@@ -359,8 +359,13 @@ fn telegram_requires_explicit_access_and_finite_trusted_transport_bounds() {
         let config: Config = toml::from_str(source).unwrap();
         assert!(config.validation_errors().iter().any(|e| e.contains("telegram")), "{source}");
     }
-    let config:Config=toml::from_str("[telegram]\nenabled=true\nsecret='bot'\nworkspace='/fixture'\nallowed_users=[1]\nallowed_chats=[-10]\n").unwrap();
-    assert!(config.validation_errors().is_empty());
+    let workspace = tempfile::tempdir().unwrap();
+    let config: Config = toml::from_str(&format!(
+        "[telegram]\nenabled=true\nsecret='bot'\nworkspace={}\nallowed_users=[1]\nallowed_chats=[-10]\n",
+        serde_json::to_string(workspace.path().to_str().unwrap()).unwrap()
+    ))
+    .unwrap();
+    assert!(config.validation_errors().is_empty(), "{:?}", config.validation_errors());
     let roundtrip: Config = toml::from_str(&config.as_written().unwrap()).unwrap();
     assert_eq!(roundtrip.telegram, config.telegram);
 }

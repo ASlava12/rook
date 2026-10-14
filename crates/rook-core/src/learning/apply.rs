@@ -142,8 +142,9 @@ fn skill_target(
     }
     let card = manifest.to_skill_md(&body)?;
     for (path, text) in std::iter::once((&"SKILL.md".to_owned(), &card)).chain(skill.files.iter()) {
-        let mode =
-            before.files.get(path).map_or(if text.starts_with("#!") { 0o755 } else { 0o600 }, |f| f.mode);
+        let mode = rook_contain::files::restored_file_mode(
+            before.files.get(path).map_or(if text.starts_with("#!") { 0o755 } else { 0o600 }, |f| f.mode),
+        );
         after.files.insert(
             path.clone(),
             File {

@@ -569,6 +569,19 @@ pub fn move_file(from_root: &Path, from: &Path, to_root: &Path, to: &Path) -> io
     Ok(bytes)
 }
 
+/// The mode capture can observe after restoring a requested permission set.
+/// Windows retains the readonly bit rather than Unix owner/group permissions.
+pub fn restored_file_mode(mode: u32) -> u32 {
+    #[cfg(unix)]
+    {
+        mode & 0o777
+    }
+    #[cfg(not(unix))]
+    {
+        if mode & 0o222 == 0 { 0o444 } else { 0o666 }
+    }
+}
+
 /// Permission representation shared by capture and restoration.
 pub fn file_mode(metadata: &std::fs::Metadata) -> u32 {
     #[cfg(unix)]
