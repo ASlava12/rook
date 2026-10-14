@@ -90,6 +90,8 @@ pub struct Saved {
     pub idle: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub controls: Vec<ControlReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) inbound: Option<crate::inbound::SourceRef>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -203,6 +205,24 @@ pub fn start(rook: &Rook, request: Start) -> Result<Run> {
 /// Start a conversation goal and atomically acknowledge its caller-owned
 /// socket claim. Legacy callers omit the claim and retain the same API.
 pub fn start_with_claim(rook: &Rook, request: Start, claim_key: Option<&str>) -> Result<Run> {
+    start_inner(rook, request, claim_key, None)
+}
+type InboundTransition<'a> = Box<dyn FnOnce(&Run) -> Result<Vec<u8>> + 'a>;
+pub(crate) struct InboundAdmission<'a> {
+    pub source: crate::inbound::SourceRef,
+    pub key: &'a str,
+    pub expected: &'a [u8],
+    pub transition: InboundTransition<'a>,
+}
+pub(crate) fn start_inbound(rook: &Rook, request: Start, admission: InboundAdmission<'_>) -> Result<Run> {
+    start_inner(rook, request, None, Some(admission))
+}
+fn start_inner(
+    rook: &Rook,
+    request: Start,
+    claim_key: Option<&str>,
+    inbound: Option<InboundAdmission<'_>>,
+) -> Result<Run> {
     let _lock = WRITING.lock().unwrap_or_else(|e| e.into_inner());
     let config = &rook.config.work;
     if request.goal.trim().is_empty() || request.goal.len() > config.max_goal_bytes {
@@ -297,6 +317,7 @@ pub fn start_with_claim(rook: &Rook, request: Start, claim_key: Option<&str>) ->
         failed_since: None,
         idle: 0,
         controls: Vec::new(),
+        inbound: inbound.as_ref().map(|a| a.source.clone()),
     })?;
     if !index.contains(&run.id) {
         index.push(run.id.clone());
@@ -343,7 +364,21 @@ pub fn start_with_claim(rook: &Rook, request: Start, claim_key: Option<&str>) ->
         if claim_key.is_some() {
             return Err(bad("a chat goal claim requires a conversation"));
         }
-        rook.store.kv_update(&[(INDEX, &index), (&run_key, &record)], &[])?;
+        if let Some(admission) = inbound {
+            let next = (admission.transition)(&run)?;
+            let parent = rook_store::parse_session_id(&admission.source.session)
+                .ok_or_else(|| bad("invalid inbound source parent"))?;
+            if !rook.store.kv_update_checked(
+                admission.key,
+                Some(admission.expected),
+                &[(INDEX, &index), (&run_key, &record), (admission.key, &next)],
+                Some(parent),
+            )? {
+                return Err(bad("inbound receipt changed before task admission; inspect its current state"));
+            }
+        } else {
+            rook.store.kv_update(&[(INDEX, &index), (&run_key, &record)], &[])?;
+        }
         rook.store.flush()?;
     }
     Ok(run)
@@ -803,6 +838,9 @@ pub async fn advance<'a>(
                 saved.run.iterations.saturating_add(1)
             ))?,
         };
+        if let Some(source) = &saved.inbound {
+            crate::inbound::attach_source(rook, session, source)?;
+        }
         let start_seq = rook.store.get_session(session)?.ok_or_else(|| bad("no such session"))?.next_seq;
         let accounted_tokens = super::spent(rook, session)?;
         let before = crate::evaluation::witness(&rook.workspace, &saved.card.clone().unwrap_or_default());
@@ -857,7 +895,14 @@ pub async fn advance<'a>(
     };
     agent.managed_work = Some(saved.run.identity());
     agent.managed_iteration = true;
-    if saved.run.autonomous && saved.run.conversation.is_none() {
+    if saved.inbound.is_some() {
+        let requested = if saved.run.autonomous {
+            rook_tools::policy::Stance::Autonomous
+        } else {
+            rook_tools::policy::Stance::Assist
+        };
+        agent.policy.set_stance(agent.policy.stance().min(requested));
+    } else if saved.run.autonomous && saved.run.conversation.is_none() {
         agent.allow_everything_not_denied();
     }
     if saved.run.max_tokens > 0 {

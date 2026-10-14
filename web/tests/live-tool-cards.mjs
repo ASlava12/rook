@@ -128,3 +128,23 @@ test('resumed chat keeps human notes while auxiliary receipts and compaction usa
   assert.match(stream.textContent, /visible prompt.*visible answer.*visible aside/);
   assert.doesNotMatch(stream.textContent, /rook:model-aux|rook:model-attempt|rook:model-delegation|internal child costs|internal data|internal attempt|compaction provider usage|summary provider usage/);
 });
+
+test('an external child raw read opens its original saved source after the selected session changes', async () => {
+  state.chat.session = 'external-child';
+  const paths = [];
+  globalThis.fetch = async path => {
+    paths.push(path);
+    return { ok: true, json: async () => ({ entry: { body: '{"content":"<script>raw child text</script>"}' }, offset: 0, total_bytes: 50 }) };
+  };
+  const socket = connect();
+  socket.receive({ type: 'tool', name: 'acp_read_text', doing: 'read the selected editor lines' });
+  const wrapper = stream.children.at(-1);
+  socket.receive({ type: 'tool_done', name: 'acp_read_text', failed: false, result_seq: 7 });
+  const saved = wrapper.find(node => node.className === 'entry tool-card');
+  assert(saved);
+  state.chat.session = 'parent';
+  saved.open = true; saved.listeners.toggle(); await tick();
+  assert.deepEqual(paths, ['/api/sessions/external-child/history/7?offset=0']);
+  assert.match(saved.textContent, /raw child text/);
+  assert.equal(saved.find(node => node.tag === 'script'), null);
+});

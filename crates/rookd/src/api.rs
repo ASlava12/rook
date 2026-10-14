@@ -22,6 +22,14 @@ type Shared = Arc<AppState>;
 // work before spawning it; the owned permit also survives an HTTP disconnect.
 static IMAGE_READS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
+static ENVIRONMENT_OPS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
+static LEARNING_OPS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(4)));
+static EXPERIMENT_OPS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(4)));
+static REVIEW_OPS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
 static WORKTREE_RECOVERIES: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
 
@@ -29,12 +37,15 @@ pub fn router(state: Shared) -> Router {
     let allowed = state.rook.try_read().map(|r| r.config.server.allowed_hosts.clone()).unwrap_or_default();
     Router::new()
         .merge(crate::work::routes())
+        .merge(crate::inbound::routes())
+        .merge(crate::telegram::routes())
         .route("/api/health", get(health))
         .route("/api/store/stats", get(stats))
         .route("/api/store/objects", get(objects))
         .route("/api/store/objects/{id}", get(object))
         .route("/api/store/refs", get(refs))
         .route("/api/sessions", get(sessions))
+        .route("/api/history/recall", post(session_recall).layer(axum::extract::DefaultBodyLimit::max(4096)))
         .route("/api/sessions/{id}/recovery", get(execution).post(acknowledge_operation))
         .route(
             "/api/sessions/{parent}/worktrees/{child}",
@@ -56,6 +67,30 @@ pub fn router(state: Shared) -> Router {
         .route("/api/sessions/{id}/history/{seq}/images/{index}", get(history_image))
         .route("/api/sessions/{id}/history/{seq}/quote", get(history_quote))
         .route("/api/sessions/{id}/changes", get(changes))
+        .route(
+            "/api/sessions/{id}/reviews",
+            post(review_request).layer(axum::extract::DefaultBodyLimit::max(65536)),
+        )
+        .route(
+            "/api/sessions/{id}/shell-undo",
+            post(shell_undo_request).layer(axum::extract::DefaultBodyLimit::max(65536)),
+        )
+        .route(
+            "/api/sessions/{id}/experiments",
+            post(experiment_request).layer(axum::extract::DefaultBodyLimit::max(65536)),
+        )
+        .route(
+            "/api/sessions/{id}/learning",
+            post(learning_request).layer(axum::extract::DefaultBodyLimit::max(65536)),
+        )
+        .route(
+            "/api/sessions/{id}/environment",
+            post(environment_request).layer(axum::extract::DefaultBodyLimit::max(8192)),
+        )
+        .route(
+            "/api/sessions/{id}/recipes",
+            post(composite_request).layer(axum::extract::DefaultBodyLimit::max(8192)),
+        )
         .route("/api/sessions/{id}/context", get(context))
         .route("/api/sessions/{id}/extension-ui", get(extension_ui))
         .route("/api/sessions/{id}/goal", post(set_goal))
@@ -133,6 +168,7 @@ impl From<CoreError> for Fail {
     fn from(e: CoreError) -> Self {
         let (status, kind, hint) = match &e {
             CoreError::NoSession(_) => (StatusCode::NOT_FOUND, "not_found", None),
+            CoreError::InvalidConversationRecall(_) => (StatusCode::BAD_REQUEST, "bad_request", None),
             CoreError::Skill(rook_skills::SkillError::NotFound(_)) => {
                 (StatusCode::NOT_FOUND, "not_found", None)
             }
@@ -267,6 +303,189 @@ async fn execution(
     Ok(Json(s.rook.read().await.execution(session_id(&id)?)?))
 }
 
+async fn composite_request(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Json(request): Json<rook_core::composite_recipes::Request>,
+) -> ApiResult<serde_json::Value> {
+    let permit = EXPERIMENT_OPS
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| CoreError::Other("Recipe inspection is busy; retry after completion".into()))?;
+    let session = session_id(&id)?;
+    let rook = s.rook.clone().read_owned().await;
+    let result = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        rook.composite_request(session, request)
+    })
+    .await
+    .map_err(|e| CoreError::Other(e.to_string()))??;
+    Ok(Json(result))
+}
+
+async fn environment_request(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Json(request): Json<rook_core::environments::Request>,
+) -> ApiResult<serde_json::Value> {
+    let permit = ENVIRONMENT_OPS
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| CoreError::Other("environment operations are busy; retry after completion".into()))?;
+    let session = session_id(&id)?;
+    let workspace = s
+        .rook
+        .read()
+        .await
+        .store
+        .get_session_limited(session, 256 * 1024)
+        .map_err(CoreError::from)?
+        .ok_or(CoreError::NoSession(id))?
+        .workspace;
+    let engine = s.engine_for(Some(std::path::Path::new(&workspace))).await.map_err(CoreError::Other)?;
+    let rook = engine.read_owned().await;
+    let handle = tokio::runtime::Handle::current();
+    let result = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        handle.block_on(rook.environment_request(session, request))
+    })
+    .await
+    .map_err(|error| CoreError::Other(error.to_string()))??;
+    Ok(Json(result))
+}
+
+async fn learning_request(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Json(request): Json<rook_core::learning::Request>,
+) -> ApiResult<serde_json::Value> {
+    let permit = LEARNING_OPS
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| CoreError::Other("learning operations are busy; retry after completion".into()))?;
+    let session = session_id(&id)?;
+    let workspace = s
+        .rook
+        .read()
+        .await
+        .store
+        .get_session_limited(session, 256 * 1024)
+        .map_err(CoreError::from)?
+        .ok_or(CoreError::NoSession(id))?
+        .workspace;
+    let engine = s.engine_for(Some(std::path::Path::new(&workspace))).await.map_err(CoreError::Other)?;
+    let rook = engine.read_owned().await;
+    let handle = tokio::runtime::Handle::current();
+    let vault = Arc::new(rook_core::Vault::load()?);
+    let result = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        handle.block_on(rook.learning_request(session, request, vault))
+    })
+    .await
+    .map_err(|error| CoreError::Other(error.to_string()))??;
+    Ok(Json(result))
+}
+
+async fn experiment_request(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Json(request): Json<rook_core::experiments::Request>,
+) -> ApiResult<serde_json::Value> {
+    let permit = EXPERIMENT_OPS
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| CoreError::Other("experiment operations are busy; retry after completion".into()))?;
+    let session = session_id(&id)?;
+    let workspace = s
+        .rook
+        .read()
+        .await
+        .store
+        .get_session_limited(session, 256 * 1024)
+        .map_err(CoreError::from)?
+        .ok_or(CoreError::NoSession(id))?
+        .workspace;
+    let engine = s.engine_for(Some(std::path::Path::new(&workspace))).await.map_err(CoreError::Other)?;
+    let rook = engine.read_owned().await;
+    let handle = tokio::runtime::Handle::current();
+    let vault = Arc::new(rook_core::Vault::load()?);
+    let result = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        handle.block_on(rook.experiment_request(session, request, vault))
+    })
+    .await
+    .map_err(|error| CoreError::Other(error.to_string()))??;
+    Ok(Json(result))
+}
+
+async fn shell_undo_request(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Json(request): Json<rook_core::shell_undo::Request>,
+) -> ApiResult<serde_json::Value> {
+    let permit = REVIEW_OPS
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| CoreError::Other("snapshot operations are busy; retry after completion".into()))?;
+    let session = session_id(&id)?;
+    let workspace = s
+        .rook
+        .read()
+        .await
+        .store
+        .get_session_limited(session, 256 * 1024)
+        .map_err(CoreError::from)?
+        .ok_or(CoreError::NoSession(id))?
+        .workspace;
+    let engine = s.engine_for(Some(std::path::Path::new(&workspace))).await.map_err(CoreError::Other)?;
+    let rook = engine.read_owned().await;
+    let result = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        rook.shell_undo_request(session, request)
+    })
+    .await
+    .map_err(|error| CoreError::Other(error.to_string()))??;
+    Ok(Json(result))
+}
+
+async fn review_request(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Json(request): Json<rook_core::review::Request>,
+) -> ApiResult<serde_json::Value> {
+    let permit = REVIEW_OPS.clone().try_acquire_owned().map_err(|_| {
+        Fail(
+            StatusCode::TOO_MANY_REQUESTS,
+            ApiError::new("busy", "Review operations are busy; retry after an operation finishes."),
+        )
+    })?;
+    let session = session_id(&id)?;
+    let workspace = s
+        .rook
+        .read()
+        .await
+        .store
+        .get_session_limited(session, 256 * 1024)
+        .map_err(CoreError::from)?
+        .ok_or(CoreError::NoSession(id))?
+        .workspace;
+    let engine = s.engine_for(Some(std::path::Path::new(&workspace))).await.map_err(CoreError::Other)?;
+    let vault = rook_core::Vault::load().map_err(|error| CoreError::Other(error.to_string()))?;
+    let rook = engine.read_owned().await;
+    let result = tokio::task::spawn_blocking(move || {
+        // The worker retains admission through a disconnected HTTP caller.
+        let _permit = permit;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| CoreError::Other(error.to_string()))?;
+        runtime.block_on(rook.review_request(session, request, &vault))
+    })
+    .await
+    .map_err(|error| CoreError::Other(error.to_string()))??;
+    Ok(Json(result))
+}
+
 async fn worktree_request(
     s: &Shared,
     parent: u128,
@@ -362,6 +581,16 @@ async fn diagnostics(
         Err(_) => (s.rook.read().await.diagnostics(sid, query.logs)?, true),
     };
     let mut report = report;
+    // Supervision holds the work admission lock before taking the live map.
+    // Release this read before consulting unattended workers in that order.
+    let live = s.live.read().await.get(&sid).filter(|live| live.running()).cloned();
+    if let Some(live) = live {
+        report.activity = live.activity().or(report.activity);
+    } else if let Some(activity) = s.work.activity(sid).await {
+        report.activity = Some(activity);
+    } else if let Some(activity) = &mut report.activity {
+        activity.owner_live = Some(false);
+    }
     if fallback {
         report.notices.push(
             "workspace configuration unavailable; current settings come from the daemon's main workspace"
@@ -469,6 +698,26 @@ async fn history_page(
         ));
     }
     history_read(s, move |r| r.transcript_page(session, &q)).await
+}
+
+async fn session_recall(
+    State(s): State<Shared>,
+    Query(q): Query<WorkspaceQuery>,
+    Json(request): Json<rook_core::session_recall::Request>,
+) -> ApiResult<rook_core::session_recall::Response> {
+    static READS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+        std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
+    let permit = READS.clone().try_acquire_owned().map_err(|_| {
+        Fail(StatusCode::TOO_MANY_REQUESTS, ApiError::new("busy", "conversation recall is busy; try again"))
+    })?;
+    let engine = s.engine_for(q.workspace.as_deref()).await.map_err(CoreError::Other)?;
+    let response = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        engine.blocking_read().session_recall(&request)
+    })
+    .await
+    .map_err(|error| CoreError::Other(error.to_string()))??;
+    Ok(Json(response))
 }
 async fn turns(
     State(s): State<Shared>,
@@ -2050,6 +2299,38 @@ mod tests {
         (status, serde_json::from_slice(&bytes).unwrap_or_default())
     }
 
+    #[tokio::test]
+    async fn conversation_recall_api_finds_saved_work_and_reads_its_event() {
+        let f = fixture();
+        let event = f
+            .state
+            .rook
+            .read()
+            .await
+            .log(f.session, rook_store::EventKind::UserMessage, "", "LPIC translation task")
+            .unwrap();
+        let (status, response) = post(&f, "/api/history/recall", serde_json::json!({"query":"LPIC"})).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        let session = rook_store::format_session_id(f.session);
+        assert!(
+            response["hits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|hit| hit["session"] == session && hit["seq"] == event)
+        );
+        let (status, read) =
+            post(&f, "/api/history/recall", serde_json::json!({"session":session,"around":event})).await;
+        assert_eq!(status, StatusCode::OK, "{read}");
+        assert!(
+            read["page"]["items"].as_array().unwrap().iter().any(|entry| entry["body"]
+                .as_str()
+                .is_some_and(|body| body.contains("LPIC translation task")))
+        );
+        let (status, _) = post(&f, "/api/history/recall", serde_json::json!({"query":""})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
     async fn get(f: &Fixture, path: &str) -> (StatusCode, serde_json::Value) {
         let response = f
             .router
@@ -2250,6 +2531,167 @@ mod tests {
                 .iter()
                 .any(|v| v.as_str().unwrap().contains("workspace configuration unavailable"))
         );
+    }
+
+    #[tokio::test]
+    async fn unattended_worker_activity_reports_capacity_and_model_waits_without_a_live_chat() {
+        use rook_proto::activity::Stage;
+        use std::time::Duration;
+        let f = fixture();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sent, mut requests) = tokio::sync::mpsc::channel(4);
+        let upstream = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/v1/chat/completions",
+                axum::routing::post(move || {
+                    let sent = sent.clone();
+                    async move {
+                        sent.send(()).await.unwrap();
+                        std::future::pending::<Json<serde_json::Value>>().await
+                    }
+                }),
+            );
+            axum::serve(listener, app).await.unwrap();
+        });
+        let source = format!("activity-worker-{}", address.port());
+        {
+            let mut rook = f.state.rook.write().await;
+            rook.config.agent.model = source.clone();
+            rook.config.agent.stream_idle_timeout_secs = 3600;
+            rook.config.work.max_parallel_runs = 2;
+            rook.config.telemetry.stall_after_secs = 30;
+            rook.config.models.insert(
+                source,
+                rook_core::config::ModelSource {
+                    api: "openai".into(),
+                    model: "held-test".into(),
+                    url: format!("http://{address}/v1"),
+                    context_window: Some(8192),
+                    parallel: Some(1),
+                    proxy: "direct".into(),
+                    ..Default::default()
+                },
+            );
+        }
+        let other_workspace = tempfile::tempdir().unwrap();
+        let mut ids = Vec::new();
+        for (goal, workspace) in
+            [("inspect alpha", f._workspace.path()), ("inspect beta", other_workspace.path())]
+        {
+            let (status, run) =
+                post(&f, "/api/work", serde_json::json!({"goal":goal,"workspace":workspace})).await;
+            assert_eq!(status, StatusCode::OK, "{run}");
+            assert!(run["conversation"].is_null(), "exercise the standalone worker path");
+            ids.push(run["id"].as_str().unwrap().to_string());
+        }
+        let supervisor = tokio::spawn(crate::work::supervise(f.state.clone()));
+        tokio::time::timeout(Duration::from_secs(90), requests.recv()).await.unwrap().unwrap();
+        let sessions = tokio::time::timeout(Duration::from_secs(90), async {
+            loop {
+                let sessions: Vec<_> = {
+                    let rook = f.state.rook.read().await;
+                    ids.iter()
+                        .filter_map(|id| {
+                            rook_core::work::managed::read(&rook, id)
+                                .unwrap()
+                                .active
+                                .map(|a| rook_store::parse_session_id(&a.session).unwrap())
+                        })
+                        .collect()
+                };
+                if sessions.len() == 2 {
+                    let mut stages = Vec::new();
+                    for session in &sessions {
+                        if let Some(activity) = f.state.work.activity(*session).await {
+                            stages.push(activity.stage);
+                        }
+                    }
+                    if stages.contains(&Stage::Queued) && stages.contains(&Stage::Model) {
+                        break sessions;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(f.state.live.read().await.is_empty(), "no client or Live entry owns either worker");
+        assert!(requests.try_recv().is_err(), "the queued worker has not sent another physical generation");
+        // A completed chat retained for replay must not shadow a new worker.
+        let (said, _) = tokio::sync::broadcast::channel(4);
+        let (outbound, _held) = tokio::sync::mpsc::unbounded_channel();
+        let (approver, relay) =
+            crate::chat::approver(outbound.clone(), Duration::from_secs(3600), Default::default());
+        let (asker, ask_relay) = crate::chat::asker(outbound, Duration::from_secs(3600), Default::default());
+        let historical = Arc::new(crate::chat::Live::for_test(
+            tokio::spawn(std::future::ready(())),
+            vec![relay.abort_handle(), ask_relay.abort_handle()],
+            said,
+            approver,
+            asker,
+        ));
+        tokio::time::timeout(Duration::from_secs(90), async {
+            while historical.running() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        f.state.remember(sessions[0], historical).await;
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(41)).await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let mut noticed = 0;
+                for session in &sessions {
+                    let id = rook_store::format_session_id(*session);
+                    let (status, body) = get(&f, &format!("/api/sessions/{id}/diagnostics")).await;
+                    assert_eq!(status, StatusCode::OK, "{body}");
+                    assert_eq!(body["activity"]["owner_live"], true, "{body}");
+                    assert!(!body.to_string().contains("inspect alpha"));
+                    if body["activity"]["stalled"] == true {
+                        assert!(body["activity"]["idle_secs"].as_u64().unwrap() >= 30);
+                        assert_eq!(body["activity"]["notifications"], 1);
+                        noticed += 1;
+                    }
+                }
+                if noticed == 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        supervisor.abort();
+        let _ = supervisor.await;
+        crate::work::stop(&f.state).await;
+        for session in sessions {
+            let id = rook_store::format_session_id(session);
+            let (status, body) = get(&f, &format!("/api/sessions/{id}/diagnostics")).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["activity"]["owner_live"], false);
+            assert_eq!(body["activity"]["notifications"], 1);
+            let saved: rook_proto::activity::Snapshot = serde_json::from_slice(
+                &f.state
+                    .rook
+                    .read()
+                    .await
+                    .store
+                    .kv_get_limited(&format!("activity/{session:032x}"), 2048)
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                saved.owner_live,
+                Some(false),
+                "cancellation must persist the stopped owner before returning"
+            );
+        }
+        upstream.abort();
+        let _ = upstream.await;
     }
 
     /// A turn holds its read guard for as long as it runs and maintenance wants

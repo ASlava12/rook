@@ -141,6 +141,19 @@ pub struct RefRow {
     pub short: String,
 }
 
+/// One ref/history publication and a bounded session receipt share a transaction.
+pub struct SessionRefUpdate<'a> {
+    pub session: u128,
+    pub reference: &'a str,
+    pub expected: Option<ObjectId>,
+    pub object: ObjectId,
+    pub history: &'a str,
+    pub companion: &'a str,
+    pub expected_companion: Option<&'a [u8]>,
+    pub value: &'a [u8],
+    pub maximum: usize,
+}
+
 /// A handle to the on-disk store. Cheap to clone by `Arc`, safe to share across
 /// threads; redb serializes writers internally.
 pub struct Store {
@@ -386,19 +399,36 @@ impl Store {
 
         let stored = if meta.external {
             let path = self.object_path(id);
-            std::fs::read(&path).map_err(|e| StoreError::io(&path, e))?
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            std::fs::File::open(&path)
+                .map_err(|error| StoreError::io(&path, error))?
+                .take(meta.size_stored.saturating_add(1))
+                .read_to_end(&mut bytes)
+                .map_err(|error| StoreError::io(&path, error))?;
+            bytes
         } else {
             let txn = self.db.begin_read()?;
             let blobs = txn.open_table(schema::BLOBS)?;
-            blobs
-                .get(id.as_bytes())?
-                .ok_or_else(|| StoreError::Corrupt {
+            let blob = blobs.get(id.as_bytes())?.ok_or_else(|| StoreError::Corrupt {
+                id: id.short(),
+                reason: "index entry has no inline payload".into(),
+            })?;
+            if blob.value().len() as u64 != meta.size_stored {
+                return Err(StoreError::Corrupt {
                     id: id.short(),
-                    reason: "index entry has no inline payload".into(),
-                })?
-                .value()
-                .to_vec()
+                    reason: "inline payload length differs from recorded encoded size".into(),
+                });
+            }
+            blob.value().to_vec()
         };
+
+        if stored.len() as u64 != meta.size_stored {
+            return Err(StoreError::Corrupt {
+                id: id.short(),
+                reason: "encoded payload length differs from recorded size".into(),
+            });
+        }
 
         let data = codec::decode(
             &self.dicts,
@@ -443,15 +473,20 @@ impl Store {
         let source = || -> Result<Box<dyn Read>> {
             if meta.external {
                 let path = self.object_path(id);
-                Ok(Box::new(std::fs::File::open(&path).map_err(|e| StoreError::io(&path, e))?))
+                let file = std::fs::File::open(&path).map_err(|e| StoreError::io(&path, e))?;
+                if file.metadata().map_err(|e| StoreError::io(&path, e))?.len() != meta.size_stored {
+                    return Err(corrupt("encoded payload length differs from recorded size"));
+                }
+                Ok(Box::new(file.take(meta.size_stored.saturating_add(1))))
             } else {
                 let txn = self.db.begin_read()?;
                 let blobs = txn.open_table(schema::BLOBS)?;
-                let bytes = blobs
-                    .get(id.as_bytes())?
-                    .ok_or_else(|| corrupt("index entry has no inline payload"))?
-                    .value()
-                    .to_vec();
+                let blob =
+                    blobs.get(id.as_bytes())?.ok_or_else(|| corrupt("index entry has no inline payload"))?;
+                if blob.value().len() as u64 != meta.size_stored {
+                    return Err(corrupt("inline payload length differs from recorded encoded size"));
+                }
+                let bytes = blob.value().to_vec();
                 Ok(Box::new(std::io::Cursor::new(bytes)))
             }
         };
@@ -612,6 +647,39 @@ impl Store {
         }
         txn.commit()?;
         Ok(())
+    }
+
+    /// Commit only while both the referenced head and owning receipt still match.
+    pub fn compare_set_ref_session(&self, update: SessionRefUpdate<'_>) -> Result<bool> {
+        if update.value.len() > update.maximum {
+            return Err(StoreError::Encoding("session ref receipt exceeds its byte cap".into()));
+        }
+        let txn = self.db.begin_write()?;
+        {
+            let sessions = txn.open_table(schema::SESSIONS)?;
+            if sessions.get(schema::session_key(update.session).as_slice())?.is_none() {
+                return Err(StoreError::MissingSession(format_session_id(update.session)));
+            }
+            let mut refs = txn.open_table(schema::REFS)?;
+            let actual = refs.get(update.reference)?.map(|v| v.value().to_vec());
+            if actual.as_deref() != update.expected.as_ref().map(|id| id.as_bytes()) {
+                return Ok(false);
+            }
+            let mut kv = txn.open_table(schema::KV)?;
+            let old = kv.get(update.companion)?;
+            if old.as_ref().is_some_and(|v| v.value().len() > update.maximum) {
+                return Err(StoreError::Encoding("existing session ref receipt exceeds its byte cap".into()));
+            }
+            if old.as_ref().map(|v| v.value()) != update.expected_companion {
+                return Ok(false);
+            }
+            drop(old);
+            refs.insert(update.reference, update.object.as_bytes())?;
+            refs.insert(update.history, update.object.as_bytes())?;
+            kv.insert(update.companion, update.value)?;
+        }
+        txn.commit()?;
+        Ok(true)
     }
 
     /// Publish a version and its history entry only if the head has not moved.
@@ -1023,6 +1091,17 @@ impl Store {
     }
 
     pub fn events(&self, session: u128, from_seq: u64, limit: usize) -> Result<Vec<Event>> {
+        self.events_bounded(session, from_seq, limit, usize::MAX)
+    }
+
+    /// Admit each raw metadata record before postcard can copy its label.
+    pub fn events_bounded(
+        &self,
+        session: u128,
+        from_seq: u64,
+        limit: usize,
+        record_bytes: usize,
+    ) -> Result<Vec<Event>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -1036,6 +1115,11 @@ impl Store {
             let Some((sid, seq)) = schema::parse_event_key(k.value()) else { continue };
             if sid != session {
                 break;
+            }
+            if v.value().len() > record_bytes {
+                return Err(StoreError::Encoding(format!(
+                    "event #{seq} metadata exceeds the {record_bytes}-byte reader bound"
+                )));
             }
             out.push(Event { session: sid, seq, record: postcard::from_bytes(v.value())? });
             if out.len() >= limit {
@@ -1189,6 +1273,90 @@ impl Store {
     }
 
     // ---------------------------------------------------------------- kv pairs
+
+    /// Publish related companions only if the caller still owns its observed
+    /// value. Session deletion and this transition serialize in the same write.
+    pub fn kv_update_checked(
+        &self,
+        guard: &str,
+        expected: Option<&[u8]>,
+        puts: &[(&str, &[u8])],
+        required_session: Option<u128>,
+    ) -> Result<bool> {
+        let txn = self.db.begin_write()?;
+        if let Some(session) = required_session
+            && txn.open_table(schema::SESSIONS)?.get(schema::session_key(session).as_slice())?.is_none()
+        {
+            return Err(StoreError::MissingSession(format_session_id(session)));
+        }
+        {
+            let mut kv = txn.open_table(schema::KV)?;
+            if kv.get(guard)?.as_ref().map(|v| v.value()) != expected {
+                return Ok(false);
+            }
+            for (key, value) in puts {
+                kv.insert(*key, *value)?;
+            }
+        }
+        txn.commit()?;
+        Ok(true)
+    }
+
+    /// A source session, its first event and a bounded companion are admitted
+    /// together. A changed observation creates none of them.
+    #[allow(clippy::too_many_arguments)] // The single atomic session/event/companion boundary.
+    pub fn create_session_with_companion_checked(
+        &self,
+        meta: &SessionMeta,
+        event: NewEvent<'_>,
+        key: &str,
+        expected: Option<&[u8]>,
+        value: &[u8],
+        maximum: usize,
+    ) -> Result<bool> {
+        if value.len() > maximum
+            || expected.is_some_and(|v| v.len() > maximum)
+            || meta.next_seq != 0
+            || meta.event_count != 0
+        {
+            return Err(StoreError::Encoding(
+                "new source session companion exceeds its bound or is not empty".into(),
+            ));
+        }
+        let txn = self.db.begin_write()?;
+        if txn.open_table(schema::KV)?.get(key)?.as_ref().map(|v| v.value()) != expected {
+            return Ok(false);
+        }
+        let body = self.put_tx(&txn, event.body_kind, event.body)?;
+        {
+            let mut sessions = txn.open_table(schema::SESSIONS)?;
+            let id = schema::session_key(meta.id);
+            if sessions.get(id.as_slice())?.is_some() {
+                return Err(StoreError::Db("new session ID already exists".into()));
+            }
+            let mut meta = meta.clone();
+            meta.next_seq = 1;
+            meta.event_count = 1;
+            meta.tokens_in += u64::from(event.tokens_in);
+            meta.tokens_out += u64::from(event.tokens_out);
+            let encoded = postcard::to_stdvec(&meta)?;
+            sessions.insert(id.as_slice(), encoded.as_slice())?;
+        }
+        let record = EventRecord {
+            ts: event.ts.unwrap_or_else(now_unix),
+            kind: event.kind,
+            body,
+            label: event.label.into(),
+            tokens_in: event.tokens_in,
+            tokens_out: event.tokens_out,
+        };
+        let encoded = postcard::to_stdvec(&record)?;
+        txn.open_table(schema::EVENTS)?
+            .insert(schema::event_key(meta.id, 0).as_slice(), encoded.as_slice())?;
+        txn.open_table(schema::KV)?.insert(key, value)?;
+        txn.commit()?;
+        Ok(true)
+    }
 
     pub fn kv_set(&self, key: &str, value: &[u8]) -> Result<()> {
         let txn = self.db.begin_write()?;

@@ -8,6 +8,8 @@
 
 mod api;
 mod chat;
+mod inbound;
+mod telegram;
 mod web;
 mod work;
 
@@ -449,6 +451,7 @@ async fn serve() -> Result<()> {
 
     let maintenance = tokio::spawn(maintain(state.clone(), config.storage.maintenance_interval_hours));
     let work = tokio::spawn(work::supervise(state.clone()));
+    let telegram = tokio::spawn(telegram::run(state.clone()));
 
     let addr = SocketAddr::new(bind, port);
     let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("binding {addr}"))?;
@@ -467,6 +470,8 @@ async fn serve() -> Result<()> {
     // a daemon still holding the lock meets it with the error this ordering
     // exists to prevent — which is what a restart hit, every time, on the
     // daemon it had just stopped.
+    telegram.abort();
+    let _ = telegram.await;
     maintenance.abort();
     work.abort();
     let _ = work.await;

@@ -41,10 +41,10 @@ pub struct Request<'a> {
 }
 
 #[derive(Serialize)]
-pub struct Notification<'a> {
+pub struct Notification<'a, P = serde_json::Value> {
     pub jsonrpc: &'static str,
     pub method: &'a str,
-    pub params: serde_json::Value,
+    pub params: P,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -339,6 +339,17 @@ export function connect() {
         working(); renderSettings(); break;
       case 'text': saidByModel(e.text); break;
       case 'reasoning': say('think', e.text); break;
+      case 'activity': {
+        const a = e.state;
+        const text = `${a.session}: ${a.stage}${a.operation ? ` · ${a.operation}` : ''}; no observed progress for ${a.idle_secs}s (notice after ${a.threshold_secs}s)`;
+        say(a.stalled ? 'err' : 'stat', text);
+        const notice = `${a.session}:${a.generation}:${a.last_progress_at}:${a.notifications}`;
+        if (a.stalled && a.owner_live && state.chat.activityNotice !== notice) {
+          state.chat.activityNotice = notice;
+          notify('rook: no recent progress', text);
+        }
+        break;
+      }
       // A sub-agent working, which is not the model thinking.
       case 'agent':
         if (e.extension_ui) { extensionUi(e.extension_ui); break; }
@@ -387,7 +398,9 @@ export function connect() {
         if (e.stopped && e.stopped !== 'end_turn' && e.stopped !== 'stop') {
           say('stat', e.stopped === 'max_steps'
             ? 'stopped at the step limit — raise [agent] max_steps or narrow the task'
-            : `the turn ended as "${e.stopped}" rather than finishing`);
+            : e.stopped === 'subrecipe_cost_unknown'
+              ? 'stopped: a delegated task has unverified model usage or cost; inspect its saved session before continuing'
+              : `the turn ended as "${e.stopped}" rather than finishing`);
         }
         // What it wrote, before what it cost: a turn that says it did the work
         // and one that did it read the same from the outside.

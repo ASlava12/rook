@@ -135,6 +135,8 @@ pub struct Report {
     pub timings: Vec<Value>,
     pub logs: Vec<Value>,
     pub notices: Vec<String>,
+    #[serde(default)]
+    pub activity: Option<rook_proto::activity::Snapshot>,
 }
 
 impl Report {
@@ -204,7 +206,12 @@ impl Rook {
             timings: Vec::new(),
             logs: Vec::new(),
             notices: Vec::new(),
+            activity: None,
         };
+        match crate::activity::load(&self.store, session) {
+            Ok(state) => report.activity = state,
+            Err(_) => report.notices.push("activity observation could not be read".into()),
+        }
         match crate::execution::diagnostic_state(&self.store, session) {
             Ok(state) => report.execution = state,
             Err(_) => report.notices.push("execution receipt could not be read".into()),

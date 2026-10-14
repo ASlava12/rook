@@ -8,6 +8,16 @@ pub trait Observer: Send + Sync {
 }
 
 pub enum Event<'a> {
+    ModelQueued {
+        session: u128,
+    },
+    ModelStarted {
+        session: u128,
+    },
+    /// Fresh pipe data, sampled at a bounded rate; never elapsed-time prose.
+    ToolOutput {
+        session: u128,
+    },
     ChildStarted {
         parent: u128,
         child: u128,
@@ -31,6 +41,36 @@ pub enum Event<'a> {
         id: u128,
         result: Option<std::result::Result<(u64, &'a str), &'a CoreError>>,
     },
+}
+
+pub(super) fn model(
+    inner: Arc<dyn rook_llm::AttemptObserver>,
+    observer: Option<Arc<dyn Observer>>,
+    session: u128,
+) -> Arc<dyn rook_llm::AttemptObserver> {
+    match observer {
+        Some(observer) => Arc::new(Model { inner, observer, session }),
+        None => inner,
+    }
+}
+
+struct Model {
+    inner: Arc<dyn rook_llm::AttemptObserver>,
+    observer: Arc<dyn Observer>,
+    session: u128,
+}
+
+impl rook_llm::AttemptObserver for Model {
+    fn waiting_for_capacity(&self) {
+        self.inner.waiting_for_capacity();
+        self.observer.observe(Event::ModelQueued { session: self.session });
+    }
+
+    fn start(&self, dispatch: Option<&rook_llm::Dispatch>) -> rook_llm::Result<Box<dyn rook_llm::Attempt>> {
+        let attempt = self.inner.start(dispatch)?;
+        self.observer.observe(Event::ModelStarted { session: self.session });
+        Ok(attempt)
+    }
 }
 
 pub(super) struct Child {

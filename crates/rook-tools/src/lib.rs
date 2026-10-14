@@ -13,6 +13,7 @@
 
 pub mod ask;
 pub mod crates;
+pub mod environments;
 pub mod exec;
 pub mod files;
 pub mod isolate;
@@ -46,6 +47,8 @@ pub enum ToolError {
     },
     #[error("{0}")]
     Denied(String),
+    #[error("execution result is uncertain: {0}")]
+    ExecutionUnknown(String),
 }
 
 /// What went wrong at a path, in the words of what was asked for rather than
@@ -153,6 +156,11 @@ pub trait Files: Send + Sync {
         None
     }
     async fn read(&self, path: &std::path::Path) -> Result<String>;
+    /// A raw protocol response needs an admission bound before its owned copy.
+    /// Bridges must opt in rather than silently falling back to on-disk content.
+    async fn read_limited(&self, _path: &std::path::Path, _maximum: usize) -> Result<String> {
+        Err(ToolError::Denied("The selected file bridge does not support bounded raw reads; update the bridge rather than reading around its buffers".into()))
+    }
     async fn write(&self, path: &std::path::Path, contents: &str) -> Result<()>;
 }
 
@@ -202,6 +210,9 @@ pub struct ToolContext {
     pub delegated: bool,
     pub max_output_bytes: usize,
     pub command_timeout: std::time::Duration,
+    /// A file-effects receipt needs a quiet owned process group before its
+    /// final filesystem observation, including children the shell abandoned.
+    pub require_command_cleanup: bool,
     /// When false, tools refuse paths outside the workspace.
     pub allow_outside_workspace: bool,
     /// What a command may write and reach, and whether it is held to it: the
@@ -213,6 +224,7 @@ pub struct ToolContext {
     pub files: Option<Arc<dyn Files>>,
     /// Set by a front end that has a terminal of its own to run in.
     pub terminals: Option<Arc<dyn Terminals>>,
+    pub execution: Option<Arc<environments::Context>>,
     /// Commands left running. Built once by the front end, because a registry
     /// built per turn would kill everything in it between one turn and the next.
     pub jobs: Option<Arc<jobs::Jobs>>,
@@ -229,6 +241,8 @@ pub struct ToolContext {
     /// where nothing set it, and then a call naming a secret is refused rather
     /// than run without it.
     pub secrets: Option<Arc<dyn Secrets>>,
+    #[doc(hidden)]
+    pub command_transport: Option<Arc<environments::Transport>>,
     /// Where a call that takes a while says so, while it takes it.
     ///
     /// A tool call is one await from outside, and a long one is indisputable
@@ -238,6 +252,9 @@ pub struct ToolContext {
     /// is `FnMut` and this crosses into a spawned future; set per call by the
     /// loop, and `None` anywhere nobody is listening.
     pub watching: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    /// Per-call cumulative pipe bytes. Readers update fixed-size state; the
+    /// owner samples it instead of queueing every output chunk.
+    pub output_activity: Option<Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl ToolContext {
@@ -306,6 +323,29 @@ impl ToolContext {
         }
     }
 
+    pub async fn read_text_limited(&self, path: &std::path::Path, maximum: usize) -> Result<String> {
+        if let Some(files) = &self.files {
+            return files.read_limited(path, maximum).await;
+        }
+        let ctx = self.clone();
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let (root, relative) = ctx.disk_path(&path)?;
+            let file = rook_contain::files::open(&root, &relative)
+                .map_err(|source|ToolError::Io {path:path.clone(),source})?;
+            let metadata = file.metadata().map_err(|source|ToolError::Io {path:path.clone(),source})?;
+            if !metadata.is_file() || metadata.len()>maximum as u64 {
+                return Err(ToolError::Denied(format!("Raw text reads require a regular file within the {maximum}-byte file limit; request a smaller source or raise acp_executor.file_bytes")));
+            }
+            use std::io::Read;
+            let mut text = String::new();
+            file.take(maximum.saturating_add(1) as u64).read_to_string(&mut text)
+                .map_err(|source|ToolError::Io {path,source})?;
+            if text.len()>maximum { return Err(ToolError::Denied("File grew past the raw read byte limit; no partial content was returned".into())); }
+            Ok(text)
+        }).await.map_err(|error|ToolError::Denied(format!("Raw file reader failed: {error}")))?
+    }
+
     pub async fn write_text(&self, path: &std::path::Path, contents: &str) -> Result<()> {
         match &self.files {
             Some(files) => files.write(path, contents).await,
@@ -334,15 +374,19 @@ impl ToolContext {
             delegated: false,
             max_output_bytes: 256 * 1024,
             command_timeout: std::time::Duration::from_secs(120),
+            require_command_cleanup: false,
             allow_outside_workspace: false,
             files: None,
             terminals: None,
+            execution: None,
             jobs: None,
             spill_dir: None,
             max_spill_bytes: 0,
             max_files_searched: 20_000,
             secrets: None,
+            command_transport: None,
             watching: None,
+            output_activity: None,
         }
     }
 

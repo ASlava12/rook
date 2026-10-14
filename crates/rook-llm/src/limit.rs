@@ -191,6 +191,7 @@ impl Provider for Limited {
         request: Request,
         observer: Arc<dyn crate::AttemptObserver>,
     ) -> Result<crate::Completion> {
+        observer.waiting_for_capacity();
         let _turn = self.a_turn().await?;
         self.inner.complete_observed(request, observer).await
     }
@@ -200,6 +201,7 @@ impl Provider for Limited {
         request: Request,
         observer: Arc<dyn crate::AttemptObserver>,
     ) -> Result<ResponseStream> {
+        observer.waiting_for_capacity();
         let turn = self.a_turn().await?;
         let stream = self.inner.stream_observed(request, observer).await?;
         Ok(Box::pin(Holding { stream, _turn: turn }))
@@ -242,6 +244,64 @@ mod tests {
     struct Noting {
         id: String,
         log: Arc<Mutex<String>>,
+    }
+
+    #[derive(Default)]
+    struct Admission(Mutex<Vec<&'static str>>);
+    impl crate::AttemptObserver for Admission {
+        fn waiting_for_capacity(&self) {
+            self.0.lock().unwrap().push("queued");
+        }
+        fn start(&self, _: Option<&crate::Dispatch>) -> Result<Box<dyn crate::Attempt>> {
+            self.0.lock().unwrap().push("started");
+            Ok(Box::new(Receipt))
+        }
+    }
+    struct Receipt;
+    impl crate::Attempt for Receipt {
+        fn finish(&mut self, _: crate::AttemptStatus, _: &crate::AttemptFacts) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn capacity_waits_are_visible_without_admitting_or_billing_a_physical_request() {
+        for streaming in [false, true] {
+            let queue = format!("observed-capacity-{streaming}");
+            let limited =
+                Limited::new(Box::new(Noting { id: queue.clone(), log: Default::default() }), &queue, 1);
+            let holding = limited.stream(Request::new(vec![])).await.unwrap();
+            assert_eq!(free_at(&queue), Some(0), "an actual stream holds the only slot");
+            let cancelled = Arc::<Admission>::default();
+            let mut waiting = Box::pin(limited.stream_observed(Request::new(vec![]), cancelled.clone()));
+            assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+            drop(waiting);
+            assert_eq!(
+                *cancelled.0.lock().unwrap(),
+                ["queued"],
+                "cancellation in the queue sends no generation"
+            );
+
+            let observer = Arc::<Admission>::default();
+            let seen = observer.clone();
+            let mut waiting = Box::pin(async {
+                if streaming {
+                    let mut stream = limited.stream_observed(Request::new(vec![]), seen).await?;
+                    while let Some(delta) = stream.next().await {
+                        delta?;
+                    }
+                } else {
+                    limited.complete_observed(Request::new(vec![]), seen).await?;
+                }
+                Ok::<_, crate::LlmError>(())
+            });
+            assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+            assert_eq!(*observer.0.lock().unwrap(), ["queued"]);
+            drop(holding);
+            waiting.await.unwrap();
+            assert_eq!(*observer.0.lock().unwrap(), ["queued", "started"]);
+            assert_eq!(free_at(&queue), Some(1));
+        }
     }
 
     #[async_trait]

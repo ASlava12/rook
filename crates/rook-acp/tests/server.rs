@@ -16,6 +16,8 @@ struct Editor {
     stdin: tokio::io::DuplexStream,
     lines: tokio::io::Lines<BufReader<tokio::io::DuplexStream>>,
     workspace: PathBuf,
+    rook: std::sync::Arc<Rook>,
+    serve: tokio::task::JoinHandle<std::io::Result<()>>,
     _dirs: (tempfile::TempDir, tempfile::TempDir),
 }
 
@@ -25,6 +27,13 @@ impl Editor {
     }
 
     fn start_with(config: Config, seed: impl FnOnce(&std::path::Path)) -> Self {
+        Self::start_buffered(config, seed, 64 * 1024)
+    }
+
+    fn start_buffered(config: Config, seed: impl FnOnce(&std::path::Path), output_bytes: usize) -> Self {
+        static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        let scratch = HOME.get_or_init(|| tempfile::tempdir().unwrap());
+        unsafe { std::env::set_var("ROOK_HOME", scratch.path()) };
         let store_dir = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         seed(workspace.path());
@@ -36,16 +45,17 @@ impl Editor {
             PathBuf::from(workspace.path()),
         );
 
+        let inspection = std::sync::Arc::new(rook.for_workspace(rook.workspace.clone()));
         let (client_in, server_in) = tokio::io::duplex(64 * 1024);
-        let (server_out, client_out) = tokio::io::duplex(64 * 1024);
-        tokio::spawn(async move {
-            let _ = rook_acp::serve(rook, BufReader::new(server_in), server_out).await;
-        });
+        let (server_out, client_out) = tokio::io::duplex(output_bytes);
+        let serve = tokio::spawn(rook_acp::serve(rook, BufReader::new(server_in), server_out));
 
         Self {
             stdin: client_in,
             lines: BufReader::new(client_out).lines(),
             workspace: workspace.path().to_path_buf(),
+            rook: inspection,
+            serve,
             _dirs: (store_dir, workspace),
         }
     }
@@ -99,6 +109,9 @@ async fn initialize_reports_the_protocol_version_and_what_is_supported() {
     assert_eq!(result["protocolVersion"], 1);
     assert_eq!(result["agentInfo"]["name"], "rook");
     assert_eq!(result["agentCapabilities"]["loadSession"], true);
+    assert!(result["agentCapabilities"]["sessionCapabilities"]["list"].is_object());
+    assert!(result["agentCapabilities"]["sessionCapabilities"]["resume"].is_object());
+    assert!(result["agentCapabilities"]["sessionCapabilities"]["close"].is_object());
     assert!(result["authMethods"].is_array());
     assert_eq!(result["agentCapabilities"]["promptCapabilities"]["image"], true);
     assert_eq!(result["agentCapabilities"]["promptCapabilities"]["embeddedContext"], true);
@@ -108,7 +121,7 @@ async fn initialize_reports_the_protocol_version_and_what_is_supported() {
 #[tokio::test]
 async fn a_new_session_comes_back_as_an_id_the_other_methods_accept() {
     let mut editor = Editor::start();
-    let created = editor.call(1, "session/new", serde_json::json!({ "cwd": "/tmp", "mcpServers": [] })).await;
+    let created = editor.call(1, "session/new", serde_json::json!({ "cwd": ".", "mcpServers": [] })).await;
     let id = created["result"]["sessionId"].as_str().expect("sessionId must be a string");
     assert!(rook_store::parse_session_id(id).is_some(), "and a usable one: {id}");
 
@@ -130,6 +143,53 @@ async fn loading_a_session_that_does_not_exist_is_an_error_not_a_new_one() {
 }
 
 #[tokio::test]
+async fn advertised_session_discovery_pages_without_duplicates_and_filters_workspace() {
+    let mut editor = Editor::start();
+    let capabilities = editor.call(1, "initialize", serde_json::json!({"protocolVersion":1})).await;
+    assert!(capabilities["result"]["agentCapabilities"]["sessionCapabilities"]["list"].is_object());
+    let mut created = std::collections::HashSet::new();
+    // Exceed the page bound so removing pagination makes this test fail.
+    for id in 2..72 {
+        let result = editor.call(id, "session/new", serde_json::json!({"cwd":"."})).await;
+        created.insert(result["result"]["sessionId"].as_str().unwrap().to_owned());
+    }
+    let cwd = editor.workspace.to_string_lossy().into_owned();
+    let first = editor.call(72, "session/list", serde_json::json!({"cwd":cwd})).await;
+    let rows = first["result"]["sessions"].as_array().unwrap();
+    assert_eq!(rows.len(), 64, "the wire response must be bounded: {first}");
+    let cursor = first["result"]["nextCursor"].as_str().expect("another page is required");
+    let mut seen: std::collections::HashSet<_> =
+        rows.iter().map(|row| row["sessionId"].as_str().unwrap().to_owned()).collect();
+    let second = editor.call(73, "session/list", serde_json::json!({"cwd":cwd,"cursor":cursor})).await;
+    for row in second["result"]["sessions"].as_array().unwrap() {
+        assert!(seen.insert(row["sessionId"].as_str().unwrap().to_owned()), "duplicate session");
+    }
+    assert_eq!(seen, created);
+    assert!(second["result"].get("nextCursor").is_none());
+    let absent = editor.call(74, "session/list", serde_json::json!({"cwd":"/not-this-project"})).await;
+    assert!(absent["result"]["sessions"].as_array().unwrap().is_empty());
+    let invalid = editor.call(75, "session/list", serde_json::json!({"cursor":"not-a-cursor"})).await;
+    assert_eq!(invalid["error"]["code"], -32602);
+    let relative = editor.call(76, "session/list", serde_json::json!({"cwd":"relative"})).await;
+    assert_eq!(relative["error"]["code"], -32602);
+}
+
+#[tokio::test]
+async fn advertised_resume_accepts_an_existing_session_and_rejects_a_missing_one() {
+    let mut editor = Editor::start();
+    let created = editor.call(1, "session/new", serde_json::json!({"cwd":"."})).await;
+    let resumed = editor
+        .call(2, "session/resume", serde_json::json!({"sessionId":created["result"]["sessionId"]}))
+        .await;
+    assert!(resumed.get("error").is_none(), "{resumed}");
+    assert!(resumed["result"]["configOptions"].is_array());
+    assert!(resumed["result"].get("_meta").is_none(), "resume must not replay historical state");
+    let missing =
+        editor.call(3, "session/resume", serde_json::json!({"sessionId":"01ARZ3NDEKTSV4RRFFQ69G5FAV"})).await;
+    assert_eq!(missing["error"]["code"], -32602);
+}
+
+#[tokio::test]
 async fn an_unknown_method_gets_method_not_found_rather_than_silence() {
     let mut editor = Editor::start();
     // Deliberately not a method anyone might implement later: this test named
@@ -142,7 +202,7 @@ async fn an_unknown_method_gets_method_not_found_rather_than_silence() {
 #[tokio::test]
 async fn a_prompt_with_no_text_is_rejected_before_a_model_is_contacted() {
     let mut editor = Editor::start();
-    let created = editor.call(1, "session/new", serde_json::json!({ "cwd": "/tmp", "mcpServers": [] })).await;
+    let created = editor.call(1, "session/new", serde_json::json!({ "cwd": ".", "mcpServers": [] })).await;
     let id = created["result"]["sessionId"].as_str().unwrap().to_string();
 
     let reply = editor.call(2, "session/prompt", serde_json::json!({ "sessionId": id, "prompt": [] })).await;
@@ -220,7 +280,7 @@ fn tool_kinds_match_the_vocabulary_the_schema_defines() {
 #[tokio::test]
 async fn cancelling_a_turn_answers_the_request_it_was_running() {
     let mut editor = Editor::start();
-    let created = editor.call(1, "session/new", serde_json::json!({ "cwd": "/tmp", "mcpServers": [] })).await;
+    let created = editor.call(1, "session/new", serde_json::json!({ "cwd": ".", "mcpServers": [] })).await;
     let id = created["result"]["sessionId"].as_str().unwrap().to_string();
 
     // No model is reachable, so the turn is in flight when cancel arrives.
@@ -247,7 +307,7 @@ async fn cancelling_a_turn_answers_the_request_it_was_running() {
 #[tokio::test]
 async fn a_request_is_answered_exactly_once() {
     let mut editor = Editor::start();
-    let created = editor.call(1, "session/new", serde_json::json!({ "cwd": "/tmp", "mcpServers": [] })).await;
+    let created = editor.call(1, "session/new", serde_json::json!({ "cwd": ".", "mcpServers": [] })).await;
     let id = created["result"]["sessionId"].as_str().unwrap().to_string();
 
     let prompt = serde_json::json!({
@@ -727,7 +787,7 @@ async fn a_failed_prompt_is_not_answered_again_when_cancelled() {
     let mut config = Config::default();
     config.agent.model = "missing-provider/model".into();
     let mut editor = Editor::start_with(config, |_| {});
-    let created = editor.call(1, "session/new", serde_json::json!({"cwd":"/tmp", "mcpServers":[]})).await;
+    let created = editor.call(1, "session/new", serde_json::json!({"cwd":".", "mcpServers":[]})).await;
     let sid = created["result"]["sessionId"].clone();
     let first = editor
         .call(
@@ -828,4 +888,1065 @@ async fn a_tool_call_carries_a_name_for_a_program_and_a_title_for_a_person() {
     assert_eq!(call["name"], "read_file", "the programmatic name an editor matches on: {call}");
     assert_eq!(call["title"], "read notes.txt", "and the phrase a person reads: {call}");
     assert_eq!(call["kind"], "read", "with the kind the schema defines: {call}");
+}
+
+#[tokio::test]
+async fn closing_releases_the_reached_session_equipment_cap_and_keeps_history_resumable() {
+    let mut config = Config::default();
+    config.server.max_acp_sessions = 1;
+    config.agent.model = "missing-provider/model".into();
+    let mut editor = Editor::start_with(config, |_| {});
+    let a =
+        editor.call(1, "session/new", serde_json::json!({"cwd":"."})).await["result"]["sessionId"].clone();
+    let b =
+        editor.call(2, "session/new", serde_json::json!({"cwd":"."})).await["result"]["sessionId"].clone();
+    let prompt = |session| serde_json::json!({"sessionId":session,"prompt":[{"type":"text","text":"hello"}]});
+    let admitted = editor.call(3, "session/prompt", prompt(a.clone())).await;
+    assert!(admitted["error"]["message"].as_str().unwrap().contains("model"), "{admitted}");
+    let refused = editor.call(4, "session/prompt", prompt(b.clone())).await;
+    assert!(refused["error"]["message"].as_str().unwrap().contains("max_acp_sessions=1"), "{refused}");
+    // Invalid close cannot free another session or silently report success.
+    let invalid = editor.call(5, "session/close", serde_json::json!({"sessionId":"invalid"})).await;
+    assert_eq!(invalid["error"]["code"], -32602);
+    let still_full = editor.call(6, "session/prompt", prompt(b.clone())).await;
+    assert!(still_full["error"]["message"].as_str().unwrap().contains("max_acp_sessions=1"));
+    let closed = editor.call(7, "session/close", serde_json::json!({"sessionId":a})).await;
+    assert!(closed["result"].is_object(), "{closed}");
+    let admitted = editor.call(8, "session/prompt", prompt(b.clone())).await;
+    assert!(!admitted["error"]["message"].as_str().unwrap().contains("max_acp_sessions"), "{admitted}");
+    assert!(admitted["error"]["message"].as_str().unwrap().contains("model"));
+    let listed = editor.call(9, "session/list", serde_json::json!({})).await;
+    assert!(listed["result"]["sessions"].as_array().unwrap().iter().any(|row| row["sessionId"] == a));
+    assert!(
+        editor.call(10, "session/resume", serde_json::json!({"sessionId":a})).await["result"].is_object()
+    );
+    assert!(editor.call(11, "session/close", serde_json::json!({"sessionId":a})).await["result"].is_object());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn close_cancels_an_actual_editor_terminal_once_and_leaves_other_sessions_alone() {
+    let _turn = provider_lock().await;
+    let base = scripted_call("run_command", serde_json::json!({"command":"exec sleep 60"})).await;
+    unsafe { std::env::set_var("OLLAMA_HOST", &base) };
+    let mut config = Config::default();
+    config.agent.model = "ollama/scripted".into();
+    config.sandbox.stance = rook_tools::policy::Stance::Autonomous;
+    let mut editor = Editor::start_with(config, |_| {});
+    editor
+        .call(
+            1,
+            "initialize",
+            serde_json::json!({"protocolVersion":1,"clientCapabilities":{"terminal":true}}),
+        )
+        .await;
+    let a =
+        editor.call(2, "session/new", serde_json::json!({"cwd":"."})).await["result"]["sessionId"].clone();
+    let b =
+        editor.call(3, "session/new", serde_json::json!({"cwd":"."})).await["result"]["sessionId"].clone();
+    let prompt = serde_json::json!({"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":a,"prompt":[{"type":"text","text":"run a long command"}]}});
+    editor.stdin.write_all(format!("{prompt}\n").as_bytes()).await.unwrap();
+    let created = loop {
+        let message = editor.next().await;
+        assert!(message["id"] != 4, "prompt finished before terminal creation: {message}");
+        if message["method"] == "terminal/create" {
+            break message;
+        }
+    };
+    let params = &created["params"];
+    assert_eq!(params["sessionId"], a);
+    let mut command = std::process::Command::new(params["command"].as_str().unwrap());
+    for arg in params["args"].as_array().unwrap() {
+        command.arg(arg.as_str().unwrap());
+    }
+    let mut process = command.current_dir(params["cwd"].as_str().unwrap()).spawn().unwrap();
+    let reply =
+        serde_json::json!({"jsonrpc":"2.0","id":created["id"],"result":{"terminalId":"owned-terminal"}});
+    editor.stdin.write_all(format!("{reply}\n").as_bytes()).await.unwrap();
+    let waiting = loop {
+        let message = editor.next().await;
+        assert!(message["id"] != 4, "prompt finished before held terminal wait: {message}");
+        if message["method"] == "terminal/wait_for_exit" {
+            break message;
+        }
+    };
+    assert_eq!(waiting["params"]["terminalId"], "owned-terminal");
+    assert!(process.try_wait().unwrap().is_none(), "an actual process must be running before close");
+    let invalid = editor.call(5, "session/close", serde_json::json!({"sessionId":"invalid"})).await;
+    assert_eq!(invalid["error"]["code"], -32602);
+    let other = editor.call(6, "session/close", serde_json::json!({"sessionId":b})).await;
+    assert!(other["result"].is_object());
+    assert!(process.try_wait().unwrap().is_none(), "closing another session must not stop this process");
+    let close = serde_json::json!({"jsonrpc":"2.0","id":7,"method":"session/close","params":{"sessionId":a}});
+    editor.stdin.write_all(format!("{close}\n").as_bytes()).await.unwrap();
+    let mut cancelled = 0;
+    let mut cleanup = Vec::new();
+    loop {
+        let message = editor.next().await;
+        if message["id"] == 4 && message["method"].is_null() {
+            cancelled += 1;
+            assert_eq!(message["result"]["stopReason"], "cancelled");
+        }
+        if message["method"] == "terminal/kill" || message["method"] == "terminal/release" {
+            assert_eq!(message["params"]["sessionId"], a);
+            assert_eq!(message["params"]["terminalId"], "owned-terminal");
+            cleanup.push(message["method"].as_str().unwrap().to_owned());
+            if message["method"] == "terminal/kill" {
+                process.kill().unwrap();
+                assert!(!process.wait().unwrap().success(), "owned editor process really stopped");
+            }
+            let reply = serde_json::json!({"jsonrpc":"2.0","id":message["id"],"result":{}});
+            editor.stdin.write_all(format!("{reply}\n").as_bytes()).await.unwrap();
+        }
+        if message["id"] == 7 && message["method"].is_null() {
+            assert!(message["result"].is_object(), "{message}");
+            break;
+        }
+    }
+    assert_eq!(cancelled, 1);
+    assert_eq!(cleanup, ["terminal/kill", "terminal/release"]);
+    assert!(process.try_wait().unwrap().is_some());
+    assert!(editor.call(8, "session/resume", serde_json::json!({"sessionId":a})).await["result"].is_object());
+    let listed = editor.call(9, "session/list", serde_json::json!({})).await;
+    assert!(listed["result"]["sessions"].as_array().unwrap().iter().any(|row| row["sessionId"] == a));
+    for message in editor.drain(Duration::from_millis(100)).await {
+        assert!(!(message["id"] == 4 && message["method"].is_null()), "prompt replied twice: {message}");
+    }
+}
+
+#[tokio::test]
+async fn close_cancels_mcp_startup_while_the_owned_server_holds_its_initialization_reply() {
+    let _turn = provider_lock().await;
+    let base = scripted_model("unused.txt".into()).await;
+    unsafe { std::env::set_var("OLLAMA_HOST", &base) };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut config = Config::default();
+    config.agent.model = "ollama/scripted".into();
+    config.mcp.push(Default::default());
+    config.mcp[0].name = "owned-hung-handshake".into();
+    config.mcp[0].url = Some(format!("http://{}/mcp", listener.local_addr().unwrap()));
+    config.mcp[0].startup_timeout_secs = 300;
+    let mut editor = Editor::start_with(config, |_| {});
+    let a =
+        editor.call(1, "session/new", serde_json::json!({"cwd":"."})).await["result"]["sessionId"].clone();
+    let prompt = serde_json::json!({"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":a,"prompt":[{"type":"text","text":"do not start a model before tools are ready"}]}});
+    editor.stdin.write_all(format!("{prompt}\n").as_bytes()).await.unwrap();
+    let (socket, _) =
+        tokio::time::timeout(Duration::from_secs(60), listener.accept()).await.unwrap().unwrap();
+    let mut socket = BufReader::new(socket);
+    let mut length = 0usize;
+    loop {
+        let mut line = String::new();
+        socket.read_line(&mut line).await.unwrap();
+        if line == "\r\n" {
+            break;
+        }
+        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+            length = value.trim().parse().unwrap();
+        }
+    }
+    assert!(length > 0 && length < 65536, "the fixture must reach the actual initialize request");
+    let mut body = vec![0u8; length];
+    socket.read_exact(&mut body).await.unwrap();
+    let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(request["method"], "initialize");
+    // Retain the socket without sending headers or a reply. The MCP deadline
+    // exceeds this fixture's hung guard; a prompt that waits for it cannot pass.
+    let close = serde_json::json!({"jsonrpc":"2.0","id":3,"method":"session/close","params":{"sessionId":a}});
+    editor.stdin.write_all(format!("{close}\n").as_bytes()).await.unwrap();
+    let mut cancelled = false;
+    loop {
+        let message = editor.next().await;
+        if message["id"] == 2 && message["method"].is_null() {
+            assert!(!cancelled, "prompt replied twice");
+            assert_eq!(message["result"]["stopReason"], "cancelled");
+            cancelled = true;
+        }
+        if message["id"] == 3 && message["method"].is_null() {
+            assert!(message["result"].is_object(), "{message}");
+            break;
+        }
+    }
+    assert!(cancelled, "close must cancel the initializing prompt before it acknowledges closure");
+    assert!(editor.call(4, "session/resume", serde_json::json!({"sessionId":a})).await["result"].is_object());
+    drop(socket);
+}
+
+const HISTORY_PNG: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+
+#[tokio::test]
+async fn load_streams_the_entire_utf8_history_images_and_tool_sources_before_responding_without_execution() {
+    use rook_store::{EventKind, Kind, NewEvent};
+    use std::collections::BTreeMap;
+    let mut config = Config::default();
+    config.server.chat_queue_events = 1;
+    config.server.chat_queue_bytes = 4096;
+    config.transcript.body_bytes = 128;
+    let mut editor = Editor::start_with(config, |_| {});
+    let session = editor.rook.start_session("complete root history").unwrap();
+    let wire = rook_store::format_session_id(session);
+    let big = "Русский🙂\n\\\"\u{0001}".repeat(9000);
+    assert!(big.len() > 65536, "fixture must exceed ordinary transcript and frame text budgets");
+    let mut expected = BTreeMap::new();
+    let seq = editor.rook.log(session, EventKind::UserMessage, "", &big).unwrap();
+    expected.insert(seq, big);
+    for i in 0..80 {
+        for (kind, value) in [
+            (EventKind::AssistantMessage, format!("ANSWER_{i}🙂")),
+            (EventKind::UserMessage, format!("REQUEST_{i}🙂")),
+        ] {
+            expected.insert(editor.rook.log(session, kind, "", &value).unwrap(), value);
+        }
+    }
+    let thought = "A saved narrative thought.";
+    expected.insert(editor.rook.log(session, EventKind::Reasoning, "", thought).unwrap(), thought.into());
+    let mut attached = rook_llm::Message::user("prepared attachment context");
+    attached.images.push(rook_llm::Image::from_base64("image/png", HISTORY_PNG).unwrap());
+    let attachment_seq = editor
+        .rook
+        .log(
+            session,
+            EventKind::UserMessage,
+            rook_core::attachments::LABEL,
+            &serde_json::to_string(&attached).unwrap(),
+        )
+        .unwrap();
+    expected.insert(attachment_seq, attached.content);
+    let args = serde_json::json!({"command":"touch must-not-replay"}).to_string();
+    let call_seq = editor.rook.log(session, EventKind::ToolCall, "run_command", &args).unwrap();
+    let image = rook_llm::Image::from_base64("image/png", HISTORY_PNG).unwrap();
+    let data = serde_json::to_vec(&[image]).unwrap();
+    let caption =
+        format!("old output\n[1 tool image(s); content {}]", rook_store::ObjectId::of(&data).to_hex());
+    let [_, result_seq] = editor
+        .rook
+        .store
+        .append_event_pair(
+            session,
+            NewEvent::new(EventKind::Note, Kind::Message, &data).label("rook:tool-images:v1"),
+            NewEvent::new(EventKind::ToolResult, Kind::ToolResult, caption.as_bytes()).label("run_command"),
+        )
+        .unwrap();
+    editor.rook.log(session, EventKind::Note, "rook:timing:v1", &serde_json::json!({"phase":"tool_dispatch","status":"completed","duration_ms":23,"result_seq":result_seq}).to_string()).unwrap();
+    editor
+        .rook
+        .log(session, EventKind::Note, "rook:provider-history:v1", "SIGNED_PRIVATE_DO_NOT_DISPLAY")
+        .unwrap();
+    let through = editor.rook.store.get_session(session).unwrap().unwrap().next_seq;
+    assert!(through > 128, "load must go beyond both metadata pages and preview recovery's tail");
+    let request =
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"session/load","params":{"sessionId":wire}});
+    editor.stdin.write_all(format!("{request}\n").as_bytes()).await.unwrap();
+    let mut seen: BTreeMap<u64, String> = BTreeMap::new();
+    let mut images = Vec::new();
+    let mut tools: BTreeMap<u64, String> = BTreeMap::new();
+    let mut terminal = false;
+    loop {
+        let message = editor.next().await;
+        assert!(!message.to_string().contains("SIGNED_PRIVATE_DO_NOT_DISPLAY"));
+        if message["id"] == 1 && message["method"].is_null() {
+            assert!(message["error"].is_null(), "{message}");
+            assert_eq!(
+                message["result"]["_meta"]["rook"]["history"],
+                serde_json::json!({"through":through,"rootComplete":true})
+            );
+            break;
+        }
+        assert_eq!(
+            message["method"], "session/update",
+            "recovery must not request file/terminal/permission work: {message}"
+        );
+        let update = &message["params"]["update"];
+        let kind = update["sessionUpdate"].as_str().unwrap();
+        if matches!(kind, "user_message_chunk" | "agent_message_chunk" | "agent_thought_chunk") {
+            let seq = update["_meta"]["rook"]["event"].as_u64().unwrap();
+            assert_eq!(update["messageId"], format!("saved_{wire}_{seq}"));
+            assert_eq!(update["_meta"]["rook"]["historical"], true);
+            match update["content"]["type"].as_str().unwrap() {
+                "text" => {
+                    let value = seen.entry(seq).or_default();
+                    assert_eq!(update["_meta"]["rook"]["offset"], value.len() as u64);
+                    value.push_str(update["content"]["text"].as_str().unwrap());
+                }
+                "image" => images.push(update["content"]["data"].as_str().unwrap().to_owned()),
+                other => panic!("unexpected replay content {other}"),
+            }
+        } else if kind == "tool_call_update" {
+            assert_eq!(update["toolCallId"], format!("saved_{wire}_{call_seq}"));
+            if let Some(contents) = update["content"].as_array() {
+                let seq = update["_meta"]["rook"]["event"].as_u64().unwrap();
+                let content = &contents[0]["content"];
+                if content["type"] == "text" {
+                    tools.entry(seq).or_default().push_str(content["text"].as_str().unwrap());
+                } else if content["type"] == "image" {
+                    images.push(content["data"].as_str().unwrap().to_owned());
+                }
+            }
+            terminal |= update["status"] == "completed";
+        } else {
+            assert_eq!(kind, "tool_call");
+            assert_eq!(update["status"], "pending", "saved admission does not prove a live command");
+        }
+        assert!(message.to_string().len() <= 4096, "escaped wire frame must respect the actual queue budget");
+    }
+    assert_eq!(seen, expected, "no elision, tail-only recovery or dropped UTF-8 bytes");
+    assert_eq!(tools[&call_seq], args);
+    assert_eq!(tools[&result_seq], caption);
+    assert_eq!(images, [HISTORY_PNG, HISTORY_PNG]);
+    assert!(terminal, "saved measured completion should survive historical replay");
+    assert_eq!(editor.rook.store.get_session(session).unwrap().unwrap().next_seq, through);
+    assert!(!editor.workspace.join("must-not-replay").exists());
+    let resume =
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"session/resume","params":{"sessionId":wire}});
+    editor.stdin.write_all(format!("{resume}\n").as_bytes()).await.unwrap();
+    let resumed = editor.next().await;
+    assert_eq!(resumed["id"], 2, "resume must send no historical updates");
+    assert!(resumed["result"].is_object());
+}
+
+fn png_with_note(bytes: usize) -> String {
+    use base64::Engine;
+    let mut png = base64::engine::general_purpose::STANDARD.decode(HISTORY_PNG).unwrap();
+    let iend = png.split_off(png.len() - 12);
+    let mut data = b"rook\0".to_vec();
+    data.extend(std::iter::repeat_n(b'x', bytes));
+    let mut crc = 0xffff_ffffu32;
+    for value in b"tEXt".iter().chain(&data) {
+        crc ^= *value as u32;
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ if crc & 1 != 0 { 0xedb8_8320 } else { 0 };
+        }
+    }
+    png.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    png.extend_from_slice(b"tEXt");
+    png.extend_from_slice(&data);
+    png.extend_from_slice(&(!crc).to_be_bytes());
+    png.extend_from_slice(&iend);
+    base64::engine::general_purpose::STANDARD.encode(png)
+}
+
+#[tokio::test]
+async fn load_refuses_an_image_that_reaches_the_wire_byte_budget_without_partial_success_or_disconnection() {
+    let mut config = Config::default();
+    config.server.chat_queue_bytes = 4096;
+    let mut editor = Editor::start_with(config, |_| {});
+    let session = editor.rook.start_session("too large for this view").unwrap();
+    let image = rook_llm::Image::from_base64("image/png", &png_with_note(5000)).unwrap();
+    assert!(image.data.len() > editor.rook.config.server.chat_queue_bytes);
+    let mut message = rook_llm::Message::user("image source");
+    message.images.push(image);
+    editor
+        .rook
+        .log(
+            session,
+            rook_store::EventKind::UserMessage,
+            rook_core::attachments::LABEL,
+            &serde_json::to_string(&message).unwrap(),
+        )
+        .unwrap();
+    let wire = rook_store::format_session_id(session);
+    let loaded = editor.call(1, "session/load", serde_json::json!({"sessionId":wire})).await;
+    assert_eq!(loaded["error"]["code"], -32603);
+    assert!(loaded["error"]["message"].as_str().unwrap().contains("server.chat_queue_bytes"), "{loaded}");
+    assert!(loaded["result"].is_null(), "incomplete history is not a successful load");
+    assert!(
+        editor.call(2, "session/resume", serde_json::json!({"sessionId":wire})).await["result"].is_object(),
+        "the view should retain ordinary control after a refused image"
+    );
+    assert_eq!(editor.rook.store.get_session(session).unwrap().unwrap().next_seq, 1);
+}
+
+#[tokio::test]
+async fn the_standard_mode_method_reaches_the_same_runtime_policy_as_the_legacy_alias() {
+    let mut editor = Editor::start();
+    let session =
+        editor.call(1, "session/new", serde_json::json!({"cwd":"."})).await["result"]["sessionId"].clone();
+    assert!(
+        editor
+            .call(2, "session/set_mode", serde_json::json!({"sessionId":session,"modeId":"readonly"}))
+            .await["result"]
+            .is_object()
+    );
+    let state = editor.call(3, "session/resume", serde_json::json!({"sessionId":session})).await;
+    assert_eq!(state["result"]["modes"]["currentModeId"], "readonly");
+    let invalid =
+        editor.call(4, "session/set_mode", serde_json::json!({"sessionId":session,"modeId":"unknown"})).await;
+    assert_eq!(invalid["error"]["code"], -32602);
+}
+
+#[tokio::test]
+async fn oversized_history_metadata_is_refused_before_a_label_is_copied_or_any_success_is_reported() {
+    let mut config = Config::default();
+    config.server.chat_queue_bytes = 4096;
+    let mut editor = Editor::start_with(config, |_| {});
+    let session = editor.rook.start_session("metadata admission").unwrap();
+    let label = "private-label".repeat(800);
+    assert!(label.len() > editor.rook.config.server.chat_queue_bytes);
+    editor.rook.log(session, rook_store::EventKind::ToolCall, &label, "{}").unwrap();
+    let request = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"session/load","params":{"sessionId":rook_store::format_session_id(session)}});
+    editor.stdin.write_all(format!("{request}\n").as_bytes()).await.unwrap();
+    let reply = editor.next().await;
+    assert_eq!(reply["id"], 1, "oversized metadata must not start an incomplete replay");
+    assert_eq!(reply["error"]["code"], -32603);
+    assert!(reply["error"]["message"].as_str().unwrap().contains("metadata exceeds"), "{reply}");
+    assert!(!reply.to_string().contains("private-label"));
+    assert!(reply["result"].is_null());
+}
+
+#[tokio::test]
+async fn close_still_reaches_a_history_producer_with_a_physically_blocked_output_writer() {
+    let mut config = Config::default();
+    config.server.chat_queue_events = 1;
+    config.server.chat_queue_bytes = 4096;
+    let mut editor = Editor::start_buffered(config, |_| {}, 128);
+    let session = editor.rook.start_session("blocked history writer").unwrap();
+    let body = "retained source ".repeat(10000);
+    assert!(body.len() > 4096);
+    editor.rook.log(session, rook_store::EventKind::UserMessage, "", &body).unwrap();
+    let wire = rook_store::format_session_id(session);
+    let load =
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"session/load","params":{"sessionId":wire}});
+    editor.stdin.write_all(format!("{load}\n").as_bytes()).await.unwrap();
+    let mut first = [0u8; 1];
+    tokio::time::timeout(Duration::from_secs(60), editor.lines.get_mut().get_mut().read_exact(&mut first))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first[0], b'{', "a real history frame must reach the output pipe");
+    // One byte consumed, 128 bytes of pipe capacity and a >512-byte first
+    // frame: the writer cannot have released its sole shared queue lease.
+    let close =
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"session/close","params":{"sessionId":wire}});
+    editor.stdin.write_all(format!("{close}\n").as_bytes()).await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(60), editor.serve)
+        .await
+        .expect("the incoming close must remain usable while history waits on output")
+        .unwrap();
+    assert!(result.is_err(), "an undeliverable control reply must close the view explicitly");
+    assert_eq!(editor.rook.store.get_session(session).unwrap().unwrap().next_seq, 1);
+    assert_eq!(
+        editor.rook.store.get(&editor.rook.store.events(session, 0, 1).unwrap()[0].record.body).unwrap(),
+        body.as_bytes()
+    );
+}
+
+#[tokio::test]
+async fn standard_session_settings_survive_close_and_do_not_change_other_sessions_or_legacy_defaults() {
+    let mut editor = Editor::start();
+    let a =
+        editor.call(1, "session/new", serde_json::json!({"cwd":"."})).await["result"]["sessionId"].clone();
+    let b =
+        editor.call(2, "session/new", serde_json::json!({"cwd":"."})).await["result"]["sessionId"].clone();
+    assert!(editor.call(3, "session/set_mode", serde_json::json!({"sessionId":a,"modeId":"readonly"})).await["result"].is_object());
+    assert!(
+        editor
+            .call(
+                4,
+                "session/set_config_option",
+                serde_json::json!({"sessionId":a,"configId":"effort","value":"low"})
+            )
+            .await["result"]
+            .is_object()
+    );
+    let state = editor.call(5, "session/resume", serde_json::json!({"sessionId":b})).await;
+    assert_eq!(state["result"]["modes"]["currentModeId"], "assist");
+    assert_eq!(state["result"]["configOptions"][1]["currentValue"], "high");
+    assert!(editor.call(6, "session/close", serde_json::json!({"sessionId":a})).await["result"].is_object());
+    let a_state = editor.call(7, "session/resume", serde_json::json!({"sessionId":a})).await;
+    assert_eq!(a_state["result"]["modes"]["currentModeId"], "readonly");
+    assert_eq!(a_state["result"]["configOptions"][1]["currentValue"], "low");
+    assert!(editor.call(8, "session/set_stance", serde_json::json!({"sessionId":b,"modeId":"auto"})).await["result"].is_object());
+    let a_state = editor.call(9, "session/resume", serde_json::json!({"sessionId":a})).await;
+    assert_eq!(
+        a_state["result"]["modes"]["currentModeId"], "readonly",
+        "legacy default must not override explicit per-session selection"
+    );
+    let new = editor.call(10, "session/new", serde_json::json!({"cwd":"."})).await;
+    assert_eq!(
+        new["result"]["modes"]["currentModeId"], "autonomous",
+        "legacy connection defaults remain compatible"
+    );
+    let missing = editor
+        .call(
+            11,
+            "session/set_mode",
+            serde_json::json!({"sessionId":"01ARZ3NDEKTSV4RRFFQ69G5FAV","modeId":"free"}),
+        )
+        .await;
+    assert_eq!(missing["error"]["code"], -32602);
+    let id = rook_store::parse_session_id(a.as_str().unwrap()).unwrap();
+    editor.rook.store.kv_set(&format!("acp-settings/{id:032x}"), &vec![b' '; 1025]).unwrap();
+    let malformed = editor.call(12, "session/resume", serde_json::json!({"sessionId":a})).await;
+    assert_eq!(malformed["error"]["code"], -32603, "oversized state must not become a permissive default");
+    assert!(malformed["result"].is_null());
+}
+
+#[tokio::test]
+async fn a_readonly_standard_selection_refuses_an_actual_write_and_leaves_another_sessions_write_allowed() {
+    let _turn = provider_lock().await;
+    let mut config = Config::default();
+    config.agent.model = "ollama/scripted".into();
+    config.sandbox.stance = rook_tools::policy::Stance::Autonomous;
+    let mut editor = Editor::start_with(config, |_| {});
+    let a =
+        editor.call(1, "session/new", serde_json::json!({"cwd":"."})).await["result"]["sessionId"].clone();
+    let b =
+        editor.call(2, "session/new", serde_json::json!({"cwd":"."})).await["result"]["sessionId"].clone();
+    assert!(editor.call(3, "session/set_mode", serde_json::json!({"sessionId":a,"modeId":"readonly"})).await["result"].is_object());
+    let base = scripted_call(
+        "write_file",
+        serde_json::json!({"path":"owned-selection.txt","content":"allowed session B"}),
+    )
+    .await;
+    unsafe { std::env::set_var("OLLAMA_HOST", &base) };
+    let reply = editor
+        .call(
+            4,
+            "session/prompt",
+            serde_json::json!({"sessionId":a,"prompt":[{"type":"text","text":"write the selected file"}]}),
+        )
+        .await;
+    assert!(reply["result"].is_object(), "{reply}");
+    assert!(
+        !editor.workspace.join("owned-selection.txt").exists(),
+        "selected readonly policy must reach the actual tool gate"
+    );
+    let id = rook_store::parse_session_id(a.as_str().unwrap()).unwrap();
+    let denied = editor
+        .rook
+        .store
+        .events(id, 0, 64)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.record.kind == rook_store::EventKind::ToolResult)
+        .any(|event| {
+            String::from_utf8_lossy(&editor.rook.store.get(&event.record.body).unwrap())
+                .contains("read-only mode")
+        });
+    assert!(denied, "the actual denial must be retained, not a turn that never dispatched a write");
+    let base = scripted_call(
+        "write_file",
+        serde_json::json!({"path":"owned-selection.txt","content":"allowed session B"}),
+    )
+    .await;
+    unsafe { std::env::set_var("OLLAMA_HOST", &base) };
+    let reply = editor
+        .call(
+            5,
+            "session/prompt",
+            serde_json::json!({"sessionId":b,"prompt":[{"type":"text","text":"write the selected file"}]}),
+        )
+        .await;
+    assert!(reply["result"].is_object(), "{reply}");
+    assert_eq!(
+        std::fs::read_to_string(editor.workspace.join("owned-selection.txt")).unwrap(),
+        "allowed session B",
+        "session A selection cannot change session B's ordinary execution policy"
+    );
+}
+
+#[tokio::test]
+async fn a_reached_history_object_budget_refuses_load_without_elision_or_success() {
+    let mut config = Config::default();
+    config.server.acp_history_body_bytes = 65536;
+    let mut editor = Editor::start_with(config, |_| {});
+    let session = editor.rook.start_session("bounded object admission").unwrap();
+    let text = "large retained body ".repeat(5000);
+    assert!(text.len() > editor.rook.config.server.acp_history_body_bytes);
+    editor.rook.log(session, rook_store::EventKind::UserMessage, "", &text).unwrap();
+    let loaded = editor
+        .call(1, "session/load", serde_json::json!({"sessionId":rook_store::format_session_id(session)}))
+        .await;
+    assert_eq!(loaded["error"]["code"], -32603);
+    assert!(loaded["error"]["message"].as_str().unwrap().contains("server.acp_history_body_bytes"));
+    assert!(loaded["result"].is_null());
+    assert_eq!(editor.rook.store.get_session(session).unwrap().unwrap().next_seq, 1);
+}
+
+#[tokio::test]
+async fn selected_workspace_controls_actual_execution_and_resume_refuses_another_directory() {
+    let _turn = provider_lock().await;
+    let project = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let base = scripted_call(
+        "write_file",
+        serde_json::json!({"path":"chosen-project.txt","content":"actual selected root"}),
+    )
+    .await;
+    unsafe { std::env::set_var("OLLAMA_HOST", &base) };
+    let mut config = Config::default();
+    config.agent.model = "ollama/scripted".into();
+    config.sandbox.stance = rook_tools::policy::Stance::Autonomous;
+    let mut editor = Editor::start_with(config, |_| {});
+    let created =
+        editor.call(1, "session/new", serde_json::json!({"cwd":project.path(),"mcpServers":[]})).await;
+    let session = created["result"]["sessionId"].clone();
+    assert!(session.is_string(), "{created}");
+    let id = rook_store::parse_session_id(session.as_str().unwrap()).unwrap();
+    assert_eq!(
+        PathBuf::from(editor.rook.store.get_session(id).unwrap().unwrap().workspace),
+        project.path().canonicalize().unwrap()
+    );
+    let reply = editor.call(2, "session/prompt", serde_json::json!({"sessionId":session,"prompt":[{"type":"text","text":"write the chosen project file"}]})).await;
+    assert!(reply["result"].is_object(), "{reply}");
+    assert_eq!(
+        std::fs::read_to_string(project.path().join("chosen-project.txt")).unwrap(),
+        "actual selected root"
+    );
+    assert!(!editor.workspace.join("chosen-project.txt").exists());
+    assert!(!other.path().join("chosen-project.txt").exists());
+    let bad = editor
+        .call(
+            3,
+            "session/resume",
+            serde_json::json!({"sessionId":session,"cwd":other.path(),"mcpServers":[]}),
+        )
+        .await;
+    assert_eq!(
+        bad["error"]["code"], -32602,
+        "another project cannot silently become this session's workspace"
+    );
+    let good = editor
+        .call(
+            4,
+            "session/resume",
+            serde_json::json!({"sessionId":session,"cwd":project.path(),"mcpServers":[]}),
+        )
+        .await;
+    assert!(good["result"].is_object(), "{good}");
+    let count = editor.rook.store.list_sessions().unwrap().len();
+    let invalid = editor
+        .call(5, "session/new", serde_json::json!({"cwd":project.path().join("missing"),"mcpServers":[]}))
+        .await;
+    assert_eq!(invalid["error"]["code"], -32602);
+    assert_eq!(
+        editor.rook.store.list_sessions().unwrap().len(),
+        count,
+        "invalid setup cannot create a placeholder session"
+    );
+}
+
+#[tokio::test]
+async fn a_requested_mcp_handshake_is_reached_before_new_ack_and_can_be_cancelled_without_a_known_session_id()
+{
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut editor = Editor::start();
+    let request = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":editor.workspace,"mcpServers":[{"type":"http","name":"owned-init","url":format!("http://{}/mcp",listener.local_addr().unwrap()),"headers":[]}]}});
+    editor.stdin.write_all(format!("{request}\n").as_bytes()).await.unwrap();
+    let (socket, _) =
+        tokio::time::timeout(Duration::from_secs(60), listener.accept()).await.unwrap().unwrap();
+    let mut socket = BufReader::new(socket);
+    let mut length = 0usize;
+    loop {
+        let mut line = String::new();
+        socket.read_line(&mut line).await.unwrap();
+        if line == "\r\n" {
+            break;
+        }
+        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+            length = value.trim().parse().unwrap();
+        }
+    }
+    assert!(length > 0 && length < 65536);
+    let mut body = vec![0; length];
+    socket.read_exact(&mut body).await.unwrap();
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&body).unwrap()["method"], "initialize");
+    editor.notify("session/cancel", serde_json::json!({})).await;
+    let reply = editor.next().await;
+    assert_eq!(reply["id"], 1);
+    assert_eq!(reply["error"]["code"], -32603, "unfinished requested MCP cannot be acknowledged as ready");
+    assert!(reply["error"]["message"].as_str().unwrap().contains("cancelled"));
+    assert!(reply["result"].is_null());
+    let session = editor.rook.store.list_sessions().unwrap().into_iter().next().unwrap();
+    assert_eq!(session.next_seq, 0, "startup cancellation cannot become a model turn");
+    assert!(editor.call(2, "session/resume", serde_json::json!({"sessionId":rook_store::format_session_id(session.id),"cwd":editor.workspace,"mcpServers":[]})).await["result"].is_object());
+    drop(socket);
+}
+
+#[tokio::test]
+async fn setup_declaration_limits_and_unsupported_transports_refuse_before_creating_sessions() {
+    let mut config = Config::default();
+    config.server.acp_setup_bytes = 4096;
+    let mut editor = Editor::start_with(config, |_| {});
+    let huge = "X".repeat(5000);
+    let bad = editor.call(1, "session/new", serde_json::json!({"cwd":editor.workspace,"mcpServers":[{"name":"too-large","command":"unused","env":[{"name":"TOKEN","value":huge}]}]})).await;
+    assert_eq!(bad["error"]["code"], -32602);
+    assert!(bad["error"]["message"].as_str().unwrap().contains("acp_setup_bytes"));
+    let sse = editor.call(2, "session/new", serde_json::json!({"cwd":editor.workspace,"mcpServers":[{"type":"sse","name":"unsupported","url":"http://127.0.0.1:1"}]})).await;
+    assert_eq!(sse["error"]["code"], -32602);
+    assert!(editor.rook.store.list_sessions().unwrap().is_empty());
+}
+
+struct SetupMcp {
+    url: String,
+    counts: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+impl Drop for SetupMcp {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+impl SetupMcp {
+    async fn start() -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let counts = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let seen = counts.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = BufReader::new(socket);
+                let mut length = 0usize;
+                let mut request_method = String::new();
+                let mut authorization = String::new();
+                loop {
+                    let mut line = String::new();
+                    socket.read_line(&mut line).await.unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if request_method.is_empty() {
+                        request_method = line.split_whitespace().next().unwrap().into();
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap();
+                    }
+                    if line.to_ascii_lowercase().starts_with("authorization:") {
+                        authorization = line.split_once(':').unwrap().1.trim().into();
+                    }
+                }
+                assert!(length < 65536);
+                if request_method == "DELETE" {
+                    *seen.lock().unwrap().entry("delete".into()).or_insert(0) += 1;
+                    socket.write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n").await.unwrap();
+                    continue;
+                }
+                let mut body = vec![0u8; length];
+                socket.read_exact(&mut body).await.unwrap();
+                let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let method = request["method"].as_str().unwrap().to_owned();
+                *seen.lock().unwrap().entry(method.clone()).or_insert(0) += 1;
+                assert_eq!(authorization, "Bearer acp-ephemeral-secret-value");
+                if request["id"].is_null() {
+                    socket
+                        .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .await
+                        .unwrap();
+                    continue;
+                }
+                let result = match method.as_str() {
+                    "initialize" => {
+                        serde_json::json!({"protocolVersion":request["params"]["protocolVersion"],"serverInfo":{"name":"owned","version":"1"},"capabilities":{"tools":{}}})
+                    }
+                    "tools/list" => {
+                        serde_json::json!({"tools":[{"name":"ping","description":"A fixture observation.","inputSchema":{"type":"object"}}]})
+                    }
+                    "tools/call" => {
+                        serde_json::json!({"content":[{"type":"text","text":"owned MCP answer acp-ephemeral-secret-value"}]})
+                    }
+                    other => panic!("unexpected requested MCP method {other}"),
+                };
+                let body =
+                    serde_json::json!({"jsonrpc":"2.0","id":request["id"],"result":result}).to_string();
+                let session_header = if method == "initialize" { "Mcp-Session-Id: owned-1\r\n" } else { "" };
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{session_header}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+            }
+        });
+        Self { url, counts, task }
+    }
+    fn count(&self, name: &str) -> usize {
+        self.counts.lock().unwrap().get(name).copied().unwrap_or(0)
+    }
+    fn declaration(&self) -> serde_json::Value {
+        serde_json::json!({"type":"http","name":"owned","url":self.url,"headers":[{"name":"Authorization","value":"Bearer acp-ephemeral-secret-value"}]})
+    }
+}
+
+#[tokio::test]
+async fn requested_http_mcp_is_ready_reused_and_redacted_through_actual_tools_then_reconnected_after_close() {
+    let _turn = provider_lock().await;
+    let mcp = SetupMcp::start().await;
+    let mut config = Config::default();
+    config.agent.model = "ollama/scripted".into();
+    config.sandbox.stance = rook_tools::policy::Stance::Autonomous;
+    let mut editor = Editor::start_with(config, |_| {});
+    let created = editor
+        .call(1, "session/new", serde_json::json!({"cwd":editor.workspace,"mcpServers":[mcp.declaration()]}))
+        .await;
+    assert!(created["result"]["sessionId"].is_string(), "{created}");
+    assert_eq!(mcp.count("initialize"), 1);
+    assert_eq!(mcp.count("tools/list"), 1, "new cannot acknowledge before the requested catalog is ready");
+    let session = created["result"]["sessionId"].clone();
+    for turn in 0..2 {
+        let base = scripted_call("owned__ping", serde_json::json!({})).await;
+        unsafe { std::env::set_var("OLLAMA_HOST", &base) };
+        let reply = editor.call(2+turn, "session/prompt", serde_json::json!({"sessionId":session,"prompt":[{"type":"text","text":"inspect the configured observation"}]})).await;
+        assert!(reply["result"].is_object(), "{reply}");
+    }
+    assert_eq!(mcp.count("initialize"), 1, "ordinary prompts reuse their session-owned connection");
+    assert_eq!(mcp.count("tools/call"), 2);
+    let id = rook_store::parse_session_id(session.as_str().unwrap()).unwrap();
+    let results: Vec<_> = editor
+        .rook
+        .store
+        .events(id, 0, 256)
+        .unwrap()
+        .into_iter()
+        .filter(|event| {
+            event.record.kind == rook_store::EventKind::ToolResult && event.record.label == "owned__ping"
+        })
+        .collect();
+    assert_eq!(results.len(), 2);
+    for result in results {
+        let text = String::from_utf8(editor.rook.store.get(&result.record.body).unwrap()).unwrap();
+        assert!(
+            text.contains("owned MCP answer"),
+            "actual remote output must reach the ordinary tool journal"
+        );
+        assert!(
+            !text.contains("acp-ephemeral-secret-value"),
+            "transient credentials cannot become retained tool output: {text}"
+        );
+    }
+    assert!(editor.call(4, "session/resume", serde_json::json!({"sessionId":session,"cwd":editor.workspace,"mcpServers":[mcp.declaration()]})).await["result"].is_object());
+    assert_eq!(mcp.count("initialize"), 1);
+    assert!(
+        editor.call(5, "session/close", serde_json::json!({"sessionId":session})).await["result"].is_object()
+    );
+    assert!(editor.call(6, "session/resume", serde_json::json!({"sessionId":session,"cwd":editor.workspace,"mcpServers":[mcp.declaration()]})).await["result"].is_object());
+    assert_eq!(
+        mcp.count("initialize"),
+        2,
+        "resume after close recreates the explicitly requested connection"
+    );
+    assert_eq!(mcp.count("tools/call"), 2, "resume cannot replay earlier tool effects");
+    assert!(
+        editor.call(7, "session/close", serde_json::json!({"sessionId":session})).await["result"].is_object()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stdio_mcp_runs_in_the_selected_project_reuses_its_owned_process_and_stops_on_close() {
+    let _turn = provider_lock().await;
+    let project = tempfile::tempdir().unwrap();
+    let receipts = tempfile::tempdir().unwrap();
+    let executable = std::env::current_exe().unwrap();
+    let target = executable.parent().unwrap().parent().unwrap();
+    let mock = target.join("mcp-mock");
+    assert!(mock.is_file(), "build the existing MCP fixture before this focused test: {mock:?}");
+    let receipt = receipts.path().join("mcp-owner.json");
+    let declaration = serde_json::json!({"name":"stdio-owned","command":mock,"args":["workspace-probe"],"env":[{"name":"MCP_MOCK_RECEIPT","value":receipt},{"name":"MCP_MOCK_TOKEN","value":"stdio-ephemeral-secret-value"}]});
+    let mut config = Config::default();
+    config.agent.model = "ollama/scripted".into();
+    config.sandbox.stance = rook_tools::policy::Stance::Autonomous;
+    let mut editor = Editor::start_with(config, |_| {});
+    let created = editor
+        .call(1, "session/new", serde_json::json!({"cwd":project.path(),"mcpServers":[declaration]}))
+        .await;
+    let session = created["result"]["sessionId"].clone();
+    assert!(session.is_string(), "{created}");
+    let owner: serde_json::Value = serde_json::from_slice(&std::fs::read(&receipt).unwrap()).unwrap();
+    assert_eq!(PathBuf::from(owner["cwd"].as_str().unwrap()), project.path().canonicalize().unwrap());
+    let pid = owner["pid"].as_u64().unwrap().to_string();
+    fn alive(pid: &str) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", pid])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    }
+    assert!(alive(&pid), "the actual owned process must be running before tools are called");
+    for turn in 0..2 {
+        let base = scripted_call("stdio-owned__echo", serde_json::json!({"text":"probe"})).await;
+        unsafe { std::env::set_var("OLLAMA_HOST", &base) };
+        assert!(editor.call(2+turn, "session/prompt", serde_json::json!({"sessionId":session,"prompt":[{"type":"text","text":"inspect the selected project MCP"}]})).await["result"].is_object());
+    }
+    let id = rook_store::parse_session_id(session.as_str().unwrap()).unwrap();
+    let results: Vec<_> = editor
+        .rook
+        .store
+        .events(id, 0, 256)
+        .unwrap()
+        .into_iter()
+        .filter(|event| {
+            event.record.kind == rook_store::EventKind::ToolResult
+                && event.record.label == "stdio-owned__echo"
+        })
+        .collect();
+    assert_eq!(results.len(), 2);
+    for result in results {
+        let text = String::from_utf8(editor.rook.store.get(&result.record.body).unwrap()).unwrap();
+        assert!(text.contains(&pid), "both turns must reach the original process");
+        assert!(!text.contains("stdio-ephemeral-secret-value"));
+    }
+    assert!(
+        editor.call(4, "session/close", serde_json::json!({"sessionId":session})).await["result"].is_object()
+    );
+    tokio::time::timeout(Duration::from_secs(60), async {
+        while alive(&pid) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the session-owned MCP process must actually die after close");
+    assert!(
+        editor
+            .call(
+                5,
+                "session/load",
+                serde_json::json!({"sessionId":session,"cwd":project.path(),"mcpServers":[]})
+            )
+            .await["result"]
+            .is_object()
+    );
+    assert!(!alive(&pid), "history load with an empty intended list cannot restart an old connection");
+}
+
+#[tokio::test]
+async fn load_replaces_requested_mcp_only_after_a_turn_and_never_implicitly_restores_old_servers() {
+    let mcp = SetupMcp::start().await;
+    let mut editor = Editor::start();
+    let created = editor
+        .call(1, "session/new", serde_json::json!({"cwd":editor.workspace,"mcpServers":[mcp.declaration()]}))
+        .await;
+    let session = created["result"]["sessionId"].clone();
+    assert!(session.is_string(), "{created}");
+    let loaded = editor
+        .call(
+            2,
+            "session/load",
+            serde_json::json!({"sessionId":session,"cwd":editor.workspace,"mcpServers":[]}),
+        )
+        .await;
+    assert!(loaded["result"].is_object(), "{loaded}");
+    assert_eq!(mcp.count("initialize"), 1);
+    let reconnected = editor
+        .call(
+            3,
+            "session/resume",
+            serde_json::json!({"sessionId":session,"cwd":editor.workspace,"mcpServers":[mcp.declaration()]}),
+        )
+        .await;
+    assert!(reconnected["result"].is_object(), "{reconnected}");
+    assert_eq!(
+        mcp.count("initialize"),
+        2,
+        "the intended list changed; old connection must have been released"
+    );
+    assert_eq!(mcp.count("tools/call"), 0, "setup/readiness cannot execute any tool");
+    assert!(
+        editor.call(4, "session/close", serde_json::json!({"sessionId":session})).await["result"].is_object()
+    );
+}
+
+#[tokio::test]
+async fn a_definitely_failed_requested_server_cannot_return_ready_or_echo_its_credentials() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let mut editor = Editor::start();
+    let reply = editor.call(1, "session/new", serde_json::json!({"cwd":editor.workspace,"mcpServers":[{"type":"http","name":"failed-owned","url":format!("http://{address}/mcp"),"headers":[{"name":"Authorization","value":"Bearer failed-setup-secret-value"}]}]})).await;
+    assert_eq!(reply["error"]["code"], -32603, "{reply}");
+    assert!(reply["result"].is_null());
+    assert!(!reply.to_string().contains("failed-setup-secret-value"));
+    let session = editor.rook.store.list_sessions().unwrap().into_iter().next().unwrap();
+    assert_eq!(session.next_seq, 0);
+    assert!(editor.call(2, "session/resume", serde_json::json!({"sessionId":rook_store::format_session_id(session.id),"cwd":editor.workspace,"mcpServers":[]})).await["result"].is_object());
+}
+
+#[tokio::test]
+async fn an_external_executor_reads_the_child_editors_buffer_with_bounded_copy_and_no_disk_fallback() {
+    let _turn = provider_lock().await;
+    for oversized in [false, true] {
+        let base =
+            scripted_call("delegate", serde_json::json!({"task":"read selected lines","executor":"owned"}))
+                .await;
+        unsafe { std::env::set_var("OLLAMA_HOST", &base) };
+        let exe = std::env::current_exe().unwrap();
+        let debug = exe.parent().unwrap().parent().unwrap();
+        let mock = debug.join(if cfg!(windows) { "mcp-mock.exe" } else { "mcp-mock" });
+        assert!(mock.is_file(), "build mcp-mock first");
+        let receipts = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.agent.model = "ollama/scripted".into();
+        config.sandbox.stance = rook_tools::policy::Stance::Autonomous;
+        config.acp_executor.file_bytes = 4096;
+        config.acp_executor.profiles.insert(
+            "owned".into(),
+            rook_core::acp_executor::Profile {
+                command: mock.to_string_lossy().into_owned(),
+                args: vec![
+                    "acp-read".into(),
+                    receipts.path().join("process.json").to_string_lossy().into_owned(),
+                ],
+                trusted: true,
+                env: Default::default(),
+            },
+        );
+        let mut editor = Editor::start_with(config, |workspace| {
+            std::fs::write(workspace.join("notes.txt"), "disk first\ndisk second\n").unwrap();
+        });
+        editor.call(1,"initialize",serde_json::json!({"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":true,"writeTextFile":true},"subagents":{}}})).await;
+        let root = editor.call(2, "session/new", serde_json::json!({"cwd":"."})).await["result"]["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let prompt = serde_json::json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":root,"prompt":[{"type":"text","text":"use the configured executor"}]}});
+        editor.stdin.write_all(format!("{prompt}\n").as_bytes()).await.unwrap();
+        let mut child = None;
+        let mut read = false;
+        let mut ended = false;
+        let buffer =
+            if oversized { "x".repeat(5000) } else { "editor first\r\neditor unsaved second\r\n".into() };
+        if oversized {
+            assert!(buffer.len() > 4096);
+        }
+        for _ in 0..100 {
+            let message = editor.next().await;
+            if message["params"]["update"]["sessionUpdate"] == "subagent_update" {
+                child = message["params"]["update"]["sessionId"].as_str().map(str::to_owned);
+            }
+            if message["method"] == "fs/read_text_file" {
+                assert_eq!(
+                    message["params"]["sessionId"].as_str(),
+                    child.as_deref(),
+                    "association precedes the child request"
+                );
+                assert_ne!(message["params"]["sessionId"], root);
+                assert_eq!(
+                    message["params"]["path"],
+                    editor.workspace.canonicalize().unwrap().join("notes.txt").to_string_lossy().as_ref()
+                );
+                read = true;
+                let reply =
+                    serde_json::json!({"jsonrpc":"2.0","id":message["id"],"result":{"content":buffer}});
+                editor.stdin.write_all(format!("{reply}\n").as_bytes()).await.unwrap();
+            }
+            if message["id"] == 3 && message["method"].is_null() {
+                assert!(message.get("error").is_none(), "{message}");
+                ended = true;
+                break;
+            }
+        }
+        assert!(read && ended);
+        let child = rook_store::parse_session_id(child.as_deref().unwrap()).unwrap();
+        let events = editor.rook.store.events(child, 0, 128).unwrap();
+        let reply = events.iter().find(|e| e.record.kind == rook_store::EventKind::AssistantMessage).unwrap();
+        let reply = String::from_utf8(editor.rook.store.get(&reply.record.body).unwrap()).unwrap();
+        if oversized {
+            assert!(reply.contains("raw read limit"), "{reply}");
+            assert!(!reply.contains("disk second"));
+        } else {
+            assert_eq!(reply, "editor unsaved second\r\n");
+        }
+        assert_eq!(
+            std::fs::read_to_string(editor.workspace.join("notes.txt")).unwrap(),
+            "disk first\ndisk second\n"
+        );
+    }
 }

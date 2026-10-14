@@ -66,6 +66,31 @@ const frame = () => { for (const cb of [...frames.values()]) cb(); };
 const answers = () => stream.children.filter(n => n.className === 'md');
 const finish = (socket, reply) => socket.receive({ type: 'done', reply, steps: 1, input_tokens: 0, output_tokens: 0, delegated: [] });
 
+test('inactivity notices render as observations and notify once per episode across snapshots', () => {
+  const notices = [];
+  globalThis.Notification = class {
+    static permission = 'granted';
+    constructor(title, options) { notices.push({ title, options }); }
+  };
+  window.Notification = globalThis.Notification;
+  document.hidden = true;
+  const socket = start();
+  const observed = { session: 'fixture', generation: 'first', stage: 'model', idle_secs: 301, threshold_secs: 300, last_progress_at: 1, notifications: 1, stalled: true, owner_live: true };
+  socket.receive({ type: 'activity', state: observed });
+  assert.match(stream.textContent, /no observed progress for 301s/);
+  assert.equal(notices.length, 1);
+  socket.receive(snapshot());
+  socket.receive({ type: 'activity', state: observed });
+  assert.equal(notices.length, 1, 'reattaching the same episode cannot notify twice');
+  socket.receive({ type: 'activity', state: { ...observed, last_progress_at: 2, notifications: 2 } });
+  assert.equal(notices.length, 2);
+  socket.receive({ type: 'activity', state: { ...observed, owner_live: false, notifications: 3 } });
+  assert.equal(notices.length, 2, 'saved or finished work does not trigger a live notification');
+  socket.receive({ type: 'activity', state: { ...observed, generation: 'successor', last_progress_at: 2, notifications: 2 } });
+  assert.equal(notices.length, 3, 'a successor owner has its own episodes even in the same timestamp');
+  document.hidden = false;
+});
+
 test('Done before a pending frame preserves a complete split fence without a duplicate or source attribute', () => {
   const socket = start(), reply = 'Paragraph\n\n```sql\nSELECT "🦉";\n```\n\nFinal';
   for (const part of reply.split('')) text(socket, part);
@@ -198,4 +223,16 @@ test('large single replies actually reach the live cap and total retained model 
   assert.equal(answers().length, 4, 'five capped answers must exceed the total 4 Mi-unit admission budget');
   assert.equal(answers().reduce((n, answer) => n + Number(answer.dataset.modelCharacters), 0), 4 * MAX_MODEL_CHARACTERS);
   socket.receive({ type: 'cancelled' });
+});
+
+test('an unpriced external executor remains visibly unfinished with its report and inspection question', () => {
+  const socket = start();
+  socket.receive({ type: 'done', reply: 'External child reported GENUINE_ACP.', steps: 1,
+    input_tokens: 10, output_tokens: 5, delegated: ['external-child'],
+    stopped: 'subrecipe_cost_unknown', open_questions: ['Inspect external-child and the actual workspace changes.'] });
+  assert.match(stream.textContent, /External child reported GENUINE_ACP/);
+  assert.match(stream.textContent, /unverified model usage or cost/);
+  assert.match(stream.textContent, /Inspect external-child/);
+  assert.doesNotMatch(stream.textContent, /subrecipe_cost_unknown/);
+  assert.equal(socket.sent.filter(m => m.type === 'prompt').length, 0, 'a UI outcome cannot retry an external operation');
 });

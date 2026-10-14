@@ -119,7 +119,7 @@ impl<'a> AgentLoop<'a> {
             })
             .collect();
 
-        let text_costs: std::collections::BTreeMap<_, _> =
+        let mut text_costs: std::collections::BTreeMap<_, _> =
             entries.iter().map(|entry| (entry.seq, estimate_tokens(&entry.body))).collect();
         let mut attachment_costs = std::collections::BTreeMap::new();
         let mut tool_images = std::collections::BTreeSet::new();
@@ -147,13 +147,22 @@ impl<'a> AgentLoop<'a> {
                 let message = crate::attachments::decode(&String::from_utf8_lossy(&bytes))?;
                 attachment_costs.insert(event.seq, crate::attachments::tokens(&message));
             } else if event.record.kind == EventKind::ToolResult {
-                let images = crate::tool_images::load(self.rook, event)?;
-                if !images.is_empty() {
+                let mut image_message = Message::tool_result("", "");
+                crate::tool_images::for_request(self.rook, event, &mut image_message)?;
+                if !image_message.content.is_empty() {
+                    *text_costs.entry(event.seq).or_default() +=
+                        crate::context::estimate_tokens(&image_message.content);
+                }
+                if !image_message.images.is_empty() {
                     tool_images.insert(event.seq);
                     let text = text_costs.get(&event.seq).copied().unwrap_or(0);
                     attachment_costs.insert(
                         event.seq,
-                        text + images.iter().map(rook_llm::Image::estimated_tokens).sum::<usize>(),
+                        text + image_message
+                            .images
+                            .iter()
+                            .map(rook_llm::Image::estimated_tokens)
+                            .sum::<usize>(),
                     );
                 }
             }

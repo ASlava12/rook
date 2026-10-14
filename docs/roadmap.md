@@ -1791,6 +1791,11 @@ recorded so the design question survives the session that raised it.
 
 ## Next
 
+**The fourteen reference capabilities requested on 2026-10-11.** Implementation
+and acceptance evidence are tracked in
+[reference-functional-adoption.md](reference-functional-adoption.md). All fourteen
+remain in scope; partial deliveries do not complete that work.
+
 **Pi: interaction and long-session delivery.** The
 [September 30 review](research/pi-reference-review-20260930.md) compares the
 pinned Pi CLI and its separate durable harness with the current Rook. First

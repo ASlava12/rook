@@ -143,6 +143,13 @@ impl App {
             prices: false,
         };
         app.reload()?;
+        // Adding an alphabetically earlier section must not move the initial
+        // model/step settings away from the agent section people opened for.
+        app.selected = app
+            .visible()
+            .iter()
+            .position(|index| app.entries[*index].path.last().is_some_and(|name| name == "agent"))
+            .unwrap_or(0);
         Ok(app)
     }
     fn reload(&mut self) -> Result<()> {

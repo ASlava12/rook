@@ -26,6 +26,9 @@ pub struct AttemptFacts {
 
 /// The host persists admission before any generation request is sent.
 pub trait AttemptObserver: Send + Sync {
+    /// Capacity waiting is not a physical generation and must not be billed
+    /// or admitted as one. Observers may report it independently.
+    fn waiting_for_capacity(&self) {}
     fn start(&self, dispatch: Option<&Dispatch>) -> Result<Box<dyn Attempt>>;
 }
 

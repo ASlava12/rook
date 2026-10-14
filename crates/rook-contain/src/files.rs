@@ -41,6 +41,12 @@ impl RecoveryFiles {
         // to the actual input rather than a replacement symlink's target.
         let mut options = OpenOptions::new();
         options.read(true).follow(FollowSymlinks::No);
+        // A FIFO must reach metadata admission without waiting for a writer.
+        #[cfg(unix)]
+        {
+            use cap_std::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NONBLOCK);
+        }
         parent.open_with(name, &options)?.into_std().metadata()
     }
 
@@ -63,6 +69,12 @@ impl RecoveryFiles {
         let (parent, name) = self.parent(path, false)?;
         let mut options = OpenOptions::new();
         options.read(true).follow(FollowSymlinks::No);
+        // A FIFO must reach metadata admission without waiting for a writer.
+        #[cfg(unix)]
+        {
+            use cap_std::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NONBLOCK);
+        }
         let file = parent.open_with(name, &options)?.into_std();
         if !file.metadata()?.is_file() || file.metadata()?.len() > maximum as u64 {
             return Err(io::Error::other("recovery metadata is not a bounded regular file"));
@@ -73,6 +85,108 @@ impl RecoveryFiles {
             return Err(io::Error::other("recovery metadata grew past its byte limit"));
         }
         Ok(bytes)
+    }
+
+    /// Remove an empty directory without following its parent chain or deleting contents.
+    pub fn remove_directory(&self, path: &Path) -> io::Result<()> {
+        relative(path)?;
+        let (parent, name) = self.parent(path, false)?;
+        if !parent.symlink_metadata(name)?.is_dir() {
+            return Err(io::Error::other("expected an empty directory"));
+        }
+        parent.remove_dir(name)
+    }
+
+    /// Bounded names from a directory opened without following any links.
+    pub fn entries(&self, path: &Path, maximum: usize) -> io::Result<Vec<(String, bool, bool)>> {
+        relative(path)?;
+        let dir = recovery_parent(self.0.try_clone()?, path, false)?;
+        let mut result = Vec::new();
+        for entry in dir.entries()? {
+            if result.len() >= maximum {
+                return Err(io::Error::other("directory entry budget exceeded"));
+            }
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name
+                .to_str()
+                .filter(|name| name.len() <= 1024)
+                .ok_or_else(|| io::Error::other("source name is not bounded UTF-8"))?;
+            let kind = entry.file_type()?;
+            result.push((name.to_owned(), kind.is_file(), kind.is_dir()));
+        }
+        Ok(result)
+    }
+
+    /// Compare the inspected file before replacing or deleting its entry.
+    /// Names stay directory relative; replacing never writes through a link.
+    /// This is conflict preflight, not an atomic compare-and-swap against other
+    /// processes. The caller retains the inspected current file before writing.
+    pub fn replace_checked(
+        &self,
+        path: &Path,
+        expected: Option<&[u8]>,
+        expected_mode: Option<u32>,
+        replacement: Option<&[u8]>,
+        mode: u32,
+    ) -> io::Result<bool> {
+        let matches = || -> io::Result<bool> {
+            let current = match self.read(path, expected.map_or(0, <[u8]>::len)) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error),
+            };
+            if current.as_deref() != expected {
+                return Ok(false);
+            }
+            let actual_mode = if current.is_some() { Some(file_mode(&self.metadata(path)?)) } else { None };
+            Ok(actual_mode == expected_mode)
+        };
+        if !matches()? {
+            return Ok(false);
+        }
+        let (parent, name) = self.parent(path, replacement.is_some())?;
+        let Some(bytes) = replacement else {
+            if expected.is_some() {
+                parent.remove_file(name)?;
+                sync_directory(&parent);
+            }
+            return Ok(true);
+        };
+        let (temp, file) = temporary(&parent, true)?;
+        let result = (|| {
+            let mut file = file.into_std();
+            file.write_all(bytes)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                file.set_permissions(std::fs::Permissions::from_mode(mode & 0o777))?;
+            }
+            #[cfg(not(unix))]
+            {
+                let mut permissions = file.metadata()?.permissions();
+                permissions.set_readonly(mode & 0o222 == 0);
+                file.set_permissions(permissions)?;
+            }
+            file.sync_all()?;
+            drop(file);
+            if !matches()? {
+                return Ok(false);
+            }
+            if expected.is_none() {
+                match parent.hard_link(&temp, &parent, name) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
+                    Err(error) => return Err(error),
+                }
+            } else {
+                parent.rename(&temp, &parent, name)?;
+            }
+            sync_directory(&parent);
+            Ok(true)
+        })();
+        let _ = parent.remove_file(&temp);
+        result
     }
 
     pub fn write_new(&self, path: &Path, bytes: &[u8]) -> io::Result<bool> {
@@ -453,4 +567,17 @@ pub fn move_file(from_root: &Path, from: &Path, to_root: &Path, to: &Path) -> io
     }
     sync_directory(&source);
     Ok(bytes)
+}
+
+/// Permission representation shared by capture and restoration.
+pub fn file_mode(metadata: &std::fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o777
+    }
+    #[cfg(not(unix))]
+    {
+        if metadata.permissions().readonly() { 0o444 } else { 0o666 }
+    }
 }

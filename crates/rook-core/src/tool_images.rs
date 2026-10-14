@@ -191,6 +191,37 @@ pub(crate) fn load(rook: &Rook, result: &Event) -> Result<Vec<Image>> {
     }
 }
 
+/// The same explicit browser delivery setting governs live replies, replay
+/// and compaction. Pixels remain stored; other tools and user images retain
+/// their existing delivery behavior, including explicit read_result requests.
+pub(crate) fn for_request(rook: &Rook, result: &Event, message: &mut rook_llm::Message) -> Result<()> {
+    if result.record.label == crate::browser::TOOL && !rook.config.browser.include_images {
+        if companion(rook, result)?.is_some() {
+            add_note(
+                message,
+                "\n[Browser screenshot retained; pixels are not sent with browser.include_images=false. Read snapshot for page text. Enable browser.include_images only for an image-capable model.]",
+            );
+        }
+        message.images.clear();
+    } else {
+        message.images = load(rook, result)?;
+    }
+    Ok(())
+}
+
+fn add_note(message: &mut rook_llm::Message, note: &str) {
+    // Keep the provenance envelope parseable for pruning and result retrieval.
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&message.content)
+        && let Some(text) = value.get_mut("rook_source").and_then(|v| v.get_mut("content"))
+        && let Some(original) = text.as_str()
+    {
+        *text = serde_json::Value::String(format!("{original}{note}"));
+        message.content = value.to_string();
+    } else {
+        message.content.push_str(note);
+    }
+}
+
 pub(crate) fn read(rook: &Rook, result: &Event, index: usize) -> Result<crate::transcript::SavedToolImage> {
     if index >= rook_llm::images::MAX_IMAGES_PER_MESSAGE {
         return Err(CoreError::Other("image index must be between 0 and 3".into()));
@@ -243,17 +274,52 @@ pub(crate) fn bound(messages: &mut [rook_llm::Message]) -> usize {
             "\n[{dropped} image(s) omitted from this request to keep at most {} recent images in context. {recovery}]",
             crate::attachments::MAX_ATTACHMENTS
         );
-        // Preserve result_id and the provenance envelope for pruning and
-        // retrieval. Appending outside its JSON would make both unreadable.
-        if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&message.content)
-            && let Some(text) = value.get_mut("rook_source").and_then(|v| v.get_mut("content"))
-            && let Some(original) = text.as_str()
-        {
-            *text = serde_json::Value::String(format!("{original}{note}"));
-            message.content = value.to_string();
-        } else {
-            message.content.push_str(&note);
-        }
+        add_note(message, &note);
     }
     omitted
+}
+
+#[cfg(test)]
+mod delivery_tests {
+    use super::*;
+    #[test]
+    fn browser_pixel_delivery_is_explicit_and_preserves_stored_images_and_source_envelopes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rook = Rook::from_parts(
+            rook_store::Store::open(dir.path().join("store")).unwrap(),
+            crate::Config::default(),
+            rook_skills::Environment::bare("linux", "x86_64", "0.1.0"),
+            rook_skills::SkillIndex::default(),
+            dir.path().to_path_buf(),
+        );
+        let session = rook.start_session("saved screenshot").unwrap();
+        let image = Image::from_base64("image/png", "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==").unwrap();
+        let mut text = "screenshot".to_owned();
+        let seq =
+            record(&rook, session, crate::browser::TOOL, &mut text, std::slice::from_ref(&image)).unwrap();
+        let event = rook.store.events(session, seq, 1).unwrap().remove(0);
+        let mut deferred = rook_llm::Message::tool_result("shot", crate::results::fresh(&event, &text));
+        for_request(&rook, &event, &mut deferred).unwrap();
+        assert!(deferred.images.is_empty());
+        let envelope: serde_json::Value = serde_json::from_str(&deferred.content).unwrap();
+        assert!(
+            envelope["rook_source"]["content"].as_str().unwrap().contains("browser.include_images=false")
+        );
+        let retained = load(&rook, &event).unwrap();
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].data, image.data);
+        rook.config.browser.include_images = true;
+        let mut delivered = rook_llm::Message::tool_result("shot", crate::results::fresh(&event, &text));
+        for_request(&rook, &event, &mut delivered).unwrap();
+        assert_eq!(delivered.images.len(), 1);
+        assert_eq!(delivered.images[0].data, image.data);
+        assert_eq!(delivered.content, crate::results::fresh(&event, &text));
+        rook.config.browser.include_images = false;
+        let seq = record(&rook, session, "read_result", &mut text, std::slice::from_ref(&image)).unwrap();
+        let explicit = rook.store.events(session, seq, 1).unwrap().remove(0);
+        let mut message = rook_llm::Message::tool_result("explicit", crate::results::fresh(&explicit, &text));
+        for_request(&rook, &explicit, &mut message).unwrap();
+        assert_eq!(message.images.len(), 1, "explicit retrieval keeps its existing delivery contract");
+        assert_eq!(message.images[0].data, image.data);
+    }
 }

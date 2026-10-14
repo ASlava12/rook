@@ -51,6 +51,8 @@ pub struct Rook {
     /// Bounded observations keyed by actual endpoint/model/credential identity,
     /// shared across turns without leaking a large window to another model.
     window_learned: std::sync::Mutex<std::collections::VecDeque<([u8; 32], usize)>>,
+    pub(crate) browser: Arc<crate::browser::Pool>,
+    pub(crate) execution_environments: Arc<rook_tools::environments::Pool>,
     /// Skills and plugins that failed to load, kept so the UIs can show them
     /// instead of silently presenting a shorter catalog.
     pub skill_errors: Vec<String>,
@@ -88,6 +90,7 @@ pub struct WorkspaceSeed {
     config: Config,
     env: Option<Environment>,
     output_dir: PathBuf,
+    execution_environments: Arc<rook_tools::environments::Pool>,
 }
 
 impl WorkspaceSeed {
@@ -104,6 +107,8 @@ impl WorkspaceSeed {
             skills: skills.into(),
             workspace,
             window_learned: Default::default(),
+            browser: Default::default(),
+            execution_environments: self.execution_environments,
             skill_errors,
             plugins,
             output_dir: self.output_dir,
@@ -238,6 +243,8 @@ impl Rook {
             skills: skills.into(),
             workspace,
             window_learned: Default::default(),
+            browser: Default::default(),
+            execution_environments: Default::default(),
             skill_errors,
             plugins,
             output_dir: paths::output_dir(),
@@ -268,6 +275,8 @@ impl Rook {
             skills: skills.into(),
             workspace,
             window_learned: Default::default(),
+            browser: Default::default(),
+            execution_environments: Default::default(),
             skill_errors: Vec::new(),
             plugins: Vec::new(),
             // Beside the scratch store rather than in the user's home, for the
@@ -296,6 +305,7 @@ impl Rook {
             config: self.config.clone(),
             env: self.env.get().cloned(),
             output_dir: self.output_dir.clone(),
+            execution_environments: self.execution_environments.clone(),
         }
     }
 
@@ -990,7 +1000,7 @@ impl Rook {
         // Where in the parent this errand was handed out. Rewinding the parent
         // past that point has to undo the child's work as well as its own, and
         // without the seq there is no way to tell which children are past it.
-        let at = self.store.events(parent, 0, usize::MAX)?.last().map(|e| e.seq).unwrap_or(0);
+        let at = self.store.get_session(parent)?.map(|meta| meta.next_seq.saturating_sub(1)).unwrap_or(0);
         self.set_mark(FORK_AT, id, at)?;
         Ok(id)
     }
@@ -2458,7 +2468,7 @@ pub struct AuthoredSkill {
 }
 
 impl AuthoredSkill {
-    fn to_skill_md(&self) -> Result<String> {
+    pub(crate) fn to_skill_md(&self) -> Result<String> {
         let manifest = rook_skills::SkillManifest {
             name: self.name.trim().to_string(),
             description: self.description.replace('\n', " "),
@@ -2636,6 +2646,8 @@ mod tests {
             skills: skills.into(),
             workspace: dir.to_path_buf(),
             window_learned: Default::default(),
+            browser: Default::default(),
+            execution_environments: Default::default(),
             skill_errors: Vec::new(),
             plugins: Vec::new(),
             output_dir: dir.join("output"),

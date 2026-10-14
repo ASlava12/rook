@@ -12,6 +12,7 @@ authors.workspace = true
 # every platform; this must not become a Windows-only dependency.
 rook-contain = { path = "../rook-contain" }
 async-trait = "0.1.92"
+base64 = "0.22.1"
 ignore = "0.4.33"
 globset = "0.4"
 regex = "1.13.1"

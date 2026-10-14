@@ -60,6 +60,125 @@ impl Tool for RunCommand {
             )));
         }
 
+        if let Some(environment) = &ctx.execution
+            && !environment.settings.local()
+        {
+            if ctx.terminals.is_some() || ctx.files.is_some() {
+                return Ok(ToolOutcome::error(
+                    "configured execution cannot override an editor's file/terminal authority",
+                ));
+            }
+            let background = args.get("background").and_then(|v| v.as_bool()).unwrap_or(false);
+            if background && ctx.jobs.is_none() {
+                return Ok(ToolOutcome::error("this front end does not keep background commands"));
+            }
+            let cwd = match args.get("cwd").and_then(|v| v.as_str()) {
+                Some(path) => ctx.resolve(path)?,
+                None => ctx.workspace.clone(),
+            };
+            let asked_for = args
+                .get("secrets")
+                .and_then(|v| v.as_array())
+                .map(|names| names.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect::<Vec<_>>())
+                .unwrap_or_default();
+            if background && !asked_for.is_empty() {
+                return Ok(ToolOutcome::error("named secrets require a foreground command"));
+            }
+            let secrets = match secret_env(ctx, &asked_for) {
+                Ok(values) => values,
+                Err(refused) => return Ok(ToolOutcome::error(refused)),
+            };
+            let secret_names = secrets.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>();
+            if secret_names.iter().any(|name| !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')) {
+                return Ok(ToolOutcome::error(
+                    "configured execution requires ASCII environment-variable secret names",
+                ));
+            }
+            let prepared = environment.pool.prepare(ctx, environment, &command, &cwd, &secrets).await?;
+            let mut cancellation = EnvironmentCancellation { lease: prepared.lease.clone(), armed: true };
+            let mut local = ctx.clone();
+            local.execution = None;
+            local.command_transport = Some(std::sync::Arc::new(crate::environments::Transport {
+                input: prepared.input.clone(),
+                lease: prepared.lease.clone(),
+                description: prepared.description.clone(),
+                display: command.clone(),
+            }));
+            if !asked_for.is_empty() {
+                let mut redactions = ctx.secrets.as_ref().map(|s| s.redactions()).unwrap_or_default();
+                redactions.extend(secrets.iter().map(|(_, value)| value.clone()));
+                local.secrets = Some(std::sync::Arc::new(CallSecrets {
+                    values: asked_for
+                        .iter()
+                        .zip(&secrets)
+                        .map(|(name, (_, value))| (name.clone(), value.clone()))
+                        .collect(),
+                    redactions,
+                }));
+            }
+            local.isolate = crate::isolate::Mode::Off;
+            local.require_command_cleanup = true;
+            let mut request = args.clone();
+            request["command"] = serde_json::json!(prepared.command);
+            request["cwd"] = serde_json::json!(cwd);
+            if prepared.input.is_some() {
+                request["secrets"] = serde_json::json!([]);
+            }
+            let outcome = Box::pin(self.call(&local, &request)).await;
+            let mut outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    let stopped = prepared.lease.stop();
+                    return Ok(ToolOutcome::error(error.to_string())
+                        .with("execution_environment", prepared.description)
+                        .with("processes_stopped", stopped)
+                        .with("execution_uncertain", !stopped));
+                }
+            };
+            if args.get("background").and_then(|v| v.as_bool()).unwrap_or(false) {
+                let job =
+                    outcome.meta.get("job").and_then(|v| v.as_str()).ok_or_else(|| ToolError::Invalid {
+                        tool: "run_command".into(),
+                        message: "configured background launch did not produce an owned job receipt".into(),
+                    })?;
+                let jobs = ctx.jobs.as_ref().ok_or_else(|| ToolError::Invalid {
+                    tool: "job".into(),
+                    message: "background job owner missing".into(),
+                })?;
+                let _ = (jobs, job);
+            } else if outcome.meta.get("timed_out") != Some(&serde_json::json!(true)) {
+                let exit = outcome.meta.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(-1) as i32;
+                let lease = prepared.lease.clone();
+                let completion = tokio::task::spawn_blocking(move || lease.complete(exit))
+                    .await
+                    .map_err(|e| ToolError::ExecutionUnknown(e.to_string()))?;
+                if let Err(error) = completion {
+                    outcome.is_error = true;
+                    outcome.meta.insert("exit_code".into(), serde_json::json!(-1));
+                    outcome.content.push_str(&format!("\n{error}"));
+                    outcome.meta.insert("processes_stopped".into(), serde_json::json!(prepared.lease.stop()));
+                }
+            } else {
+                outcome.meta.insert("processes_stopped".into(), serde_json::json!(prepared.lease.stop()));
+            }
+            if (outcome.meta.get("processes_stopped") == Some(&serde_json::json!(false))
+                || prepared.lease.uncertain_effects())
+                && !background
+            {
+                outcome.meta.insert("execution_uncertain".into(), serde_json::json!(true));
+            }
+            let mut redactions = secrets
+                .iter()
+                .map(|(_, value)| value.as_str())
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>();
+            redactions.sort_by_key(|value| std::cmp::Reverse(value.len()));
+            for value in redactions {
+                outcome.content = outcome.content.replace(value, "[redacted]");
+            }
+            cancellation.armed = false;
+            return Ok(outcome.with("execution_environment", prepared.description));
+        }
         let cwd = match args.get("cwd").and_then(|v| v.as_str()) {
             Some(rel) => ctx.resolve(rel)?,
             None => ctx.workspace.clone(),
@@ -89,7 +208,7 @@ impl Tool for RunCommand {
             let redactions = ctx.secrets.as_ref().map(|s| s.redactions()).unwrap_or_default();
             let spill =
                 ctx.spill_dir.as_deref().and_then(|dir| Spill::open(dir, ctx.max_spill_bytes, redactions));
-            let id = jobs.start_captured(&command, &cwd, isolation, spill)?;
+            let id = jobs.start_transport(&command, &cwd, isolation, spill, ctx.command_transport.clone())?;
             return Ok(ToolOutcome::ok(format!("started {id}; `job` reads what it prints"))
                 .with("job", id)
                 .with("running", true));
@@ -134,8 +253,17 @@ impl Tool for RunCommand {
         if let Some(helper) = &helper {
             env.extend(helper.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         }
-        let mut child = spawn_shell(&command, &cwd, &env, isolation)?;
+        let (mut child, _input) = spawn_shell_input(
+            &command,
+            &cwd,
+            &env,
+            isolation,
+            ctx.command_transport.as_ref().and_then(|t| t.input.clone()),
+        )?;
         let group = Group::holding(child.id());
+        // kill_on_drop covers the shell alone. Keep the originally owned group
+        // guarded across awaits so cancelling the call also ends descendants.
+        let mut cleanup = CommandCleanup { group: &group, armed: true };
         let mut stdout = child.stdout.take();
         let mut stderr = child.stderr.take();
 
@@ -154,8 +282,8 @@ impl Tool for RunCommand {
         // anything, not which pipe it came down.
         let started = std::time::Instant::now();
         let heard: std::sync::Arc<std::sync::atomic::AtomicU64> = Default::default();
-        let mut out = Ends::new(keep, spill.clone(), heard.clone(), started);
-        let mut err = Ends::new(keep, spill.clone(), heard.clone(), started);
+        let mut out = Ends::new(keep, spill.clone(), heard.clone(), started, ctx.output_activity.clone());
+        let mut err = Ends::new(keep, spill.clone(), heard.clone(), started, ctx.output_activity.clone());
         // Together, not one after the other: a pipe holds about 64 KiB, and a
         // command that fills stderr while stdout is being drained blocks on the
         // write — so it never finishes stdout and the drain never ends. Any
@@ -289,13 +417,25 @@ impl Tool for RunCommand {
             // A command that ran until the timeout is the one whose output is
             // most worth having, and the ends of it are the least of it.
             let printed = joined(&out, &err);
-            let kept = settle(spill, out.seen + err.seen > printed.len());
-            let outcome = ToolOutcome::error(format!(
+            let full_bytes = out.seen + err.seen;
+            let truncated = full_bytes > printed.len();
+            let kept = settle(spill, truncated);
+            let mut outcome = ToolOutcome::error(format!(
                 "{}{}",
                 timed_out(timeout, killed, &printed, silent_for),
                 kept.as_ref().map(|(note, _, _)| note.as_str()).unwrap_or("")
             ))
-            .with("timed_out", true);
+            .with("timed_out", true)
+            .with(
+                "processes_stopped",
+                if ctx.require_command_cleanup {
+                    quiesce_group(&group).await
+                } else {
+                    group.alive() == Some(false)
+                },
+            );
+            outcome.full_bytes = full_bytes;
+            outcome.truncated = truncated;
             return Ok(match kept {
                 Some((_, path, _)) => outcome.with("output_file", path).with("output_complete", false),
                 None => outcome,
@@ -342,13 +482,22 @@ impl Tool for RunCommand {
         // Said, because the difference matters to whoever reads the answer: the
         // command is over, and something it started is not — so what is above
         // is all of the output there will be, and the rest goes nowhere.
-        let left_running = match orphaned {
-            true => {
-                "\n(the command finished, but something it started is still running and still \
-                 holds the output — nothing it prints from here is captured. `background: true` \
-                 keeps a command whose output you want.)"
+        let processes_stopped = if ctx.require_command_cleanup {
+            quiesce_group(&group).await
+        } else {
+            group.alive() == Some(false)
+        };
+        let left_running = match (orphaned, processes_stopped, ctx.require_command_cleanup) {
+            (true, true, true) => {
+                "\n(the shell exited leaving descendants; its owned process group was stopped. Use `background: true` to retain a running job.)"
             }
-            false => "",
+            (_, false, true) => {
+                "\n(owned process group cleanup could not be certified; inspect remaining processes before restoring file effects.)"
+            }
+            (true, _, false) => {
+                "\n(the command finished, but something it started is still running and still holds the output — nothing it prints from here is captured. `background: true` keeps a command whose output you want.)"
+            }
+            _ => "",
         };
         let outcome = ToolOutcome {
             images: Vec::new(),
@@ -362,7 +511,9 @@ impl Tool for RunCommand {
             meta: Default::default(),
         }
         .with("exit_code", code)
+        .with("processes_stopped", processes_stopped)
         .with("isolation", contained);
+        cleanup.armed = false;
         Ok(match kept {
             Some((_, path, complete)) => {
                 outcome.with("output_file", path).with("output_complete", complete && !orphaned)
@@ -593,6 +744,23 @@ pub fn spawn_shell(
     env: &[(&str, &str)],
     isolation: Option<&crate::isolate::Isolation>,
 ) -> Result<tokio::process::Child> {
+    Ok(spawn_shell_input(command, cwd, env, isolation, None)?.0)
+}
+pub(crate) struct InputTask(Option<tokio::task::JoinHandle<()>>);
+impl Drop for InputTask {
+    fn drop(&mut self) {
+        if let Some(task) = &self.0 {
+            task.abort();
+        }
+    }
+}
+pub(crate) fn spawn_shell_input(
+    command: &str,
+    cwd: &std::path::Path,
+    env: &[(&str, &str)],
+    isolation: Option<&crate::isolate::Isolation>,
+    input: Option<std::sync::Arc<Vec<u8>>>,
+) -> Result<(tokio::process::Child, InputTask)> {
     // `cmd /C` rather than PowerShell on Windows: it is always present, and a
     // skill that needs PowerShell invokes it explicitly. How each shell reads a
     // command line is [`rook_contain::shell`]'s question, asked in one place
@@ -618,7 +786,7 @@ pub fn spawn_shell(
         .current_dir(cwd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .stdin(std::process::Stdio::null())
+        .stdin(if input.is_some() { std::process::Stdio::piped() } else { std::process::Stdio::null() })
         // Detach from the terminal's process group where the platform allows it,
         // so a runaway child does not inherit the TUI's signals.
         .kill_on_drop(true);
@@ -631,7 +799,44 @@ pub fn spawn_shell(
     // Its own process group, so a timeout can take the whole tree and a runaway
     // child does not inherit the TUI's terminal signals.
     cmd.process_group(0);
-    cmd.spawn().map_err(|e| ToolError::Io { path: cwd.to_path_buf(), source: e })
+    let mut child = cmd.spawn().map_err(|e| ToolError::Io { path: cwd.to_path_buf(), source: e })?;
+    let task = if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
+        Some(tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let _ = stdin.write_all(&input).await;
+            let _ = stdin.shutdown().await;
+        }))
+    } else {
+        None
+    };
+    Ok((child, InputTask(task)))
+}
+
+struct EnvironmentCancellation {
+    lease: std::sync::Arc<crate::environments::Lease>,
+    armed: bool,
+}
+impl Drop for EnvironmentCancellation {
+    fn drop(&mut self) {
+        if self.armed {
+            self.lease.stop();
+        }
+    }
+}
+
+// Resolve dynamic helpers once before resource setup. The nested transport call
+// receives that same admitted value for environment injection and output masking.
+struct CallSecrets {
+    values: std::collections::BTreeMap<String, String>,
+    redactions: Vec<String>,
+}
+impl crate::Secrets for CallSecrets {
+    fn value(&self, name: &str) -> Option<String> {
+        self.values.get(name).cloned()
+    }
+    fn redactions(&self) -> Vec<String> {
+        self.redactions.clone()
+    }
 }
 
 /// The environment a command's named secrets become, or why it cannot have
@@ -852,6 +1057,24 @@ pub(crate) async fn kill_tree(child: &mut tokio::process::Child, group: &Group) 
     child.kill().await.is_ok()
 }
 
+pub(crate) async fn quiesce_group(group: &Group) -> bool {
+    if group.alive() == Some(false) {
+        return true;
+    }
+    group.end();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match group.alive() {
+            Some(false) => return true,
+            None => return false,
+            Some(true) if std::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await
+            }
+            Some(true) => return false,
+        }
+    }
+}
+
 /// Everything one command started, whatever the platform calls it.
 ///
 /// Lives in `rook-contain` now: it is a platform question, and a second caller
@@ -859,6 +1082,18 @@ pub(crate) async fn kill_tree(child: &mut tokio::process::Child, group: &Group) 
 /// shell killed and `sleep 60` still holding the pipe — the same bug this had
 /// already been written to fix.
 pub(crate) use rook_contain::Group;
+
+struct CommandCleanup<'a> {
+    group: &'a Group,
+    armed: bool,
+}
+impl Drop for CommandCleanup<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.group.end();
+        }
+    }
+}
 
 /// Both ends of a stream, bounded, and how much went past.
 ///
@@ -882,6 +1117,7 @@ struct Ends {
     heard: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// When the command started, so `heard` is a duration and not a clock.
     started: std::time::Instant,
+    activity: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl Ends {
@@ -890,8 +1126,9 @@ impl Ends {
         spill: Option<std::sync::Arc<std::sync::Mutex<Spill>>>,
         heard: std::sync::Arc<std::sync::atomic::AtomicU64>,
         started: std::time::Instant,
+        activity: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
     ) -> Self {
-        Self { head: Vec::new(), tail: Default::default(), seen: 0, cap, spill, heard, started }
+        Self { head: Vec::new(), tail: Default::default(), seen: 0, cap, spill, heard, started, activity }
     }
 
     async fn drain(&mut self, reader: &mut (impl tokio::io::AsyncRead + Unpin)) {
@@ -904,6 +1141,13 @@ impl Ends {
                 spill.lock().unwrap_or_else(|e| e.into_inner()).write(&chunk[..n]);
             }
             self.seen += n;
+            if let Some(activity) = &self.activity {
+                let _ = activity.fetch_update(
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                    |previous| Some(previous.saturating_add(n as u64)),
+                );
+            }
             self.heard.store(self.started.elapsed().as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
             for &byte in &chunk[..n] {
                 if self.head.len() < self.cap {

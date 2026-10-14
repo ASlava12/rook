@@ -13,6 +13,36 @@ struct Rook {
 }
 
 #[test]
+fn conversation_recall_matches_local_and_daemon_paths_with_anchored_reading() {
+    let _one = one_at_a_time();
+    let rook = Rook::new();
+    let id = {
+        let engine = rook_core::Rook::from_parts(
+            rook_store::Store::open(rook.home.path().join("store")).unwrap(),
+            rook_core::Config::default(),
+            rook_skills::Environment::bare("test", "test", "0.11.2"),
+            rook_skills::SkillIndex::default(),
+            rook.workspace.path().into(),
+        );
+        let session = engine.start_session("lost translation").unwrap();
+        engine.log(session, rook_store::EventKind::UserMessage, "", "LPIC_LOCAL_DAEMON_RECALL").unwrap();
+        rook_store::format_session_id(session)
+    };
+    let check = || {
+        let response = rook.json(&["session", "recall", "LPIC_LOCAL_DAEMON_RECALL"]);
+        assert_eq!(response["hits"][0]["session"], id);
+        let read = serde_json::json!({"session":id,"around":0}).to_string();
+        let response = rook.json(&["session", "recall", &read]);
+        assert!(response["page"]["items"][0]["body"].as_str().unwrap().contains("LPIC_LOCAL_DAEMON_RECALL"));
+        rook.ok(&["session", "recall", "LPIC_LOCAL_DAEMON_RECALL"])
+    };
+    let local = check();
+    drop(_one);
+    let _daemon = Daemon::start(&rook);
+    assert_eq!(check(), local);
+}
+
+#[test]
 fn session_listing_groups_nested_children_locally_and_through_the_daemon() {
     let _one = one_at_a_time();
     let rook = Rook::new();
@@ -3535,3 +3565,793 @@ mod worktrees;
 
 #[path = "scenarios/delegation_progress.rs"]
 mod delegation_progress;
+
+#[test]
+fn frozen_reviews_and_source_bound_comments_match_local_and_http_daemon_paths() {
+    let one = one_at_a_time();
+    let rook = Rook::new();
+    for args in [vec!["init", "-q"], vec!["add", "src/main.rs"], vec!["commit", "-qm", "review baseline"]] {
+        let output = Command::new("git")
+            .current_dir(rook.workspace.path())
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "user.name=Review Fixture",
+                "-c",
+                "user.email=review@example.invalid",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    }
+    let id = {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        let id = rook_store::new_session_id();
+        store
+            .create_session(&rook_store::SessionMeta::new(
+                id,
+                "review source",
+                rook.workspace.path().display().to_string(),
+                1,
+            ))
+            .unwrap();
+        rook_store::format_session_id(id)
+    };
+    std::fs::write(rook.workspace.path().join("src/main.rs"), "fn main() { panic!(\"regression\"); }\n")
+        .unwrap();
+    let review = rook.json(&["session", "review", &id]);
+    let review_id = review["id"].as_str().unwrap();
+    let source = review["source"].as_str().unwrap();
+    std::fs::write(rook.workspace.path().join("src/main.rs"), "later working file\n").unwrap();
+    let request =
+        serde_json::json!({"action":"source","review":review_id,"path":"src/main.rs","side":"after"})
+            .to_string();
+    let local = rook.json(&["session", "review", &id, &request]);
+    assert_eq!(local["text"], "fn main() { panic!(\"regression\"); }\n");
+    drop(one);
+    let daemon = Daemon::start(&rook);
+    let remote = rook.run(&["--json", "session", "review", &id, &request]);
+    assert!(remote.status.success(), "{}", String::from_utf8_lossy(&remote.stderr));
+    assert!(
+        String::from_utf8_lossy(&remote.stderr).contains(&daemon.address),
+        "must exercise the actual daemon path"
+    );
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&remote.stdout).unwrap(), local);
+    let request = serde_json::json!({"action":"comment","review":review_id,"comment":{
+        "source":source,"path":"src/main.rs","side":"after","line":1,"text":"Remove unconditional panic"}})
+    .to_string();
+    let annotated = rook.json(&["session", "review", &id, &request]);
+    assert_eq!(annotated["comments"][0]["source"], source);
+    assert_eq!(annotated["comments"][0]["text"], "Remove unconditional panic");
+    let request = serde_json::json!({"action":"feedback","review":review_id,"source":source}).to_string();
+    let feedback = rook.json(&["session", "review", &id, &request]);
+    assert!(feedback["prompt"].as_str().unwrap().contains("Remove unconditional panic"));
+    let invalid = serde_json::json!({"action":"comment","review":review_id,"comment":{
+        "source":"another-snapshot","path":"src/main.rs","side":"after","line":1,"text":"wrong source"}})
+    .to_string();
+    assert!(!rook.run(&["session", "review", &id, &invalid]).status.success());
+    assert_eq!(
+        std::fs::read_to_string(rook.workspace.path().join("src/main.rs")).unwrap(),
+        "later working file\n"
+    );
+}
+
+#[test]
+fn selected_shell_restores_exercise_the_real_local_cli_and_http_daemon() {
+    struct Shell(std::sync::Mutex<Option<String>>);
+    #[async_trait::async_trait]
+    impl rook_llm::Provider for Shell {
+        fn id(&self) -> &str {
+            "fixture/cli-shell-undo"
+        }
+        fn context_window(&self) -> usize {
+            32768
+        }
+        async fn complete(&self, request: rook_llm::Request) -> rook_llm::Result<rook_llm::Response> {
+            let message = if request
+                .messages
+                .first()
+                .is_some_and(|m| m.content.starts_with("Classify whether an assistant"))
+            {
+                rook_llm::Message::assistant(r#"{"action":"finish"}"#)
+            } else if request.tools.iter().any(|t| t.name == "run_command")
+                && let Some(command) = self.0.lock().unwrap().take()
+            {
+                rook_llm::Message {
+                    tool_calls: vec![rook_llm::ToolCall {
+                        id: "shell".into(),
+                        name: "run_command".into(),
+                        arguments: serde_json::json!({"command":command}),
+                    }],
+                    ..rook_llm::Message::assistant("")
+                }
+            } else {
+                rook_llm::Message::assistant("VERDICT: unproven")
+            };
+            let stop_reason = if message.tool_calls.is_empty() {
+                rook_llm::StopReason::EndTurn
+            } else {
+                rook_llm::StopReason::ToolUse
+            };
+            Ok(rook_llm::Response {
+                message,
+                stop_reason,
+                usage: Default::default(),
+                model: self.id().into(),
+            })
+        }
+    }
+    let one = one_at_a_time();
+    let fixture = Rook::new();
+    std::fs::write(fixture.home.path().join("config.toml"), "[shell_undo]\nenabled = true\n").unwrap();
+    let (local_owner, remote_owner) = {
+        let mut config = rook_core::Config::default();
+        config.shell_undo.enabled = true;
+        config.memory.enabled = false;
+        config.web.enabled = false;
+        config.sandbox.stance = rook_tools::policy::Stance::Autonomous;
+        let engine = rook_core::Rook::from_parts(
+            rook_store::Store::open(fixture.home.path().join("store")).unwrap(),
+            config,
+            rook_skills::Environment::bare("test", "test", "0.11.2"),
+            rook_skills::SkillIndex::default(),
+            fixture.workspace.path().into(),
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mut owners = Vec::new();
+        for path in ["local.txt", "remote.txt"] {
+            std::fs::write(fixture.workspace.path().join(path), "user original\n").unwrap();
+            let owner = engine.start_session(path).unwrap();
+            let command = if cfg!(windows) {
+                format!("echo changed>{path}")
+            } else {
+                format!("printf 'changed' > {path}")
+            };
+            runtime.block_on(async {
+                let mut agent = rook_core::agent::AgentLoop::new(
+                    &engine,
+                    std::sync::Arc::new(Shell(std::sync::Mutex::new(Some(command)))),
+                    owner,
+                );
+                let outcome = agent.run("Execute the fixture command once").await.unwrap();
+                assert!(outcome.tools_called.iter().any(|tool| tool == "run_command"));
+            });
+            owners.push(rook_store::format_session_id(owner));
+        }
+        (owners.remove(0), owners.remove(0))
+    };
+    let inspect = |owner: &str| {
+        let listed = fixture.json(&["session", "shell-undo", owner]);
+        let receipt = listed["items"][0]["id"].as_str().unwrap();
+        fixture.json(&[
+            "session",
+            "shell-undo",
+            owner,
+            &serde_json::json!({"action":"inspect","receipt":receipt}).to_string(),
+        ])
+    };
+    let local = inspect(&local_owner);
+    let remote = inspect(&remote_owner);
+    let prepare = |owner: &str, report: &serde_json::Value, path: &str| {
+        fixture.json(&[
+            "session",
+            "shell-undo",
+            owner,
+            &serde_json::json!({"action":"prepare","receipt":report["id"],"paths":[path]}).to_string(),
+        ])
+    };
+    let apply = |owner: &str, prepared: &serde_json::Value| {
+        fixture.run(&["session", "shell-undo", owner,
+        &serde_json::json!({"action":"restore","receipt":prepared["receipt"],"paths":prepared["paths"],"token":prepared["token"]}).to_string()])
+    };
+    let prepared = prepare(&local_owner, &local, "local.txt");
+    assert!(apply(&local_owner, &prepared).status.success());
+    assert_eq!(
+        std::fs::read_to_string(fixture.workspace.path().join("local.txt")).unwrap(),
+        "user original\n"
+    );
+    let prepared_remote = prepare(&remote_owner, &remote, "remote.txt");
+    drop(one);
+    let daemon = Daemon::start(&fixture);
+    assert_eq!(inspect(&remote_owner), remote);
+    assert_eq!(prepare(&remote_owner, &remote, "remote.txt"), prepared_remote);
+    let result = apply(&remote_owner, &prepared_remote);
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains(&daemon.address),
+        "actual HTTP route must be used"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.workspace.path().join("remote.txt")).unwrap(),
+        "user original\n"
+    );
+    assert!(
+        !apply(&remote_owner, &prepared_remote).status.success(),
+        "a restore token cannot replay a completed restore"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn experiment_runs_and_retained_results_match_local_and_detached_daemon_paths() {
+    let _one = one_at_a_time();
+    let fixture = Rook::new();
+    std::fs::write(fixture.home.path().join("config.toml"), "[sandbox]\nstance = \"autonomous\"\n").unwrap();
+    let owner = {
+        let engine = rook_core::Rook::from_parts(
+            rook_store::Store::open(fixture.home.path().join("store")).unwrap(),
+            rook_core::Config::default(),
+            rook_skills::Environment::bare("test", "test", "0.11.2"),
+            rook_skills::SkillIndex::default(),
+            fixture.workspace.path().into(),
+        );
+        rook_store::format_session_id(engine.start_session("CLI experiments").unwrap())
+    };
+    let command = r#"score=$(sed -n 's/.*"score":"\([0-9]*\)".*/\1/p' .rook-experiment/parameters.json); printf '{"score":%s}' "$score" > .rook-experiment/metrics.json; printf 'score=%s' "$score""#;
+    let call =
+        |request: serde_json::Value| fixture.json(&["session", "experiment", &owner, &request.to_string()]);
+    let baseline = call(
+        serde_json::json!({"action":"create","title":"baseline","hypothesis":"fixed evaluator","contract":{"command":command,"metrics":{"score":"maximize"}},"parameters":{"score":"1"}}),
+    );
+    let prepared = call(serde_json::json!({"action":"prepare","node":baseline["id"]}));
+    let measured = call(serde_json::json!({"action":"run","node":baseline["id"],"token":prepared["token"]}));
+    assert_eq!(measured["runs"][0]["state"], "answered", "{measured}");
+    let read = serde_json::json!({"action":"read","node":baseline["id"],"run":measured["runs"][0]["id"]});
+    let local = call(read.clone());
+    drop(_one);
+    let _daemon = Daemon::start(&fixture);
+    assert_eq!(call(read), local, "HTTP serves the exact retained source");
+    let child = call(
+        serde_json::json!({"action":"branch","parent":baseline["id"],"title":"candidate","hypothesis":"one greater score","parameters":{"score":"2"}}),
+    );
+    let prepared = call(serde_json::json!({"action":"prepare","node":child["id"]}));
+    let started =
+        call(serde_json::json!({"action":"run","node":child["id"],"token":prepared["token"],"wait":false}));
+    assert_eq!(started["state"], "started", "daemon returns admission while retaining the worker");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let inspect = call(serde_json::json!({"action":"inspect","node":child["id"]}));
+        if inspect["runs"][0]["state"] != "started" {
+            assert_eq!(inspect["runs"][0]["metrics"]["score"], 2.0, "{inspect}");
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "detached run never finished: {inspect}");
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    let comparison = call(serde_json::json!({"action":"compare"}));
+    let promoted =
+        call(serde_json::json!({"action":"promote","node":child["id"],"token":comparison["token"]}));
+    assert_eq!(promoted["winner"], child["id"]);
+}
+
+#[test]
+fn reviewed_learning_skills_keep_the_selected_user_version_and_rollback_without_erasing_new_files() {
+    let _one = one_at_a_time();
+    let fixture = Rook::new();
+    let name = "learning-fixture";
+    let directory = fixture.home.path().join("skills").join("learning-fixture@2.3.0");
+    std::fs::create_dir_all(&directory).unwrap();
+    let old = "---\nname: learning-fixture\ndescription: A saved original procedure\nversion: 2.3.0\n---\nOriginal body.\n";
+    std::fs::write(directory.join("SKILL.md"), old).unwrap();
+    std::fs::write(directory.join("keep.txt"), "preexisting independent data").unwrap();
+    let (owner, result, seq) = prepared_learning_source(&fixture);
+    let call =
+        |request: serde_json::Value| fixture.json(&["session", "learning", &owner, &request.to_string()]);
+    let proposal = call(
+        serde_json::json!({"action":"propose","result":result,"draft":{"target":{"kind":"skill","skill":{"name":name,"description":"Reviewed reusable procedure","body":"Use the reviewed steps and retain the exact check result.","files":{"references/steps.md":"Reviewed supporting steps\n"}}},"reason":"User reviewed the admitted task source","evidence":[seq]}}),
+    );
+    let local = call(serde_json::json!({"action":"prepare","proposal":proposal["id"]}));
+    assert_eq!(
+        std::fs::read_to_string(directory.join("SKILL.md")).unwrap(),
+        old,
+        "preview cannot write the card"
+    );
+    drop(_one);
+    let _daemon = Daemon::start(&fixture);
+    let remote = call(serde_json::json!({"action":"prepare","proposal":proposal["id"]}));
+    assert_eq!(remote["token"], local["token"], "HTTP prepares the same owned source");
+    assert_eq!(remote["diff"], local["diff"]);
+    let applied =
+        call(serde_json::json!({"action":"apply","proposal":proposal["id"],"token":remote["token"]}));
+    assert_eq!(applied["state"], "applied");
+    let card = std::fs::read_to_string(directory.join("SKILL.md")).unwrap();
+    assert!(card.contains("version: 2.3.0"), "declared version is preserved: {card}");
+    assert!(card.contains("reviewed steps"));
+    assert!(
+        !fixture.home.path().join("skills/learning-fixture").exists(),
+        "the selected version directory must be updated rather than shadowed"
+    );
+    std::fs::write(directory.join("later-user.txt"), "later unrelated edit").unwrap();
+    #[cfg(unix)]
+    let rollback = call(serde_json::json!({"action":"prepare_rollback","proposal":proposal["id"]}));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let support = directory.join("references");
+        std::fs::set_permissions(&support, std::fs::Permissions::from_mode(0o555)).unwrap();
+        if std::fs::write(support.join("privilege-probe"), "probe").is_err() {
+            let failed = fixture.run(&[
+                "session",
+                "learning",
+                &owner,
+                &serde_json::json!({"action":"rollback","proposal":proposal["id"],"token":rollback["token"]})
+                    .to_string(),
+            ]);
+            assert!(!failed.status.success());
+            let partial = call(serde_json::json!({"action":"inspect","proposal":proposal["id"]}));
+            assert_eq!(partial["state"], "rolling_back");
+            assert_eq!(std::fs::read_to_string(directory.join("SKILL.md")).unwrap(), old);
+            assert!(support.join("steps.md").exists());
+            rook_llm::init_tls();
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let client = reqwest::Client::builder().no_proxy().build().unwrap();
+            let url =
+                format!("{}/api/sessions/{}/recovery", _daemon.address, partial["session"].as_str().unwrap());
+            let report: serde_json::Value = runtime.block_on(async {
+                client.get(&url).send().await.unwrap().error_for_status().unwrap().json().await.unwrap()
+            });
+            let unknown = &report[0]["unknown"][0]["id"];
+            std::fs::set_permissions(&support, std::fs::Permissions::from_mode(0o755)).unwrap();
+            runtime.block_on(async{client.post(&url).json(&serde_json::json!({"operation":unknown,"note":"Inspected original card and remaining proposed reference; repaired readonly directory"})).send().await.unwrap().error_for_status().unwrap();});
+            let recovered = call(
+                serde_json::json!({"action":"recover","proposal":proposal["id"],"note":"Observed the partial inverse and preserved the original accepted change"}),
+            );
+            assert_eq!(recovered["state"], "rollback_partial");
+        } else {
+            std::fs::set_permissions(&support, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::remove_file(support.join("privilege-probe")).unwrap();
+        }
+    }
+    let rollback = call(serde_json::json!({"action":"prepare_rollback","proposal":proposal["id"]}));
+    let rolled =
+        call(serde_json::json!({"action":"rollback","proposal":proposal["id"],"token":rollback["token"]}));
+    assert_eq!(rolled["state"], "rolled_back");
+    assert_eq!(std::fs::read_to_string(directory.join("SKILL.md")).unwrap(), old);
+    assert!(!directory.join("references/steps.md").exists());
+    assert_eq!(std::fs::read_to_string(directory.join("later-user.txt")).unwrap(), "later unrelated edit");
+    assert_eq!(std::fs::read_to_string(directory.join("keep.txt")).unwrap(), "preexisting independent data");
+    let history = fixture.json(&["skills", "history", name]);
+    assert!(
+        history.as_array().unwrap().len() >= 4,
+        "inverse and result versions must be retained: {history}"
+    );
+}
+
+fn prepared_learning_source(fixture: &Rook) -> (String, u64, u64) {
+    struct Finish;
+    #[async_trait::async_trait]
+    impl rook_llm::Provider for Finish {
+        fn id(&self) -> &str {
+            "fixture/learning-cli"
+        }
+        fn context_window(&self) -> usize {
+            32768
+        }
+        async fn complete(&self, request: rook_llm::Request) -> rook_llm::Result<rook_llm::Response> {
+            let text = if request
+                .messages
+                .first()
+                .is_some_and(|m| m.content.starts_with("Classify whether an assistant"))
+            {
+                r#"{"action":"finish"}"#
+            } else {
+                "Complete."
+            };
+            Ok(rook_llm::Response {
+                message: rook_llm::Message::assistant(text),
+                stop_reason: rook_llm::StopReason::EndTurn,
+                usage: Default::default(),
+                model: self.id().into(),
+            })
+        }
+    }
+
+    let mut c = rook_core::Config::default();
+    c.memory.enabled = false;
+    c.web.enabled = false;
+    let engine = rook_core::Rook::from_parts(
+        rook_store::Store::open(fixture.home.path().join("store")).unwrap(),
+        c,
+        rook_skills::Environment::bare("test", "test", "0.11.2"),
+        rook_skills::SkillIndex::default(),
+        fixture.workspace.path().into(),
+    );
+    let owner = engine.start_session("review skill").unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime
+        .block_on(
+            rook_core::agent::AgentLoop::new(&engine, std::sync::Arc::new(Finish), owner)
+                .run("Update the reusable procedure after reviewing this source."),
+        )
+        .unwrap();
+    let events = engine.store.events(owner, 0, 128).unwrap();
+    (
+        rook_store::format_session_id(owner),
+        events.iter().find(|e| e.record.label == "turn-result").unwrap().seq,
+        events.iter().find(|e| e.record.kind == rook_store::EventKind::UserMessage).unwrap().seq,
+    )
+}
+
+#[test]
+#[cfg(unix)]
+fn partial_learning_skill_writes_require_acknowledgement_and_observed_recovery_before_rollback() {
+    rook_llm::init_tls();
+    use std::os::unix::fs::PermissionsExt;
+    let _one = one_at_a_time();
+    let fixture = Rook::new();
+    let directory = fixture.home.path().join("skills/learning-partial");
+    let blocked = directory.join("blocked");
+    std::fs::create_dir_all(&blocked).unwrap();
+    let old = "---\nname: learning-partial\ndescription: Retained partial-write fixture\nversion: 1.0.0\n---\nOriginal card.\n";
+    std::fs::write(directory.join("SKILL.md"), old).unwrap();
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o555)).unwrap();
+    if std::fs::write(blocked.join("privilege-probe"), "probe").is_ok() {
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!(
+            "privileged runner cannot reach the partial-write precondition; this case requires an unprivileged runtime"
+        );
+        return;
+    }
+    let (owner, result, seq) = prepared_learning_source(&fixture);
+    let call =
+        |request: serde_json::Value| fixture.json(&["session", "learning", &owner, &request.to_string()]);
+    let proposal = call(
+        serde_json::json!({"action":"propose","result":result,"draft":{"target":{"kind":"skill","skill":{"name":"learning-partial","description":"Reviewed partial procedure","body":"Reviewed replacement card.","files":{"blocked/step.md":"new supporting steps"}}},"reason":"Inspect and apply a bounded correction","evidence":[seq]}}),
+    );
+    let preview = call(serde_json::json!({"action":"prepare","proposal":proposal["id"]}));
+    drop(_one);
+    let daemon = Daemon::start(&fixture);
+    let failed = fixture.run(&[
+        "session",
+        "learning",
+        &owner,
+        &serde_json::json!({"action":"apply","proposal":proposal["id"],"token":preview["token"]}).to_string(),
+    ]);
+    assert!(!failed.status.success(), "readonly child directory must actually fail");
+    let inspect = call(serde_json::json!({"action":"inspect","proposal":proposal["id"]}));
+    assert_eq!(inspect["state"], "partial");
+    assert_eq!(inspect["completed"], serde_json::json!(["SKILL.md"]));
+    assert_eq!(inspect["pending"], "blocked/step.md");
+    assert!(!blocked.join("step.md").exists());
+    assert!(std::fs::read_to_string(directory.join("SKILL.md")).unwrap().contains("Reviewed replacement"));
+    let premature = fixture.run(&[
+        "session",
+        "learning",
+        &owner,
+        &serde_json::json!({"action":"prepare_rollback","proposal":proposal["id"]}).to_string(),
+    ]);
+    assert!(
+        !premature.status.success(),
+        "a new inverse must not bypass the interrupted change's acknowledgement"
+    );
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let client =
+        reqwest::Client::builder().no_proxy().timeout(std::time::Duration::from_secs(10)).build().unwrap();
+    let session = inspect["session"].as_str().unwrap();
+    let url = format!("{}/api/sessions/{session}/recovery", daemon.address);
+    let report: serde_json::Value = runtime.block_on(async {
+        client.get(&url).send().await.unwrap().error_for_status().unwrap().json().await.unwrap()
+    });
+    let unknown = report[0]["unknown"].as_array().unwrap();
+    assert_eq!(unknown.len(), 1, "actual partial effects must retain an unknown journal operation: {report}");
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    runtime.block_on(async {
+        client.post(&url).json(&serde_json::json!({"operation":unknown[0]["id"],"note":"Inspected the changed card and absent supporting file; repaired the readonly directory"})).send().await.unwrap().error_for_status().unwrap();
+    });
+    let recovered = call(
+        serde_json::json!({"action":"recover","proposal":proposal["id"],"note":"Inspected exact preimages and pending path after acknowledging the journal"}),
+    );
+    assert_eq!(recovered["state"], "partial");
+    assert_eq!(recovered["pending"], serde_json::Value::Null);
+    let rollback = call(serde_json::json!({"action":"prepare_rollback","proposal":proposal["id"]}));
+    let rolled =
+        call(serde_json::json!({"action":"rollback","proposal":proposal["id"],"token":rollback["token"]}));
+    assert_eq!(rolled["state"], "rolled_back");
+    assert_eq!(std::fs::read_to_string(directory.join("SKILL.md")).unwrap(), old);
+    assert!(!blocked.join("step.md").exists());
+}
+
+#[test]
+fn selected_execution_environment_is_inspected_locally_and_through_the_daemon_without_a_model_prompt() {
+    let _one = one_at_a_time();
+    let fixture = Rook::new();
+    let (owner, through) = {
+        let engine = rook_core::Rook::from_parts(
+            rook_store::Store::open(fixture.home.path().join("store")).unwrap(),
+            rook_core::Config::default(),
+            rook_skills::Environment::bare("test", "test", "0.11.2"),
+            rook_skills::SkillIndex::default(),
+            fixture.workspace.path().into(),
+        );
+        let owner = engine.start_session("environment viewer").unwrap();
+        (rook_store::format_session_id(owner), engine.store.get_session(owner).unwrap().unwrap().next_seq)
+    };
+    let local = fixture.json(&["session", "environment", &owner]);
+    assert_eq!(local["kind"], "local");
+    assert_eq!(local["state"], "local");
+    drop(_one);
+    let daemon = Daemon::start(&fixture);
+    let remote = fixture.json(&["session", "environment", &owner]);
+    assert_eq!(remote, local);
+    drop(daemon);
+    let store = rook_store::Store::open(fixture.home.path().join("store")).unwrap();
+    assert_eq!(
+        store.get_session(rook_store::parse_session_id(&owner).unwrap()).unwrap().unwrap().next_seq,
+        through
+    );
+}
+#[test]
+#[ignore = "helper for the actual Docker CLI/HTTP orphan fixture"]
+fn container_cli_child() {
+    use rook_tools::Tool;
+    let Some(root) = std::env::var_os("ROOK_ENV_CLI_ROOT") else {
+        return;
+    };
+    let root = std::path::PathBuf::from(root);
+    let engine = rook_core::Rook::open(Some(std::path::PathBuf::from(
+        std::env::var_os("ROOK_ENV_CLI_WORKSPACE").unwrap(),
+    )))
+    .unwrap();
+    let owner = engine.start_session("CLI container owner").unwrap();
+    let mut ctx =
+        rook_core::agent::tool_context(&engine.config, &engine.workspace, &rook_core::paths::output_dir());
+    ctx.execution = Some(std::sync::Arc::new(rook_tools::environments::Context {
+        settings: engine.config.execution_environment.clone(),
+        pool: std::sync::Arc::new(rook_tools::environments::Pool::default()),
+        state_root: rook_core::paths::output_dir(),
+    }));
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let result = runtime
+        .block_on(
+            rook_tools::exec::RunCommand
+                .call(&ctx, &serde_json::json!({"command":"printf retained > persisted"})),
+        )
+        .unwrap();
+    assert!(!result.is_error, "{}", result.content);
+    std::fs::write(root.join("owner"), rook_store::format_session_id(owner)).unwrap();
+    std::fs::write(root.join("owned-id"), result.meta["execution_environment"]["resource"].as_str().unwrap())
+        .unwrap();
+    std::process::exit(0);
+}
+#[test]
+#[ignore = "needs actual Docker and installed alpine:3"]
+fn orphaned_container_inspection_and_release_share_the_real_cli_and_http_contract() {
+    let _one = one_at_a_time();
+    let base = std::env::var_os("ROOK_ENV_TEST_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let root = tempfile::Builder::new().prefix("rook-container-cli-").tempdir_in(base).unwrap();
+    let fixture = Rook {
+        home: tempfile::Builder::new().prefix("home-").tempdir_in(root.path()).unwrap(),
+        workspace: tempfile::Builder::new().prefix("workspace-").tempdir_in(root.path()).unwrap(),
+    };
+    let workspace = fixture.workspace.path().to_path_buf();
+    let home = fixture.home.path().to_path_buf();
+    std::fs::write(home.join("config.toml"),"[sandbox]\nnetwork=false\n[execution_environment]\nselected='box'\n[execution_environment.profiles.box]\nkind='container'\nimage='alpine:3'\nmemory_mb=128\npids=64\n").unwrap();
+    let out = Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "container_cli_child", "--nocapture"])
+        .env("ROOK_HOME", &home)
+        .env("ROOK_ENV_CLI_ROOT", root.path())
+        .env("ROOK_ENV_CLI_WORKSPACE", &workspace)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let owner = std::fs::read_to_string(root.path().join("owner")).unwrap();
+    let id = std::fs::read_to_string(root.path().join("owned-id")).unwrap();
+    struct Cleanup(String);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = Command::new("docker").args(["rm", "--force", &self.0]).output();
+        }
+    }
+    let _cleanup = Cleanup(id.clone());
+    let call = |request: serde_json::Value| {
+        let output = Command::new(env!("CARGO_BIN_EXE_rook"))
+            .env("ROOK_HOME", &home)
+            .env("ROOK_LOG", "error")
+            .args([
+                "--workspace",
+                workspace.to_str().unwrap(),
+                "session",
+                "environment",
+                &owner,
+                &request.to_string(),
+                "--json",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let local = call(serde_json::json!({"action":"prepare_release"}));
+    assert_eq!(local["observed"]["id"], id);
+    assert_eq!(local["foreign_owner_active"], false);
+    drop(_one);
+    let daemon = Daemon::start(&fixture);
+    let remote = call(serde_json::json!({"action":"prepare_release"}));
+    assert_eq!(remote["token"], local["token"]);
+    let release = call(
+        serde_json::json!({"action":"release","token":remote["token"],"note":"Inspected retained container after real child process exit"}),
+    );
+    assert_eq!(release["state"], "released");
+    assert_eq!(release["replayed"], false);
+    assert!(release["session"].is_string());
+    assert_eq!(std::fs::read_to_string(fixture.workspace.path().join("persisted")).unwrap(), "retained");
+    drop(daemon);
+    assert!(!Command::new("docker").args(["inspect", &id]).output().unwrap().status.success());
+}
+#[cfg(unix)]
+#[path = "../../rook-tools/tests/support/ssh.rs"]
+mod ssh_fixture;
+#[cfg(unix)]
+#[test]
+#[ignore = "helper for actual SSH CLI/HTTP process-loss fixture"]
+fn ssh_cli_child() {
+    let Some(workspace) = std::env::var_os("ROOK_SSH_CLI_WORKSPACE") else {
+        return;
+    };
+    struct Remote {
+        called: std::sync::Mutex<bool>,
+    }
+    #[async_trait::async_trait]
+    impl rook_llm::Provider for Remote {
+        fn id(&self) -> &str {
+            "fixture/ssh-cli"
+        }
+        fn context_window(&self) -> usize {
+            32768
+        }
+        async fn complete(&self, request: rook_llm::Request) -> rook_llm::Result<rook_llm::Response> {
+            let message = if request.tools.iter().any(|tool| tool.name == "run_command")
+                && !*self.called.lock().unwrap()
+            {
+                *self.called.lock().unwrap() = true;
+                rook_llm::Message {
+                    tool_calls: vec![rook_llm::ToolCall {
+                        id: "ssh".into(),
+                        name: "run_command".into(),
+                        arguments: serde_json::json!({"command":"printf cli-result > result; sleep 60"}),
+                    }],
+                    ..rook_llm::Message::assistant("")
+                }
+            } else {
+                rook_llm::Message::assistant("VERDICT: unproven")
+            };
+            let stop_reason = if message.tool_calls.is_empty() {
+                rook_llm::StopReason::EndTurn
+            } else {
+                rook_llm::StopReason::ToolUse
+            };
+            Ok(rook_llm::Response {
+                message,
+                stop_reason,
+                usage: Default::default(),
+                model: self.id().into(),
+            })
+        }
+    }
+    let engine = std::sync::Arc::new(rook_core::Rook::open(Some(workspace.into())).unwrap());
+    let owner = engine.start_session("Lost SSH CLI owner").unwrap();
+    std::fs::write(rook_core::paths::home().join("ssh-owner"), rook_store::format_session_id(owner)).unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let running = engine.clone();
+        let _task = tokio::spawn(async move {
+            let mut agent = rook_core::agent::AgentLoop::new(
+                &running,
+                std::sync::Arc::new(Remote { called: std::sync::Mutex::new(false) }),
+                owner,
+            );
+            agent.run("Run once").await
+        });
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if engine
+                .environment_request(owner, rook_core::environments::Request::Inspect)
+                .await
+                .is_ok_and(|view| view["observed"]["running"] == true)
+            {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    });
+    std::process::exit(0);
+}
+#[cfg(unix)]
+#[test]
+#[ignore = "requires owned SSH fixture"]
+fn lost_ssh_execution_uses_matching_local_http_sources_and_reviewed_recovery_without_replaying_the_command() {
+    let _one = one_at_a_time();
+    let server = ssh_fixture::Server::start();
+    let fixture = Rook::new();
+    fixture.write_config(&format!("[memory]\nenabled=false\n[web]\nenabled=false\n[sandbox]\nstance='autonomous'\n[execution_environment]\nselected='lab'\n[execution_environment.profiles.lab]\nkind='ssh'\nhost='rook-native'\nprogram={}\nremote_workspace='/tmp/rook-workspaces'\n",serde_json::to_string(server.program.to_str().unwrap()).unwrap()));
+    let out = Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "ssh_cli_child", "--nocapture"])
+        .env("ROOK_HOME", fixture.home.path())
+        .env("ROOK_SSH_CLI_WORKSPACE", fixture.workspace.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let owner = std::fs::read_to_string(fixture.home.path().join("ssh-owner")).unwrap();
+    let call =
+        |request: serde_json::Value| fixture.json(&["session", "environment", &owner, &request.to_string()]);
+    let local = call(serde_json::json!({"action":"inspect"}));
+    assert_eq!(local["kind"], "ssh");
+    assert_eq!(local["foreign_owner_active"], false);
+    drop(_one);
+    let daemon = Daemon::start(&fixture);
+    let remote = call(serde_json::json!({"action":"inspect"}));
+    assert_eq!(local["observed"]["id"], remote["observed"]["id"]);
+    let stop = call(serde_json::json!({"action":"prepare_stop"}));
+    let stopped = call(
+        serde_json::json!({"action":"stop","token":stop["token"],"note":"Inspected retained proxy after actual owner process exit"}),
+    );
+    assert_eq!(stopped["replayed"], false);
+    let preview = call(serde_json::json!({"action":"prepare_recover"}));
+    let call_id = preview["call"].as_str().unwrap();
+    let changes = call(serde_json::json!({"action":"changes","call":call_id,"after":null}));
+    assert!(changes["changes"].as_array().unwrap().iter().any(|change| change["path"] == "result"));
+    let read =
+        call(serde_json::json!({"action":"read","call":call_id,"which":"after","path":"result","offset":0}));
+    assert_eq!(read["bytes_base64"], "Y2xpLXJlc3VsdA==");
+    assert!(!fixture.workspace.path().join("result").exists());
+    let recovery = fixture.json(&["session", "recovery", &owner]);
+    let operation = recovery[0]["unknown"][0]["id"].as_str().unwrap();
+    fixture.json(&[
+        "session",
+        "recovery",
+        &owner,
+        "--acknowledge",
+        operation,
+        "--note",
+        "Verified terminal proxy and selected retained partial file bytes",
+    ]);
+    let recovered = call(
+        serde_json::json!({"action":"recover","token":preview["token"],"note":"Reviewed after-image and original execution acknowledgement"}),
+    );
+    assert_eq!(recovered["replayed"], false);
+    assert!(recovered["session"].is_string());
+    assert_eq!(std::fs::read_to_string(fixture.workspace.path().join("result")).unwrap(), "cli-result");
+    let replay = fixture.run(&[
+        "session",
+        "environment",
+        &owner,
+        &serde_json::json!({"action":"recover","token":preview["token"],"note":"replayed token"}).to_string(),
+    ]);
+    assert!(!replay.status.success());
+    drop(daemon);
+}
+
+#[path = "scenarios/inbound.rs"]
+mod inbound_events;
+
+#[path = "scenarios/telegram.rs"]
+mod telegram;
+
+#[path = "scenarios/recipes.rs"]
+mod composite_recipes;
+
+#[path = "scenarios/acp.rs"]
+mod external_acp;
+
+#[path = "support/model.rs"]
+mod fixture_model;

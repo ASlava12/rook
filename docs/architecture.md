@@ -75,6 +75,19 @@ Child editor bridges retain capability and policy boundaries; historical recover
 and current activity are distinct. Outbound escaped JSON uses bounded shared
 transport leases through writer flush. See [the editor contract](acp.md).
 
+ACP advertises implemented list/resume/close capabilities. Session discovery limits
+metadata scans and output per page, supports absolute cwd filters and stable ID
+cursors, including empty filtered pages with continuation. Resume attaches
+without replaying historical extension previews. Load streams the complete saved
+root conversation prefix with source/event IDs and bounded output admission;
+opaque provider state is excluded and recorded commands are never replayed.
+Active ACP sessions retain bounded, separate jobs, run grants and MCP/LSP pools
+between prompts. Close cancels and destroys the selected turn, requests cleanup
+of known editor terminals and releases that session's equipment; stored history
+remains resumable. Session setup selects the saved canonical project and owns
+explicit client MCP declarations, waiting for the requested catalogs with
+cancellable startup. See [the lifecycle contract](acp.md).
+
 The CLI entry point parses and routes commands. Its grammar lives in
 `rook-cli/src/args.rs`, handlers in `commands/`, and turn configuration shared
 with the REPL/TUI in `turn_options.rs`. In particular, command-line and interactive
@@ -306,6 +319,46 @@ and boundary and keeps the chat prompt intact. A save reply from a replaced
 viewer reports the committed event without switching the new conversation.
 Every history entry point carries the actual open conversation as the departed
 source; the session being inspected may be a different one.
+
+`session_recall` discovers conversations in the current workspace using the
+bounded transcript scanner. Continuations bind workspace, query and mode;
+model discovery also excludes its current session to prevent feedback through
+its own query and tool results. Retained parent prefixes are searched once,
+while a child still exposes its copy if the parent was removed. Matches link
+session and event identity; anchored reading uses the ordinary paged reader.
+CLI `session recall`, chat/TUI `/recall`, the history API and browser Search
+share this engine. The TUI uses its history worker, keeping input responsive.
+
+Daemon conversation activity has a separate task in `rookd::chat::activity`.
+It consumes the engine's existing scoped observer at the source, independently
+of delivery to a view. Capacity wait precedes physical-request admission without
+creating a billable attempt. Foreground pipes count actual received bytes in one
+atomic; background jobs retain a monotonic byte count. Active tool dispatch
+samples these counts at most twice a second, so cached output and elapsed-time
+waiting lines cannot rearm a notice. Live approval/question channels suppress
+notices while awaiting a person. Children inherit the same observer.
+`rook-core::activity::Tracker` retains one fixed-size state; a 2 KiB versioned
+JSON companion replaces the last observation instead of accumulating another
+log. `telemetry.stall_after_secs` controls the notice threshold and never cancels
+work. An Activity frame is a live observation, retained for a later attachment;
+diagnostics read the same companion. Saved state cannot establish a live owner
+after restart; only the daemon's current registry can answer that question.
+Standalone managed iterations own the same watcher through a drop guard. Their
+bounded worker registry supplies live diagnostic overlays; cancellation persists
+a stopped owner. Inactivity notices go to the daemon log and latest companion,
+while conversation owners additionally publish the Activity frame. Diagnostic
+lookups release the conversation map before taking worker admission, matching
+supervision's lock order.
+
+Optional browser equipment lives in `rook-core::browser`. A workspace-owned
+bounded pool binds isolated Playwright MCP contexts to conversation IDs;
+delegated toolboxes replace the parent binding. Page calls go through ordinary
+tool policy, execution journals and result/image storage. Uncertain effects
+are not replayed; close and fresh navigation establish a new unique generation,
+including after engine restart. MCP stdio admission reserves cleanup capacity
+before spawning, retains roots through a short graceful termination, then ends
+their owned process groups. Cancellation-safe cleanup also runs outside the
+async runtime on drop. See [browser control](browser.md).
 
 Managed MCP equipment lives in `rook-core::mcp_connections`. Initial admission
 bounds declarations and concurrent handshakes; reports contain no endpoint,
@@ -873,3 +926,17 @@ ordinary goal session. `/api/work` remains the execution and legacy
 compatibility API. Calendar computation and persistence live in
 `rook-core::schedules`.
 See [durable work](durable-work.md) and [ADR-0014](adr/0014-durable-work.md).
+
+
+Configured external ACP errands run inside ordinary `AgentLoop` child admission,
+workspace leases, lineage and execution recovery. `acp_executor` owns only bounded
+stdio transport/process cleanup; `agent/acp` bridges client writes and permission
+requests to the existing dispatcher and approver. Raw reads preserve editor
+buffers and byte admission; native terminals use child-scoped job registries
+with output leases and redacted snapshots. Foreign tool notifications are
+observations, so an operation already run by an external agent is never dispatched
+again. Unknown external model usage has no native-price estimate and stops further
+family model requests. Actual Rook-to-Rook provider execution, CLI/WebSocket, both TUI modes and browser
+outcome/source checks are exercised by owned fixtures. Trusted bounded environment
+overrides allow independent process state; secret aliases resolve only after
+permission. See [the external executor contract](acp.md).

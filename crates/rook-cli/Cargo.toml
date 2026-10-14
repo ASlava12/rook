@@ -44,4 +44,7 @@ name = "rook"
 path = "src/main.rs"
 
 [dev-dependencies]
+hmac = "0.12.1"
+sha2 = "0.10.9"
+hex = "0.4.3"
 libc = "0.2.180"

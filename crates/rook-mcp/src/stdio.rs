@@ -74,7 +74,22 @@ pub(crate) struct Stdio {
     /// seconds of a turn, per call, for a server that is already gone.
     finished: Arc<AtomicBool>,
     next_id: AtomicU64,
-    child: Mutex<Child>,
+    child: Mutex<Option<Child>>,
+    group: std::sync::Mutex<Option<rook_contain::Group>>,
+    lease: std::sync::Mutex<Option<crate::reap::Lease<'static>>>,
+}
+
+impl Drop for Stdio {
+    fn drop(&mut self) {
+        // npm launchers and browser drivers start children of their own. Killing
+        // just the launcher leaves those children holding pipes and profiles.
+        if let Some(group) = self.group.get_mut().unwrap_or_else(|e| e.into_inner()).take()
+            && let Some(child) = self.child.get_mut().take()
+            && let Some(lease) = self.lease.get_mut().unwrap_or_else(|e| e.into_inner()).take()
+        {
+            crate::reap::later(child, group, lease);
+        }
+    }
 }
 
 #[derive(PartialEq, Eq)]
@@ -150,12 +165,16 @@ fn resolved(command: &str, path: &std::ffi::OsStr, exts: &str) -> std::path::Pat
 
 impl Stdio {
     pub(crate) fn spawn(config: &ServerConfig) -> Result<Self> {
+        let lease = crate::reap::reserve(config.stdio_max_processes)
+            .map_err(|source| McpError::Spawn { command: config.command.clone(), source })?;
         let mut command = tokio::process::Command::new(program(
             &config.command,
             config.cwd.as_ref().map(std::path::Path::new),
         ));
         #[cfg(windows)]
         command.creation_flags(rook_contain::NO_WINDOW);
+        #[cfg(unix)]
+        command.process_group(0);
         command
             .args(&config.args)
             .envs(&config.env)
@@ -169,6 +188,7 @@ impl Stdio {
 
         let mut child =
             command.spawn().map_err(|e| McpError::Spawn { command: config.command.clone(), source: e })?;
+        let group = rook_contain::Group::holding(child.id());
         let stdin = child.stdin.take().expect("stdin was piped");
         let stdout = child.stdout.take().expect("stdout was piped");
         let stderr = child.stderr.take().expect("stderr was piped");
@@ -232,7 +252,9 @@ impl Stdio {
             pending,
             finished,
             next_id: AtomicU64::new(1),
-            child: Mutex::new(child),
+            child: Mutex::new(Some(child)),
+            group: std::sync::Mutex::new(Some(group)),
+            lease: std::sync::Mutex::new(Some(lease)),
         })
     }
 
@@ -292,11 +314,25 @@ impl Transport for Stdio {
     }
 
     fn child_pid(&self) -> Option<u32> {
-        self.child.try_lock().ok()?.id()
+        self.child.try_lock().ok()?.as_ref()?.id()
     }
 
     async fn shutdown(&self) {
-        let _ = self.child.lock().await.kill().await;
+        let mut child = self.child.lock().await;
+        // Keep ownership here through the cancellable grace wait. If this
+        // future is dropped, Stdio::drop still sends the group to the reaper.
+        if let Some(group) = self.group.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            group.terminate();
+        }
+        if let Some(child) = child.as_mut() {
+            tokio::time::sleep(crate::reap::GRACE).await;
+            if let Some(group) = self.group.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                group.end();
+            }
+            let _ = child.kill().await;
+        }
+        child.take();
+        self.lease.lock().unwrap_or_else(|e| e.into_inner()).take();
     }
 }
 

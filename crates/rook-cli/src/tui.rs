@@ -411,6 +411,7 @@ enum TurnEvent {
     Started(u128),
     Effort(String),
     Text(String),
+    FinalReply(String),
     Reasoning(String),
     /// A call the model has just made: the tool's own name, which is what
     /// pairs it with the finish, and what to show, which is the work.
@@ -756,6 +757,7 @@ struct Chat {
     /// offering an alternative to.
     draft: String,
     log: Vec<(&'static str, String)>,
+    saw_model_text: bool,
     /// Metadata lives exactly as long as its scrollback row, never in an
     /// independent growing receipt history.
     receipt_lines: std::collections::BTreeMap<usize, rook_proto::queue::Notice>,
@@ -1187,12 +1189,30 @@ impl Chat {
     }
 
     fn push(&mut self, kind: &'static str, text: &str) {
+        if kind == "text" {
+            self.saw_model_text = true;
+        }
         let streams = matches!(kind, "text" | "think");
         match self.log.last_mut() {
             Some((last, body)) if *last == kind && streams => body.push_str(text),
             _ => self.log.push((kind, text.to_string())),
         }
         self.trim();
+    }
+
+    /// The engine may produce a final report without another model delta,
+    /// notably after a delegated task has unverified cost. Keep that answer.
+    fn final_reply(&mut self, reply: &str) {
+        if reply.is_empty() {
+            return;
+        }
+        if self.saw_model_text
+            && self.log.iter().rev().find(|(kind, _)| *kind == "text").is_some_and(|(_, text)| text == reply)
+        {
+            return;
+        }
+        self.push("stat", "  final reply");
+        self.push("text", reply);
     }
 
     /// A call has started: write its line, and remember which line it was.
@@ -1281,6 +1301,7 @@ impl Chat {
     /// "has it stopped", and a window that has been watching for four seconds
     /// cannot say more than that.
     fn began(&mut self) {
+        self.saw_model_text = false;
         self.busy = true;
         self.since = Some(std::time::Instant::now());
         self.step = None;
@@ -1861,6 +1882,9 @@ impl App {
             self.drain_turn_events();
             self.tasks.poll();
             self.history.poll();
+            if let Some(result) = self.history.take_recall() {
+                self.chat.push("stat", &result);
+            }
             if let Some(result) = self.history.take_worktree() {
                 self.chat.push("stat", &result);
             }
@@ -2135,6 +2159,7 @@ impl App {
                 }
                 TurnEvent::Effort(report) => self.chat.effort_report(report),
                 TurnEvent::Text(text) => self.chat.push("text", &text),
+                TurnEvent::FinalReply(text) => self.chat.final_reply(&text),
                 TurnEvent::Reasoning(text) => self.chat.push("think", &text),
                 TurnEvent::Tool { name, said } => self.chat.tool_started(&name, &said),
                 TurnEvent::Agent(line) => self.chat.push("agent", &line),
@@ -2219,6 +2244,9 @@ impl App {
             }
         }
         match event {
+            ChatEvent::Activity { state } => {
+                self.chat.push(if state.stalled { "err" } else { "stat" }, &state.describe());
+            }
             ChatEvent::Inputs { approvals, questions } => {
                 self.chat.pending = self.chat.pending.take().filter(|r| approvals.contains(&r.id));
                 self.chat.asking = self.chat.asking.take().filter(|r| questions.contains(&r.id));
@@ -2438,12 +2466,15 @@ impl App {
                 self.chat.push("stat", "[stopped]");
                 self.finished();
             }
-            ChatEvent::Done { steps, input_tokens, output_tokens, files_changed, stopped, .. } => {
+            ChatEvent::Done { reply, steps, input_tokens, output_tokens, files_changed, stopped, .. } => {
                 self.clear_stop_attempt();
                 if stopped == "already_admitted" {
                     self.chat.prompt_retry.acknowledged();
                     self.finished();
                     return;
+                }
+                if let Some(reply) = reply {
+                    self.chat.final_reply(&reply);
                 }
                 self.chat
                     .prompt_retry
@@ -3394,6 +3425,125 @@ impl App {
             self.chat.push("stat", &said);
             return;
         }
+        if name == "recall" {
+            match rook_core::session_recall::arguments(rest) {
+                Ok(request) => {
+                    if self.history.recall(request) {
+                        self.chat.push("stat", "Searching saved conversations…");
+                    } else {
+                        self.chat.push("err", "History reader is busy; try recall when it finishes.");
+                    }
+                }
+                Err(error) => self.chat.push("err", &error.to_string()),
+            }
+            return;
+        }
+        if name == "telegram" {
+            if let Err(e) = rook_core::telegram::arguments(rest) {
+                return self.chat.push("err", &e.to_string());
+            }
+            if self.history.telegram(rest) {
+                self.chat.push("stat", "Reading Telegram deliveries…");
+            } else {
+                self.chat.push("err", "History worker is busy; retry when it finishes.");
+            }
+            return;
+        }
+        if name == "events" {
+            if let Err(e) = rook_core::inbound::arguments(rest) {
+                return self.chat.push("err", &e.to_string());
+            }
+            if self.history.events(rest) {
+                self.chat.push("stat", "Reading inbound events…");
+            } else {
+                self.chat.push("err", "History worker is busy; retry when it finishes.");
+            }
+            return;
+        }
+        if name == "recipes" {
+            let Some(owner) = self.chat.session else {
+                return self.chat.push("err", "start or resume a session before recipe inspection");
+            };
+            if let Err(error) = rook_core::composite_recipes::arguments(rest) {
+                return self.chat.push("err", &error.to_string());
+            }
+            if self.history.recipes(owner, rest) {
+                self.chat.push("stat", "Reading recipe stages…");
+            } else {
+                self.chat.push("err", "History worker is busy; retry when it finishes.");
+            }
+            return;
+        }
+        if name == "environment" {
+            let Some(owner) = self.chat.session else {
+                return self.chat.push("err", "start or resume a session before environment inspection");
+            };
+            if let Err(error) = rook_core::environments::arguments(rest) {
+                return self.chat.push("err", &error.to_string());
+            }
+            if self.history.environment(owner, rest) {
+                self.chat.push("stat", "Reading execution environment…");
+            } else {
+                self.chat.push("err", "History worker is busy; retry when it finishes.");
+            }
+            return;
+        }
+        if name == "learning" {
+            let Some(owner) = self.chat.session else {
+                return self.chat.push("err", "start or resume a session before learning review");
+            };
+            if let Err(error) = rook_core::learning::arguments(rest) {
+                return self.chat.push("err", &error.to_string());
+            }
+            if self.history.learning(owner, rest) {
+                self.chat.push("stat", "Reading knowledge proposals…");
+            } else {
+                self.chat.push("err", "History worker is busy; retry when it finishes.");
+            }
+            return;
+        }
+        if name == "experiment" {
+            let Some(owner) = self.chat.session else {
+                return self.chat.push("err", "start or resume a session before experiments");
+            };
+            if let Err(error) = rook_core::experiments::arguments(rest) {
+                return self.chat.push("err", &error.to_string());
+            }
+            if self.history.experiment(owner, rest) {
+                self.chat.push("stat", "Reading experiment tree…");
+            } else {
+                self.chat.push("err", "History worker is busy; retry when it finishes.");
+            }
+            return;
+        }
+        if name == "shell-undo" {
+            let Some(owner) = self.chat.session else {
+                return self.chat.push("err", "start or resume a session before shell undo");
+            };
+            if let Err(error) = rook_core::shell_undo::arguments(rest) {
+                return self.chat.push("err", &error.to_string());
+            }
+            if self.history.shell_undo(owner, rest) {
+                self.chat.push("stat", "Reading shell receipts…");
+            } else {
+                self.chat.push("err", "History worker is busy; retry shell undo when it finishes.");
+            }
+            return;
+        }
+        if name == "review" {
+            let Some(owner) = self.chat.session else {
+                return self.chat.push("err", "start or resume a session before review");
+            };
+            if let Err(error) = rook_core::review::arguments(rest) {
+                return self.chat.push("err", &error.to_string());
+            }
+            if self.history.review_changes(owner, rest) {
+                self.chat.push("stat", "Reading retained review sources…");
+            } else {
+                self.chat.push("err", "History worker is busy; retry review when it finishes.");
+            }
+            return;
+        }
         if name == "tree" {
             let session = if rest.trim().is_empty() {
                 self.chat.session
@@ -3992,6 +4142,16 @@ impl App {
                 || command.starts_with("diagnostics ")
                 || command == "export-html"
                 || command == "worktree"
+                || command == "environment"
+                || command.starts_with("environment ")
+                || command == "learning"
+                || command.starts_with("learning ")
+                || command == "experiment"
+                || command.starts_with("experiment ")
+                || command == "shell-undo"
+                || command.starts_with("shell-undo ")
+                || command == "review"
+                || command.starts_with("review ")
                 || command.starts_with("worktree ")
                 || command.starts_with("export-html "))
         {
@@ -4181,6 +4341,9 @@ impl App {
                 })
                 .await;
 
+            if let Ok(outcome) = &result {
+                let _ = to_loop.send(TurnEvent::FinalReply(outcome.reply.clone()));
+            }
             let _ = match result {
                 Ok(outcome) => to_loop.send(TurnEvent::Done(format!(
                     "{}{}{}[{} steps · {} in / {} out{}]",
@@ -7725,6 +7888,7 @@ and the next line"
                 exit_code: Some(7),
                 timed_out: false,
                 running: false,
+                environment: None,
             },
         };
         entries[2].tool_details = Some(details.clone());
@@ -8210,5 +8374,30 @@ and the next line"
             long < std::time::Duration::from_secs(4 * 3600),
             "and not so long that a dead stream is never noticed: {long:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod final_reply_tests {
+    #[test]
+    fn the_engine_final_report_survives_without_deltas_and_preserves_the_draft() {
+        let mut chat = super::Chat::default();
+        chat.input.set("retained draft");
+        chat.began();
+        chat.push("tool", "delegate completed");
+        chat.final_reply("A delegated executor returned without a complete cost report.");
+        assert!(chat.log.iter().any(|(kind, text)| *kind == "text" && text.contains("complete cost report")));
+        assert_eq!(chat.input.text, "retained draft");
+    }
+    #[test]
+    fn a_streamed_final_answer_is_not_repeated_but_a_new_turn_may_repeat_its_answer() {
+        let mut chat = super::Chat::default();
+        chat.began();
+        chat.push("text", "answer");
+        chat.final_reply("answer");
+        assert_eq!(chat.log.iter().filter(|(kind, _)| *kind == "text").count(), 1);
+        chat.began();
+        chat.final_reply("answer");
+        assert_eq!(chat.log.iter().filter(|(kind, _)| *kind == "text").count(), 2);
     }
 }

@@ -17,7 +17,7 @@ use rook_store::EventKind;
 ///
 /// Not tolerant of a fourth word. `VERDICT: probably` is a hedge, and reporting
 /// a hedge as a verdict is what asking for one of three exists to prevent.
-fn verdict_in(reply: &str) -> Option<&'static str> {
+pub(crate) fn verdict_in(reply: &str) -> Option<&'static str> {
     reply.lines().rev().find_map(verdict_line)
 }
 
@@ -497,6 +497,28 @@ impl<'a> AgentLoop<'a> {
         if span.trim().is_empty() {
             return String::new();
         }
+        let browser_evidence = entries
+            .iter()
+            .rev()
+            .find(|entry| {
+                entry.kind == "tool-result"
+                    && entry.label == crate::browser::TOOL
+                    && entry.image_note.is_some()
+            })
+            .map(|entry| {
+                format!(
+                    "\n\nBrowser screenshots are retained as images with their tool result in Rook's store. \
+             Relative Playwright artifact links name private temporary storage, not workspace files; \
+             an empty workspace does not establish a missing screenshot. Independently inspect the \
+             parent's anchored receipt with session_recall {{\"session\":\"{}\",\"around\":{}}}. \
+             Its image metadata establishes a recorded capture, not what the pixels visually prove. \
+             Compare recorded snapshots with the requested page facts. Distinguish completed historical \
+             actions from criteria requiring current server state; do not repeat a submission to verify it.",
+                    rook_store::format_session_id(self.session),
+                    entry.seq
+                )
+            })
+            .unwrap_or_default();
         let span = crate::sources::data("transcript", "this turn; recorded evidence", &span);
         format!(
             "\n\nThis is what the turn did, in order. It is evidence of how the workspace came \
@@ -504,7 +526,7 @@ impl<'a> AgentLoop<'a> {
              what runs. Read it for the question the disk cannot answer: whether the agent \
              reached the goal or moved it. A tool's result is that tool's word and not the \
              agent's; the agent's own sentences are its account of itself and carry no weight \
-             beyond what they can be checked against.\n\n{span}"
+             beyond what they can be checked against.{browser_evidence}\n\n{span}"
         )
     }
 
@@ -540,7 +562,7 @@ impl<'a> AgentLoop<'a> {
             child.max_turn_secs = self.max_turn_secs;
             child.max_turn_tokens = tokens;
             child.tools = self.tools.without(CHANGES_FILES);
-            child.tools = child.tools.without(&["ask"]);
+            child.tools = child.tools.without(&["ask", crate::browser::TOOL]);
             child.tool_ctx = self.tool_ctx.clone();
             child.policy = self.policy.clone();
             let child_id = rook_store::format_session_id(session);

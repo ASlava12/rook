@@ -20,28 +20,31 @@ use rook_tools::{ToolBox, ToolContext};
 /// they were two arguments among eight, which is where a caller starts passing
 /// them in the wrong order.
 #[derive(Clone)]
-struct Bounds {
-    isolated: bool,
-    steps: Option<u32>,
+pub(super) struct Bounds {
+    pub(super) isolated: bool,
+    pub(super) steps: Option<u32>,
     /// The turn's deadline, passed down unchanged: every sub-agent of a turn
     /// finishes by the moment the turn does.
-    by: Option<std::time::Instant>,
+    pub(super) by: Option<std::time::Instant>,
     /// A share rather than the whole remainder: the errands of one call run at
     /// the same time, and each taking the remainder is the multiplication the
     /// ceiling exists to stop.
-    tokens: u64,
+    pub(super) tokens: u64,
     /// What this errand runs on, and how hard it thinks.
     ///
     /// Not a bound, and here because this is what a child is handed: a second
     /// struct beside this one would be two things to keep in step at the same
     /// four call sites. `None` is the configured default either way.
-    provider: Option<std::sync::Arc<dyn Provider>>,
-    effort: Option<rook_llm::Effort>,
+    pub(super) provider: Option<std::sync::Arc<dyn Provider>>,
+    pub(super) effort: Option<rook_llm::Effort>,
+    pub(super) recipe: Option<crate::recipes::Prepared>,
+    pub(super) executor: Option<String>,
 }
 
 pub(super) struct Crew<'a> {
     rook: &'a Rook,
     provider: std::sync::Arc<dyn Provider>,
+    vault: std::sync::Arc<crate::secrets::Vault>,
     tools: ToolBox,
     tool_ctx: ToolContext,
     policy: std::sync::Arc<Policy>,
@@ -50,6 +53,7 @@ pub(super) struct Crew<'a> {
     observer: Option<std::sync::Arc<dyn super::observe::Observer>>,
     servers: std::sync::Arc<crate::lsp::Servers>,
     spawned: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    cost_unknown: std::sync::Arc<std::sync::atomic::AtomicBool>,
     parent: u128,
     depth: u32,
     max_steps: u32,
@@ -245,7 +249,7 @@ pub(super) fn short(task: &str) -> &str {
 const SUBTASK_STEPS_FLOOR: u32 = 3;
 
 impl Crew<'_> {
-    async fn run_subtask(
+    pub(super) async fn run_subtask(
         &self,
         task: &str,
         inherited: Option<&str>,
@@ -264,7 +268,7 @@ impl Crew<'_> {
     // The explicit Send bound terminates recursive run_with/delegation proof
     // expansion without restricting callers' progress closures.
     #[allow(clippy::too_many_arguments, clippy::manual_async_fn)]
-    fn run_subtask_in<'b>(
+    pub(super) fn run_subtask_in<'b>(
         &'b self,
         session: u128,
         task: &'b str,
@@ -291,6 +295,10 @@ impl Crew<'_> {
             // What the call asked for, or what the turn is using.
             let chosen = bounds.provider.clone().unwrap_or_else(|| self.provider.clone());
             let mut child = AgentLoop::new(rook, chosen, session);
+            for value in rook_tools::Secrets::redactions(self.vault.as_ref()) {
+                child.vault.also_hide(&value);
+            }
+            child.tool_ctx.secrets = Some(self.vault.clone());
             child.depth = self.depth + 1;
             if tree.is_none() {
                 child.tools = self.tools.without(&["ask"]);
@@ -306,6 +314,7 @@ impl Crew<'_> {
                 child.tool_ctx.jobs = Some(jobs_for(&rook.config));
                 child.tools.register(std::sync::Arc::new(rook_tools::jobs::JobTool));
             }
+            crate::browser::register(&mut child.tools, rook, session);
             child.policy = self.policy.clone();
             let child_id = rook_store::format_session_id(session);
             child.approver = self.approver.for_session(&child_id).unwrap_or_else(|| self.approver.clone());
@@ -335,6 +344,18 @@ impl Crew<'_> {
             child.max_steps = bounds.steps.unwrap_or(self.max_steps);
             child.max_turn_tokens = bounds.tokens;
             child.by = bounds.by;
+            child.prepared_recipe = bounds.recipe;
+            child.external_executor = bounds.executor;
+            if let Some(name) = &child.external_executor {
+                if inherited.is_some_and(|context| context.len() > rook.config.acp_executor.frame_bytes) {
+                    return Err(CoreError::Other(
+                        "Delegated ACP context exceeds acp_executor.frame_bytes".into(),
+                    ));
+                }
+                child.external_context = inherited.map(str::to_owned);
+                rook.store.update_session(session, |meta| meta.model = format!("acp/{name}"))?;
+            }
+            child.composite_cost_unknown = self.cost_unknown.clone();
 
             // Boxed because this is `run` calling itself through a tool call. The
             // display channel coalesces hints; completed calls and results keep
@@ -353,10 +374,14 @@ impl Crew<'_> {
                 accounting.returned(tree.save(self.rook, session))?;
                 report = Some(tree.report(session));
             }
-            let mut outcome =
-                accounting.returned(result.map_err(|why| {
-                    CoreError::Other(format!("{why}\n{}", report.as_deref().unwrap_or("")))
-                }))?;
+            let mut outcome = accounting.returned(result.map_err(|why| {
+                let source = if child.external_executor.is_some() {
+                    format!("External child session: {}", rook_store::format_session_id(session))
+                } else {
+                    String::new()
+                };
+                CoreError::Other(format!("{why}\n{source}\n{}", report.as_deref().unwrap_or("")))
+            }))?;
             if let Some(report) = report {
                 outcome.reply.push_str(&format!("\n\n{report}"));
             }
@@ -534,6 +559,18 @@ impl<'a> AgentLoop<'a> {
         // model, which is the way round that fails safely — a call that asks
         // for nothing gets what the operator chose, and a bad guess by the
         // model costs speed rather than the answer.
+        let executor = match args.get("executor") {
+            None => None,
+            Some(value) => match value.as_str() {
+                Some(name) if self.rook.config.acp_executor.profiles.get(name).is_some_and(|p| p.trusted) => {
+                    Some(name.to_owned())
+                }
+                _ => return "executor must name a configured ACP profile with trusted = true".into(),
+            },
+        };
+        if executor.is_some() && (args.get("model").is_some() || args.get("care").is_some()) {
+            return "executor cannot be combined with model or care".into();
+        }
         let careful = args.get("care").and_then(|m| m.as_str()).map(str::trim) == Some("careful");
         // An endpoint the call named, where the configuration offers a choice.
         // `careful` still wins: it asks for the turn's own model, which is a
@@ -591,6 +628,8 @@ impl<'a> AgentLoop<'a> {
                             provider: provider.clone(),
                             effort,
                             isolated,
+                            recipe: None,
+                            executor: executor.clone(),
                         },
                     )
                 })
@@ -631,10 +670,19 @@ impl<'a> AgentLoop<'a> {
                 let doing = doing.clone();
                 let said = relayed[i].clone();
                 let provider = provider.clone();
+                let executor = executor.clone();
                 async move {
                     let _permit = limit.acquire().await;
-                    let bounds =
-                        Bounds { steps: max_steps, by: self.by, tokens: each, provider, effort, isolated };
+                    let bounds = Bounds {
+                        steps: max_steps,
+                        by: self.by,
+                        tokens: each,
+                        provider,
+                        effort,
+                        isolated,
+                        recipe: None,
+                        executor: executor.clone(),
+                    };
                     (i, crew.run_subtask(task, inherited.as_deref(), bounds, doing, i, said).await)
                 }
             })
@@ -773,6 +821,7 @@ impl<'a> AgentLoop<'a> {
         Crew {
             rook: self.rook,
             provider: self.provider.clone(),
+            vault: self.vault.clone(),
             tools: self.tools.clone(),
             // What tells a child from the turn that started it, everywhere a
             // tool can see. The policy is shared on purpose — an approval given
@@ -785,6 +834,7 @@ impl<'a> AgentLoop<'a> {
             observer: self.observer.clone(),
             servers: self.servers.clone(),
             spawned: self.spawned.clone(),
+            cost_unknown: self.composite_cost_unknown.clone(),
             parent: self.session,
             depth: self.depth,
             max_steps: self.max_steps,

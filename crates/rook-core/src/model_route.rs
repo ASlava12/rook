@@ -19,6 +19,7 @@ pub(crate) enum Purpose {
     Aside,
     FinalAnswer,
     BranchSummary,
+    Learning,
 }
 
 pub(crate) fn identity(value: &str, vault: &Vault) -> Option<String> {

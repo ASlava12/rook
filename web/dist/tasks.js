@@ -1,5 +1,7 @@
 // Schedules own timing; each execution is an ordinary goal session.
 import { $, el, api, state, nav } from './lib.js';
+import { eventsPanel } from './events.js';
+import { telegramPanel } from './telegram.js';
 const label = (text, input) => el('label', {}, text, ' ', input);
 const message = e => e.error || e.message || String(e);
 const when = (at, zone) => at ? new Date(at * 1000).toLocaleString(undefined, { timeZone: zone }) : '—';
@@ -39,6 +41,7 @@ export async function renderTasks() {
     } catch (e) { error.textContent = message(e); }
     finally { submitting = false; submit.disabled = false; }
   });
+  root.append(eventsPanel(), telegramPanel());
   root.append(el('h2', {}, 'Scheduled tasks'), el('p', {}, 'Each run opens a separate session. The daemon must be running. Missed recurring occurrences are skipped; unfinished sessions prevent overlap. Disable affects future runs only.'), error, list, form);
   let signature = '', busy = false;
   async function control(id, action) {

@@ -126,6 +126,24 @@ impl<'a> AgentLoop<'a> {
             self.rook.workspace.to_string_lossy()
         ));
 
+        if let Some(execution) = &self.tool_ctx.execution
+            && let Some(rook_tools::environments::Profile::Container { .. }) =
+                execution.settings.profiles.get(&execution.settings.selected)
+            && !execution.settings.local()
+        {
+            s.push_str(&format!("run_command uses configured container profile {} with a POSIX sh shell and this workspace mounted at /workspace. Use workspace-relative command paths; file tools and cwd arguments retain local workspace paths.\n",execution.settings.selected));
+        }
+
+        if let Some(execution) = &self.tool_ctx.execution
+            && matches!(
+                execution.settings.profiles.get(&execution.settings.selected),
+                Some(rook_tools::environments::Profile::Ssh { .. })
+            )
+            && !execution.settings.local()
+        {
+            s.push_str(&format!("run_command uses configured SSH profile {} on Linux with POSIX sh in an owned mirror of this workspace. Use relative command paths. File tools and cwd arguments keep local paths; command file changes synchronize back with conflict checks. Mirror excludes these exact entry names: {:?}.\n",execution.settings.selected,execution.settings.exclude));
+        }
+
         if !self.native_tools() {
             s.push_str(&rook_llm::prompted::describe(&[]));
         }

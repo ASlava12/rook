@@ -29,6 +29,18 @@ impl Config {
             }
         }
         errors.extend(self.price_catalog.errors());
+        errors.extend(self.review.errors());
+        errors.extend(self.shell_undo.errors());
+        errors.extend(self.experiments.errors());
+        errors.extend(self.learning.errors());
+        errors.extend(self.execution_environment.errors());
+        errors.extend(self.inbound.errors());
+        errors.extend(self.telegram.errors());
+        errors.extend(self.composite_recipes.errors());
+        errors.extend(self.acp_executor.errors());
+        if let Some(error) = self.browser.error() {
+            errors.push(error.into());
+        }
         if self.hooks.iter().any(|hook| hook.ui_stream && !hook.ui) {
             errors.push("hooks.ui_stream requires ui = true".into());
         }
@@ -50,6 +62,9 @@ impl Config {
             ("chat_replay_events", self.server.chat_replay_events, 1, 4096),
             ("chat_replay_bytes", self.server.chat_replay_bytes, 4096, 32 * 1024 * 1024),
             ("chat_queue_events", self.server.chat_queue_events, 1, 4096),
+            ("max_acp_sessions", self.server.max_acp_sessions, 1, 256),
+            ("acp_setup_bytes", self.server.acp_setup_bytes, 4096, 1024 * 1024),
+            ("acp_history_body_bytes", self.server.acp_history_body_bytes, 65536, 64 * 1024 * 1024),
             ("chat_queue_bytes", self.server.chat_queue_bytes, 4096, 32 * 1024 * 1024),
         ] {
             if !(low..=high).contains(&value) {
@@ -138,6 +153,9 @@ impl Config {
         errors.extend(crate::models::source_errors(self));
         let mut names = std::collections::BTreeSet::new();
         for (index, server) in self.mcp.iter().enumerate() {
+            if !(1..=1024).contains(&server.stdio_max_processes) {
+                errors.push(format!("mcp[{index}].stdio_max_processes: expected 1..=1024"));
+            }
             if let Some(error) = server.catalog_error().or_else(|| server.oauth.error()) {
                 errors.push(format!("mcp[{index}]: {error}"));
             }

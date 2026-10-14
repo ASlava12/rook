@@ -339,6 +339,16 @@ impl Group {
         #[cfg(not(any(unix, windows)))]
         false
     }
+
+    /// Give a driver an opportunity to close resources outside its process
+    /// group. Callers retain ownership through a bounded grace period.
+    pub fn terminate(&self) -> bool {
+        #[cfg(unix)]
+        // Safety: the same owned group as `end`, with a graceful signal.
+        return self.pid.is_some_and(|pid| unsafe { libc::kill(-(pid as i32), libc::SIGTERM) == 0 });
+        #[cfg(not(unix))]
+        self.end()
+    }
 }
 
 /// A command handed to the platform's shell, spelled the way that shell reads.
@@ -896,3 +906,45 @@ mod tests {
 
 /// Filesystem operations confined to an opened directory, including symlink resolution.
 pub mod files;
+
+/// Quote one literal argument for the platform's command shell. `cmd` expands
+/// percent/delayed variables even inside quotes, so those shapes are refused.
+/// A refusal is preferable to executing a different argument than ACP supplied.
+pub fn shell_argument(argument: &str) -> std::io::Result<String> {
+    if argument.contains('\0') {
+        return Err(std::io::Error::other("command arguments cannot contain NUL"));
+    }
+    #[cfg(windows)]
+    {
+        if argument.chars().any(|c| matches!(c, '%' | '!' | '"' | '\r' | '\n')) {
+            return Err(std::io::Error::other(
+                "This literal argument cannot be represented safely in cmd; use a script file with explicit arguments",
+            ));
+        }
+        let trailing = argument.chars().rev().take_while(|c| *c == '\\').count();
+        return Ok(format!("\"{argument}{}\"", "\\".repeat(trailing)));
+    }
+    #[cfg(not(windows))]
+    Ok(format!("'{}'", argument.replace('\'', "'\"'\"'")))
+}
+
+/// The matching environment assignment for `shell_argument`.
+pub fn shell_assignment(name: &str, value: &str) -> std::io::Result<String> {
+    if name.is_empty()
+        || !name
+            .bytes()
+            .enumerate()
+            .all(|(i, b)| b == b'_' || b.is_ascii_alphabetic() || (i > 0 && b.is_ascii_digit()))
+    {
+        return Err(std::io::Error::other("environment name is not a shell identifier"));
+    }
+    #[cfg(windows)]
+    {
+        let _ = shell_argument(value)?;
+        // cmd does not have POSIX assignment prefixes. SET's quoted form keeps
+        // its metacharacters literal, and the name is validated above.
+        return Ok(format!("set \"{name}={value}\" &&"));
+    }
+    #[cfg(not(windows))]
+    Ok(format!("{name}={}", shell_argument(value)?))
+}

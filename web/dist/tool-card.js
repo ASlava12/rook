@@ -161,6 +161,7 @@ export function toolDetailsText(d) {
   let text;
   if (d.type === 'command') {
     text = d.timed_out ? 'command timed out; no completed exit status' : d.running ? 'background command started/running; no completed exit status' : d.exit_code == null ? 'command exit status unavailable' : `command exit ${d.exit_code}`;
+    if (d.environment) text += ` · ${d.environment.kind} ${d.environment.profile} · resource ${d.environment.resource}`;
   } else if (d.type === 'search') {
     text = `search ${d.matches} matching lines in ${d.files_scanned} scanned files${d.complete ? '' : ' (partial scan; more may exist)'}`;
   } else if (d.type === 'mcp') {

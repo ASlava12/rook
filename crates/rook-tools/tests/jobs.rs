@@ -19,6 +19,49 @@ fn ctx(most: usize) -> (tempfile::TempDir, ToolContext) {
     (dir, ctx)
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn job_activity_counts_fresh_pipe_bytes_and_not_reads_of_retained_output() {
+    let (d, mut ctx) = ctx(2);
+    let jobs = Arc::new(Jobs::new(2, 512));
+    ctx.jobs = Some(jobs.clone());
+    let started = RunCommand.call(&ctx, &serde_json::json!({
+        "command":"printf ready; while ! test -f emit; do sleep 0.01; done; head -c 131072 /dev/zero; head -c 131072 /dev/zero >&2; while ! test -f finish; do sleep 0.01; done",
+        "background":true,
+    })).await.unwrap();
+    let id = started.meta["job"].as_str().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(90), async {
+        while jobs.output_count(id) != Some(5) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(jobs.get(id).unwrap().output, "ready", "inspect the pipe output, not the echoed command");
+    assert_eq!(jobs.output_count(id), Some(5));
+    for _ in 0..3 {
+        JobTool.call(&ctx, &serde_json::json!({"id":id})).await.unwrap();
+        assert_eq!(jobs.output_count(id), Some(5));
+    }
+    std::fs::write(d.path().join("emit"), "").unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(90), async {
+        while jobs.output_count(id) != Some(262149) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(jobs.output_count(id).unwrap() > 512, "the retained output cap was exceeded");
+    let output = JobTool.call(&ctx, &serde_json::json!({"id":id})).await.unwrap();
+    assert!(output.content.contains("elided"));
+    assert!(output.content.len() < 4096);
+    assert_eq!(jobs.output_count(id), Some(262149));
+    assert_eq!(jobs.output_count("unknown"), None);
+    std::fs::write(d.path().join("finish"), "").unwrap();
+    until(&ctx, id, "exit ").await;
+    assert_eq!(jobs.output_count(id), Some(262149));
+}
+
 /// Waits for `wanted` to show up in the job's output, or gives up. A background
 /// command has no moment at which it is done, so there is nothing else to wait
 /// for — and a fixed sleep is a guess about scheduling that a loaded machine
@@ -375,4 +418,28 @@ async fn a_background_commands_middle_survives_its_bounded_display() {
     let output = std::fs::read_to_string(path).unwrap();
     assert_eq!(output.len(), 1006);
     assert!(output.contains("MIDDLE"));
+}
+
+#[tokio::test]
+async fn an_owned_completed_terminal_keeps_output_until_release_despite_newer_finished_commands() {
+    struct Empty;
+    impl rook_tools::Secrets for Empty {
+        fn value(&self, _: &str) -> Option<String> {
+            None
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let jobs = Jobs::scoped(1, 4096, 42, Arc::new(Empty));
+    let first = jobs.start("echo first", dir.path(), None).unwrap();
+    assert!(jobs.wait(&first, std::time::Duration::from_secs(30)).await.unwrap().exit_code.is_some());
+    for _ in 0..12 {
+        let id = jobs.start("echo later", dir.path(), None).unwrap();
+        assert!(jobs.wait(&id, std::time::Duration::from_secs(30)).await.unwrap().exit_code.is_some());
+        jobs.release(&id);
+    }
+    assert!(
+        jobs.get(&first).unwrap().output.contains("first"),
+        "an unreleased terminal must not become an ordinary evictable job"
+    );
+    assert!(jobs.release(&first));
 }

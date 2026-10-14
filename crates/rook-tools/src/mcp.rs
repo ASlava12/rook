@@ -102,38 +102,44 @@ impl Tool for McpTool {
             Err(e) => return Ok(ToolOutcome::error(e.to_string()).with("server", self.server.name())),
         };
 
-        let text = result.to_text();
-        let images = match images(&result) {
-            Ok(images) => images,
-            Err(why) => {
-                return Ok(ToolOutcome::error(format!("MCP image result refused: {why}"))
-                    .with("server", self.server.name()));
-            }
-        };
-        let full = text.len();
-        let (windowed, truncated) = window(&text, ctx.max_output_bytes);
-        Ok(ToolOutcome {
-            images,
-            content: windowed,
-            is_error: result.is_error,
-            truncated,
-            full_bytes: full,
-            meta: Default::default(),
-        }
-        .with("server", self.server.name())
-        .with(
-            "text_blocks",
-            result.content.iter().filter(|c| matches!(c, rook_mcp::Content::Text { .. })).count() as u64,
-        )
-        .with(
-            "resource_blocks",
-            result.content.iter().filter(|c| matches!(c, rook_mcp::Content::Resource { .. })).count() as u64,
-        )
-        .with(
-            "unsupported_blocks",
-            result.content.iter().filter(|c| matches!(c, rook_mcp::Content::Unknown)).count() as u64,
-        ))
+        Ok(outcome(&result, ctx, self.server.name()))
     }
+}
+
+/// Convert a reply through the shared text/image admission used by MCP tools.
+/// Browser adapters use this too, so screenshot bounds and frontend rendering
+/// cannot differ from ordinary external tools.
+pub fn outcome(result: &rook_mcp::protocol::ToolResult, ctx: &ToolContext, server: &str) -> ToolOutcome {
+    let text = result.to_text();
+    let images = match images(result) {
+        Ok(images) => images,
+        Err(why) => {
+            return ToolOutcome::error(format!("MCP image result refused: {why}")).with("server", server);
+        }
+    };
+    let full = text.len();
+    let (windowed, truncated) = window(&text, ctx.max_output_bytes);
+    ToolOutcome {
+        images,
+        content: windowed,
+        is_error: result.is_error,
+        truncated,
+        full_bytes: full,
+        meta: Default::default(),
+    }
+    .with("server", server)
+    .with(
+        "text_blocks",
+        result.content.iter().filter(|c| matches!(c, rook_mcp::Content::Text { .. })).count() as u64,
+    )
+    .with(
+        "resource_blocks",
+        result.content.iter().filter(|c| matches!(c, rook_mcp::Content::Resource { .. })).count() as u64,
+    )
+    .with(
+        "unsupported_blocks",
+        result.content.iter().filter(|c| matches!(c, rook_mcp::Content::Unknown)).count() as u64,
+    )
 }
 
 /// The same rule commands get: a long result loses its middle, not its end.

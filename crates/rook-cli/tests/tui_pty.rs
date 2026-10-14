@@ -2705,6 +2705,58 @@ fn daemon_history_search_jump_and_pages_preserve_the_draft() {
     history_browsing_preserves_the_session(true);
 }
 
+fn conversation_recall_uses_the_history_worker(through_daemon: bool) {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let session = rook_store::new_session_id();
+    {
+        let store = rook_store::Store::open(home.path().join("store")).unwrap();
+        store
+            .create_session(&rook_store::SessionMeta::new(
+                session,
+                "lost translation",
+                workspace.path().display().to_string(),
+                rook_store::now_unix(),
+            ))
+            .unwrap();
+        store
+            .append_event(
+                session,
+                rook_store::NewEvent::new(
+                    rook_store::EventKind::UserMessage,
+                    rook_store::Kind::Message,
+                    b"LPIC_PTY_FOUND",
+                ),
+            )
+            .unwrap();
+    }
+    let daemon = through_daemon.then(|| Daemon::start(home.path(), workspace.path()));
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+    pty.send("/recall LPIC_PTY\r");
+    pty.screen_showing(100, 30, "LPIC_PTY_FOUND");
+    pty.send("DRAFT_AFTER_RECALL");
+    pty.screen_showing(100, 30, "DRAFT_AFTER_RECALL");
+    drop(pty);
+    drop(daemon);
+    let store = rook_store::Store::open(home.path().join("store")).unwrap();
+    assert_eq!(
+        store.get_session(session).unwrap().unwrap().next_seq,
+        1,
+        "recall must not submit a prompt to the saved session"
+    );
+}
+
+#[test]
+fn local_conversation_recall_finds_saved_work_without_a_model_call() {
+    conversation_recall_uses_the_history_worker(false);
+}
+#[test]
+fn daemon_conversation_recall_finds_saved_work_without_a_model_call() {
+    conversation_recall_uses_the_history_worker(true);
+}
+
 fn turn_results_preserve_the_draft(through_daemon: bool) {
     let _one = one_at_a_time();
     let home = tempfile::tempdir().unwrap();
@@ -3126,4 +3178,587 @@ fn local_queue_controls_edit_withdraw_and_restore_without_sending() {
 #[test]
 fn daemon_queue_controls_edit_withdraw_and_restore_without_sending() {
     queue_controls_preserve_drafts_and_use_the_saved_revision(true);
+}
+
+#[test]
+fn experiment_tree_reads_use_the_history_worker_locally_and_through_the_daemon() {
+    let _one = one_at_a_time();
+    for remote in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let session = {
+            let engine = rook_core::Rook::from_parts(
+                rook_store::Store::open(home.path().join("store")).unwrap(),
+                rook_core::Config::default(),
+                rook_skills::Environment::bare("test", "test", "0.11.2"),
+                rook_skills::SkillIndex::default(),
+                workspace.path().into(),
+            );
+            let owner = engine.start_session("experiment viewer").unwrap();
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(engine.experiment_request(owner, rook_core::experiments::arguments(r#"{"action":"create","title":"EXPERIMENT_PTY_BASELINE","hypothesis":"Inspect saved experiment without a model call","contract":{"command":"echo evaluator","metrics":{"score":"maximize"}}}"#).unwrap(), std::sync::Arc::new(rook_core::Vault::empty()))).unwrap();
+            owner
+        };
+        let daemon = remote.then(|| Daemon::start(home.path(), workspace.path()));
+        let mut pty = if remote {
+            Pty::spawn(
+                std::path::Path::new(env!("CARGO_BIN_EXE_rook")),
+                &["--workspace", workspace.path().to_str().unwrap(), "tui"],
+                &[
+                    ("ROOK_HOME", home.path().to_str().unwrap()),
+                    ("ROOK_LOG", "error"),
+                    ("TERM", "xterm-256color"),
+                ],
+                100,
+                30,
+            )
+        } else {
+            tui(home.path(), workspace.path())
+        };
+        pty.screen(100, 30);
+        pty.send(&format!("/session {}\r", rook_store::format_session_id(session)));
+        pty.screen_showing(100, 30, "continuing");
+        pty.send("/experiment\r");
+        pty.screen_showing(100, 30, "EXPERIMENT_PTY_BASELINE");
+        pty.send("DRAFT_AFTER_EXPERIMENT");
+        pty.screen_showing(100, 30, "DRAFT_AFTER_EXPERIMENT");
+        drop(pty);
+        drop(daemon);
+        let store = rook_store::Store::open(home.path().join("store")).unwrap();
+        assert_eq!(
+            store.get_session(session).unwrap().unwrap().next_seq,
+            1,
+            "viewing must not submit a model prompt or rewrite retained source notes"
+        );
+    }
+}
+
+#[test]
+fn selected_execution_environment_reads_use_the_history_worker_locally_and_through_the_daemon() {
+    let _one = one_at_a_time();
+    for remote in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let session = {
+            let engine = rook_core::Rook::from_parts(
+                rook_store::Store::open(home.path().join("store")).unwrap(),
+                rook_core::Config::default(),
+                rook_skills::Environment::bare("test", "test", "0.11.2"),
+                rook_skills::SkillIndex::default(),
+                workspace.path().into(),
+            );
+            engine.start_session("environment viewer").unwrap()
+        };
+        let daemon = remote.then(|| Daemon::start(home.path(), workspace.path()));
+        let mut pty = if remote {
+            Pty::spawn(
+                std::path::Path::new(env!("CARGO_BIN_EXE_rook")),
+                &["--workspace", workspace.path().to_str().unwrap(), "tui"],
+                &[
+                    ("ROOK_HOME", home.path().to_str().unwrap()),
+                    ("ROOK_LOG", "error"),
+                    ("TERM", "xterm-256color"),
+                ],
+                100,
+                30,
+            )
+        } else {
+            tui(home.path(), workspace.path())
+        };
+        pty.screen(100, 30);
+        pty.send(&format!("/session {}\r", rook_store::format_session_id(session)));
+        pty.screen_showing(100, 30, "continuing");
+        pty.send("/environment\r");
+        pty.screen_showing(100, 30, "\"kind\": \"local\"");
+        pty.send("DRAFT_AFTER_ENVIRONMENT");
+        pty.screen_showing(100, 30, "DRAFT_AFTER_ENVIRONMENT");
+        drop(pty);
+        drop(daemon);
+        let store = rook_store::Store::open(home.path().join("store")).unwrap();
+        assert_eq!(
+            store.get_session(session).unwrap().unwrap().next_seq,
+            0,
+            "viewing must not submit a model prompt or rewrite retained source notes"
+        );
+    }
+}
+
+#[path = "../../rook-tools/tests/support/ssh.rs"]
+mod ssh_fixture;
+#[test]
+#[ignore = "requires owned SSH fixture"]
+fn actual_ssh_retained_sources_are_readable_in_both_tui_modes_without_running_a_model_or_command() {
+    use rook_tools::Tool;
+    let _one = one_at_a_time();
+    let server = ssh_fixture::Server::start();
+    for remote in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let mut ctx = server.context();
+        let settings = ctx.execution.as_ref().unwrap().settings.clone();
+        let config = rook_core::Config { execution_environment: settings.clone(), ..Default::default() };
+        let engine = rook_core::Rook::from_parts(
+            rook_store::Store::open(home.path().join("store")).unwrap(),
+            config,
+            rook_skills::Environment::bare("test", "test", "0.11.2"),
+            rook_skills::SkillIndex::default(),
+            ctx.workspace.clone(),
+        );
+        let owner = engine.start_session("SSH source viewer").unwrap();
+        ctx.execution = Some(std::sync::Arc::new(rook_tools::environments::Context {
+            settings,
+            state_root: home.path().join("output"),
+            pool: std::sync::Arc::new(rook_tools::environments::Pool::default()),
+        }));
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let result = runtime
+            .block_on(
+                rook_tools::exec::RunCommand
+                    .call(&ctx, &serde_json::json!({"command":"printf SSH_PTY_SOURCE > source"})),
+            )
+            .unwrap();
+        assert!(!result.is_error, "{}", result.content);
+        let call = result.meta["execution_environment"]["call"].as_str().unwrap().to_owned();
+        let workspace = ctx.workspace.clone();
+        drop(ctx);
+        drop(engine);
+        std::fs::write(home.path().join("config.toml"), format!(
+            "[execution_environment]\nselected='lab'\n[execution_environment.profiles.lab]\nkind='ssh'\nhost='rook-native'\nprogram={}\nremote_workspace='/tmp/rook-workspaces'\n",
+            serde_json::to_string(server.program.to_str().unwrap()).unwrap())).unwrap();
+        let daemon = remote.then(|| Daemon::start(home.path(), &workspace));
+        let mut pty = if remote {
+            Pty::spawn(
+                std::path::Path::new(env!("CARGO_BIN_EXE_rook")),
+                &["--workspace", workspace.to_str().unwrap(), "tui"],
+                &[
+                    ("ROOK_HOME", home.path().to_str().unwrap()),
+                    ("ROOK_LOG", "error"),
+                    ("TERM", "xterm-256color"),
+                ],
+                100,
+                30,
+            )
+        } else {
+            tui(home.path(), &workspace)
+        };
+        pty.screen(100, 30);
+        pty.send(&format!("/session {}\r", rook_store::format_session_id(owner)));
+        pty.screen_showing(100, 30, "continuing");
+        let request =
+            serde_json::json!({"action":"read", "call":call, "which":"after", "path":"source", "offset":0});
+        pty.send(&format!("/environment {request}\r"));
+        pty.screen_showing(100, 30, "U1NIX1BUWV9TT1VSQ0U=");
+        pty.send("DRAFT_AFTER_SSH_READ");
+        pty.screen_showing(100, 30, "DRAFT_AFTER_SSH_READ");
+        drop(pty);
+        drop(daemon);
+        assert_eq!(
+            rook_store::Store::open(home.path().join("store"))
+                .unwrap()
+                .get_session(owner)
+                .unwrap()
+                .unwrap()
+                .next_seq,
+            0,
+            "reading retained SSH bytes must not submit a prompt or create a command"
+        );
+        assert_eq!(std::fs::read_to_string(workspace.join("source")).unwrap(), "SSH_PTY_SOURCE");
+    }
+}
+
+#[test]
+fn knowledge_proposal_reads_preserve_the_draft_locally_and_through_the_daemon() {
+    let _one = one_at_a_time();
+    struct Finish;
+    #[async_trait::async_trait]
+    impl rook_llm::Provider for Finish {
+        fn id(&self) -> &str {
+            "fixture/learning-pty"
+        }
+        fn context_window(&self) -> usize {
+            32768
+        }
+        async fn complete(&self, request: rook_llm::Request) -> rook_llm::Result<rook_llm::Response> {
+            let text = if request
+                .messages
+                .first()
+                .is_some_and(|m| m.content.starts_with("Classify whether an assistant"))
+            {
+                r#"{"action":"finish"}"#
+            } else {
+                "Complete."
+            };
+            Ok(rook_llm::Response {
+                message: rook_llm::Message::assistant(text),
+                stop_reason: rook_llm::StopReason::EndTurn,
+                usage: Default::default(),
+                model: self.id().into(),
+            })
+        }
+    }
+    for remote in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let (session, events_before) = {
+            let mut c = rook_core::Config::default();
+            c.memory.enabled = false;
+            c.web.enabled = false;
+            let engine = rook_core::Rook::from_parts(
+                rook_store::Store::open(home.path().join("store")).unwrap(),
+                c,
+                rook_skills::Environment::bare("test", "test", "0.11.2"),
+                rook_skills::SkillIndex::default(),
+                workspace.path().into(),
+            );
+            let session = engine.start_session("learning viewer").unwrap();
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime
+                .block_on(
+                    rook_core::agent::AgentLoop::new(&engine, std::sync::Arc::new(Finish), session)
+                        .run("LEARNING_PTY_SOURCE"),
+                )
+                .unwrap();
+            let events = engine.store.events(session, 0, 128).unwrap();
+            let seq =
+                events.iter().find(|e| e.record.kind == rook_store::EventKind::UserMessage).unwrap().seq;
+            let result = events.iter().find(|e| e.record.label == "turn-result").unwrap().seq;
+            let request=rook_core::learning::arguments(&serde_json::json!({"action":"propose","result":result,"draft":{"target":{"kind":"memory","text":"LEARNING_PTY_SOURCE"},"reason":"Reviewed user source","evidence":[seq]}}).to_string()).unwrap();
+            runtime
+                .block_on(engine.learning_request(
+                    session,
+                    request,
+                    std::sync::Arc::new(rook_core::Vault::empty()),
+                ))
+                .unwrap();
+            let before = engine.store.get_session(session).unwrap().unwrap().next_seq;
+            (session, before)
+        };
+        let daemon = remote.then(|| Daemon::start(home.path(), workspace.path()));
+        let mut pty = if remote {
+            Pty::spawn(
+                std::path::Path::new(env!("CARGO_BIN_EXE_rook")),
+                &["--workspace", workspace.path().to_str().unwrap(), "tui"],
+                &[
+                    ("ROOK_HOME", home.path().to_str().unwrap()),
+                    ("ROOK_LOG", "error"),
+                    ("TERM", "xterm-256color"),
+                ],
+                100,
+                30,
+            )
+        } else {
+            tui(home.path(), workspace.path())
+        };
+        pty.screen(100, 30);
+        pty.send(&format!("/session {}\r", rook_store::format_session_id(session)));
+        pty.screen_showing(100, 30, "continuing");
+        pty.send("/learning\r");
+        pty.screen_showing(100, 30, "proposed");
+        pty.send("DRAFT_AFTER_LEARNING");
+        pty.screen_showing(100, 30, "DRAFT_AFTER_LEARNING");
+        drop(pty);
+        drop(daemon);
+        let store = rook_store::Store::open(home.path().join("store")).unwrap();
+        assert_eq!(
+            store.get_session(session).unwrap().unwrap().next_seq,
+            events_before,
+            "reading must not request a model or apply knowledge"
+        );
+        assert!(store.get_ref("memory/head").unwrap().is_none());
+    }
+}
+
+#[test]
+fn retained_inbound_receipts_are_readable_in_both_tui_modes_without_launching_a_task_or_losing_the_draft() {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let _one = one_at_a_time();
+    for remote in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let (receipt, parent) = {
+            let config=rook_core::Config { inbound:serde_json::from_value(serde_json::json!({"enabled":true,"routes":{"alpha":{"workspace":workspace.path(),"secret":"inbound","task":"INBOUND_PTY_OPERATOR_TASK"}}})).unwrap(),..Default::default() };
+            let engine = rook_core::Rook::from_parts(
+                rook_store::Store::open(home.path().join("store")).unwrap(),
+                config,
+                rook_skills::Environment::bare("test", "test", "0.11.2"),
+                rook_skills::SkillIndex::default(),
+                workspace.path().into(),
+            );
+            let mut vault = rook_core::Vault::load_from(home.path().join("secrets.toml")).unwrap();
+            let key = "inbound-private-pty-fixture-key";
+            vault.keep("inbound", key).unwrap();
+            let at = rook_core::work::managed::now().to_string();
+            let mut mac = Hmac::<Sha256>::new_from_slice(key.as_bytes()).unwrap();
+            mac.update(b"rook-inbound-v1\0");
+            for s in ["alpha", "pty-event", &at] {
+                mac.update(s.as_bytes());
+                mac.update(b"\0");
+            }
+            mac.update(b"{}");
+            let signature = format!("v1={}", hex::encode(mac.finalize().into_bytes()));
+            let accepted = engine
+                .receive_event(
+                    rook_core::inbound::Delivery {
+                        route: "alpha",
+                        id: "pty-event",
+                        timestamp: &at,
+                        signature: &signature,
+                        body: b"{}",
+                    },
+                    &vault,
+                )
+                .unwrap();
+            (
+                accepted["id"].as_str().unwrap().to_owned(),
+                rook_store::parse_session_id(accepted["session"].as_str().unwrap()).unwrap(),
+            )
+        };
+        // Historical receipts remain available with their handler disabled.
+        std::fs::write(home.path().join("config.toml"), "[inbound]\nenabled=false\n").unwrap();
+        let daemon = remote.then(|| Daemon::start(home.path(), workspace.path()));
+        let mut pty = if remote {
+            Pty::spawn(
+                std::path::Path::new(env!("CARGO_BIN_EXE_rook")),
+                &["--workspace", workspace.path().to_str().unwrap(), "tui"],
+                &[
+                    ("ROOK_HOME", home.path().to_str().unwrap()),
+                    ("ROOK_LOG", "error"),
+                    ("TERM", "xterm-256color"),
+                ],
+                100,
+                30,
+            )
+        } else {
+            tui(home.path(), workspace.path())
+        };
+        pty.screen(100, 30);
+        let request = serde_json::json!({"action":"inspect","id":receipt});
+        pty.send(&format!("/events {request}\r"));
+        pty.screen_showing(100, 30, "INBOUND_PTY_OPERATOR_TASK");
+        pty.send("DRAFT_AFTER_EVENT_READ");
+        pty.screen_showing(100, 30, "DRAFT_AFTER_EVENT_READ");
+        drop(pty);
+        drop(daemon);
+        let store = rook_store::Store::open(home.path().join("store")).unwrap();
+        assert_eq!(store.get_session(parent).unwrap().unwrap().next_seq, 1);
+        assert!(
+            store.kv_get("work/managed-index").unwrap().is_none(),
+            "inspection must not create a task or request a model"
+        );
+    }
+}
+
+#[test]
+fn telegram_delivery_inspection_preserves_the_draft_and_creates_no_model_turn_in_both_tui_modes() {
+    let _one = one_at_a_time();
+    for remote in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let parent = {
+            let config = rook_core::Config {
+                telegram: rook_core::telegram::Settings {
+                    enabled: true,
+                    secret: "bot".into(),
+                    workspace: workspace.path().canonicalize().unwrap().display().to_string(),
+                    allowed_users: vec![1],
+                    allowed_chats: vec![-10],
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let engine = rook_core::Rook::from_parts(
+                rook_store::Store::open(home.path().join("store")).unwrap(),
+                config,
+                rook_skills::Environment::bare("test", "test", "0.11.2"),
+                rook_skills::SkillIndex::default(),
+                workspace.path().into(),
+            );
+            engine.telegram_bot(123).unwrap();
+            engine.telegram_update(&serde_json::json!({"update_id":1,"message":{"chat":{"id":-10},"from":{"id":1,"is_bot":false},"text":"initial"}})).unwrap();
+            let route = engine.telegram_routes().unwrap().remove(0);
+            engine.telegram_reply("pty-message", &route, "TELEGRAM_PTY_RETAINED_RESPONSE").unwrap();
+            rook_store::parse_session_id(&route.session).unwrap()
+        };
+        std::fs::write(home.path().join("config.toml"), "[telegram]\nenabled=false\n").unwrap();
+        let daemon = remote.then(|| Daemon::start(home.path(), workspace.path()));
+        let mut pty = if remote {
+            Pty::spawn(
+                std::path::Path::new(env!("CARGO_BIN_EXE_rook")),
+                &["--workspace", workspace.path().to_str().unwrap(), "tui"],
+                &[
+                    ("ROOK_HOME", home.path().to_str().unwrap()),
+                    ("ROOK_LOG", "error"),
+                    ("TERM", "xterm-256color"),
+                ],
+                100,
+                30,
+            )
+        } else {
+            tui(home.path(), workspace.path())
+        };
+        pty.screen(100, 30);
+        pty.send("/telegram {\"action\":\"inspect\",\"id\":\"pty-message\"}\r");
+        pty.screen_showing(100, 30, "TELEGRAM_PTY_RETAINED_RESPONSE");
+        pty.send("DRAFT_AFTER_TELEGRAM_INSPECTION");
+        pty.screen_showing(100, 30, "DRAFT_AFTER_TELEGRAM_INSPECTION");
+        drop(pty);
+        drop(daemon);
+        let store = rook_store::Store::open(home.path().join("store")).unwrap();
+        assert_eq!(store.get_session(parent).unwrap().unwrap().next_seq, 1);
+        assert!(store.kv_get("work/managed-index").unwrap().is_none());
+    }
+}
+
+#[test]
+fn composite_recipe_receipt_pages_preserve_the_draft_without_replaying_stages_in_both_tui_modes() {
+    let _one = one_at_a_time();
+    for remote in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let parent = {
+            let engine = rook_core::Rook::from_parts(
+                rook_store::Store::open(home.path().join("store")).unwrap(),
+                rook_core::Config::default(),
+                rook_skills::Environment::bare("test", "test", "0.11.2"),
+                rook_skills::SkillIndex::default(),
+                workspace.path().into(),
+            );
+            let parent = engine.start_session("retained recipe stages").unwrap();
+            engine
+                .log(parent, rook_store::EventKind::Note, "recipe stage output", "RECIPE_PTY_RETAINED_OUTPUT")
+                .unwrap();
+            let event = engine.store.events(parent, 0, 1).unwrap().remove(0);
+            let book = serde_json::json!({"calls":[{"version":1,"id":"pty-call","turn":rook_store::format_session_id(rook_store::new_session_id()),"tool_call":"source","fingerprint":"fixture","mode":"sequential","state":"completed","definitions":[],"sources":{"0":event.record.body.to_hex()},"note":null,"stages":[{"id":"one","recipe":"analysis","parameters":{"focus":"PTY_STAGE_PARAMETER_MARKER"},"inputs":[],"child":null,"state":"completed","output":0,"error":null}]}]});
+            engine
+                .store
+                .kv_set(&format!("composite-recipes/{parent:032x}"), book.to_string().as_bytes())
+                .unwrap();
+            parent
+        };
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[agent]\nmodel='missing-offline-model'\ninstall_servers=false\n",
+        )
+        .unwrap();
+        let daemon = remote.then(|| Daemon::start(home.path(), workspace.path()));
+        let mut pty = if remote {
+            Pty::spawn(
+                std::path::Path::new(env!("CARGO_BIN_EXE_rook")),
+                &["--workspace", workspace.path().to_str().unwrap(), "tui"],
+                &[
+                    ("ROOK_HOME", home.path().to_str().unwrap()),
+                    ("ROOK_LOG", "error"),
+                    ("TERM", "xterm-256color"),
+                ],
+                100,
+                30,
+            )
+        } else {
+            tui(home.path(), workspace.path())
+        };
+        pty.screen(100, 30);
+        pty.send(&format!("/session {}\r", rook_store::format_session_id(parent)));
+        pty.screen_showing(100, 30, "continuing");
+        pty.send("/recipes {\"action\":\"parameters\",\"id\":\"pty-call\",\"stage\":\"one\",\"offset\":0}\r");
+        pty.screen_showing(100, 30, "bytes_base64");
+        pty.send("DRAFT_AFTER_RECIPE_READ");
+        pty.screen_showing(100, 30, "DRAFT_AFTER_RECIPE_READ");
+        drop(pty);
+        drop(daemon);
+        let store = rook_store::Store::open(home.path().join("store")).unwrap();
+        assert_eq!(store.get_session(parent).unwrap().unwrap().next_seq, 1);
+        for meta in store.list_sessions().unwrap() {
+            if meta.id != parent {
+                assert_eq!(meta.next_seq, 0, "inspection started a new conversation turn");
+            }
+            assert!(
+                store.kv_get(&format!("execution/{:032x}", meta.id)).unwrap().is_none(),
+                "inspection created an execution receipt"
+            );
+        }
+    }
+}
+
+#[path = "support/model.rs"]
+mod fixture_model;
+
+#[test]
+fn an_external_acp_executor_runs_through_both_tui_modes_and_keeps_its_linked_child_history() {
+    let _one = one_at_a_time();
+    for remote in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = calls.clone();
+        let server = fixture_model::Server::new(move |_, request| {
+            if request["stream"] == true {
+                assert_eq!(
+                    seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+                    0,
+                    "no additional native allowance may be invented after an external result"
+                );
+                let delta = serde_json::json!({"tool_calls":[{"index":0,"id":"tui-external","type":"function","function":{"name":"delegate","arguments":serde_json::json!({"task":"write the TUI fixture","executor":"owned"}).to_string()}}]});
+                let frame = serde_json::json!({"choices":[{"index":0,"delta":delta,"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5}});
+                Some(("text/event-stream", format!("data: {frame}\n\ndata: [DONE]\n\n")))
+            } else {
+                Some(("application/json", serde_json::json!({"data":[]}).to_string()))
+            }
+        });
+        let binary = std::path::Path::new(env!("CARGO_BIN_EXE_rook")).with_file_name(if cfg!(windows) {
+            "mcp-mock.exe"
+        } else {
+            "mcp-mock"
+        });
+        assert!(binary.is_file(), "build the owned process fixture first");
+        let mut config = rook_core::Config::default();
+        config.agent.model = "local".into();
+        config.agent.install_servers = false;
+        config.agent.plan_first = false;
+        config.memory.enabled = false;
+        config.sandbox.stance = rook_tools::policy::Stance::Autonomous;
+        config.models.insert(
+            "local".into(),
+            rook_core::config::ModelSource {
+                api: "openai".into(),
+                model: "test".into(),
+                url: format!("{}/v1", server.url),
+                context_window: Some(128000),
+                ..Default::default()
+            },
+        );
+        config.acp_executor.profiles.insert(
+            "owned".into(),
+            rook_core::acp_executor::Profile {
+                command: binary.to_string_lossy().into_owned(),
+                args: vec![
+                    "acp-write".into(),
+                    home.path().join("process.json").to_string_lossy().into_owned(),
+                ],
+                trusted: true,
+                env: Default::default(),
+            },
+        );
+        std::fs::write(home.path().join("config.toml"), config.as_written().unwrap()).unwrap();
+        let daemon = remote.then(|| Daemon::start(home.path(), workspace.path()));
+        let mut pty = tui(home.path(), workspace.path());
+        pty.screen(100, 30);
+        pty.send("run the external executor\r");
+        pty.screen_showing(100, 30, "complete cost report");
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("fixture.txt")).unwrap(),
+            "owned ACP change\n"
+        );
+        pty.send("DRAFT_AFTER_EXTERNAL_ACP");
+        pty.screen_showing(100, 30, "DRAFT_AFTER_EXTERNAL_ACP");
+        drop(pty);
+        drop(daemon);
+        let store = rook_store::Store::open(home.path().join("store")).unwrap();
+        let sessions = store.list_sessions().unwrap();
+        let child = sessions.iter().find(|m| m.model == "acp/owned").unwrap();
+        assert!(child.parent.is_some());
+        let events = store.events(child.id, 0, 128).unwrap();
+        assert_eq!(events.iter().filter(|e|e.record.kind==rook_store::EventKind::ToolCall&&e.record.label=="write_file").count(),1);
+        assert!(events.iter().any(|e| e.record.kind == rook_store::EventKind::AssistantMessage));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
 }

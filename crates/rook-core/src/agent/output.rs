@@ -13,6 +13,15 @@ impl<'a> AgentLoop<'a> {
         outcome: &mut TurnOutcome,
         on_progress: &mut impl FnMut(Progress<'_>),
     ) -> Result<()> {
+        if self.review_only {
+            let narrative =
+                super::review::normalize_reply(&mut outcome.reply, self.rook.config.review.page_bytes)?;
+            if !narrative && let Some(why) = contract.violation(&outcome.reply) {
+                return Err(CoreError::Other(format!(
+                    "structured review answer failed output schema: {why}"
+                )));
+            }
+        }
         let mut attempts = 0;
         while let Some(why) = contract.violation(&outcome.reply) {
             if !finished(&outcome.stopped) || attempts >= self.turn_options().schema_retries {

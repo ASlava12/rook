@@ -61,6 +61,19 @@ fn editor() -> Result<rustyline::Editor<Pasting, rustyline::history::DefaultHist
 /// help text and the TUI's completion both answer "what can I type here" and a
 /// second hand-written copy of the answer is one that drifts.
 pub const COMMANDS: &[(&str, &str, &str)] = &[
+    ("recall", "<literal text|JSON request>", "find previous conversations in this workspace"),
+    (
+        "shell-undo",
+        "[JSON action]",
+        "inspect shell changes, prepare selected restore, or recover an interrupted capture",
+    ),
+    ("recipes", "[JSON action]", "inspect composite recipe stages and sources"),
+    ("telegram", "[JSON action]", "inspect bot routing and outbound deliveries"),
+    ("events", "[JSON action]", "inspect durable inbound deliveries and their task sources"),
+    ("environment", "[JSON action]", "inspect or release the selected execution resource"),
+    ("learning", "[JSON action]", "review, apply or roll back task-grounded knowledge proposals"),
+    ("experiment", "[JSON action]", "create, run, compare and inspect an experiment tree"),
+    ("review", "[JSON action]", "capture/inspect a frozen review or add source-bound comments"),
     ("diagnostics", "[--logs] [new-file-path]", "export local diagnostics; logs are opt-in"),
     ("worktree", "CHILD [restore REVIEW_TOKEN]", "diagnose/restore a missing registered child checkout"),
     ("export-html", "[FROM..THROUGH] NEW_FILE", "download bounded saved history as local HTML"),
@@ -699,6 +712,83 @@ async fn through_the_daemon(
                         summary_boundary = None;
                     }
                 }
+                "telegram" => {
+                    let text = rest.to_owned();
+                    let workspace = workspace.to_path_buf();
+                    let result = tokio::task::spawn_blocking(move || -> Result<String> {
+                        crate::source::Source::open(Some(workspace))?.telegram_command(&text)
+                    })
+                    .await;
+                    match result {
+                        Ok(Ok(text)) => println!("{text}"),
+                        Ok(Err(e)) => eprintln!("{e}"),
+                        Err(e) => eprintln!("Telegram inspection failed: {e}"),
+                    }
+                }
+                "events" => {
+                    let text = rest.to_owned();
+                    let workspace = workspace.to_path_buf();
+                    let result = tokio::task::spawn_blocking(move || -> Result<String> {
+                        crate::source::Source::open(Some(workspace))?.events_command(&text)
+                    })
+                    .await;
+                    match result {
+                        Ok(Ok(text)) => println!("{text}"),
+                        Ok(Err(e)) => eprintln!("{e}"),
+                        Err(e) => eprintln!("event inspection failed: {e}"),
+                    }
+                }
+                "recall" => {
+                    let text = rest.to_owned();
+                    let workspace = workspace.to_path_buf();
+                    let result = tokio::task::spawn_blocking(move || -> Result<String> {
+                        let source = crate::source::Source::open(Some(workspace))?;
+                        let request = rook_core::session_recall::arguments(&text)?;
+                        Ok(rook_core::session_recall::describe(&source.session_recall(&request)?))
+                    })
+                    .await;
+                    match result {
+                        Ok(Ok(text)) => println!("{text}"),
+                        Ok(Err(error)) => eprintln!("{error}"),
+                        Err(error) => eprintln!("recall failed: {error}"),
+                    }
+                }
+                "review" | "shell-undo" | "experiment" | "learning" | "environment" | "recipes" => {
+                    let recipes = name == "recipes";
+                    let environment = name == "environment";
+                    let learning = name == "learning";
+                    let experiment = name == "experiment";
+                    let shell_undo = name == "shell-undo";
+                    let text = rest.to_owned();
+                    let workspace = workspace.to_path_buf();
+                    let owner = session.clone();
+                    let result = tokio::task::spawn_blocking(move || -> Result<String> {
+                        let source = crate::source::Source::open(Some(workspace))?;
+                        let owner =
+                            owner.as_deref().and_then(rook_store::parse_session_id).ok_or_else(|| {
+                                anyhow::anyhow!("start or resume a session before this operation")
+                            })?;
+                        if recipes {
+                            source.recipes_command(owner, &text)
+                        } else if environment {
+                            source.environment_command(owner, &text)
+                        } else if learning {
+                            source.learning_command(owner, &text)
+                        } else if experiment {
+                            source.experiment_command(owner, &text)
+                        } else if shell_undo {
+                            source.shell_undo_command(owner, &text)
+                        } else {
+                            source.review_command(owner, &text)
+                        }
+                    })
+                    .await;
+                    match result {
+                        Ok(Ok(text)) => println!("{text}"),
+                        Ok(Err(error)) => eprintln!("{error}"),
+                        Err(error) => eprintln!("session operation failed: {error}"),
+                    }
+                }
                 "followup" => {
                     if let Some(session) = session.as_deref().and_then(rook_store::parse_session_id) {
                         let text = rest.to_string();
@@ -1278,6 +1368,50 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
                 output.display(),
                 report.shortened
             );
+        }
+        "recall" => {
+            let request = rook_core::session_recall::arguments(rest)?;
+            say!("{}", rook_core::session_recall::describe(&rook.session_recall(&request)?));
+        }
+        "telegram" => {
+            let report = rook.telegram_request(rook_core::telegram::arguments(rest)?)?;
+            say!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        "events" => {
+            let report = rook.event_request(rook_core::inbound::arguments(rest)?)?;
+            say!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        "recipes" => {
+            let report = rook.composite_request(*session, rook_core::composite_recipes::arguments(rest)?)?;
+            say!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        "environment" => {
+            let report =
+                rook.environment_request(*session, rook_core::environments::arguments(rest)?).await?;
+            say!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        "learning" => {
+            let request = rook_core::learning::arguments(rest)?;
+            let report = rook
+                .learning_request(*session, request, std::sync::Arc::new(rook_core::Vault::load()?))
+                .await?;
+            say!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        "experiment" => {
+            let request = rook_core::experiments::arguments(rest)?;
+            let report = rook
+                .experiment_request(*session, request, std::sync::Arc::new(rook_core::Vault::load()?))
+                .await?;
+            say!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        "shell-undo" => {
+            let report = rook.shell_undo_request(*session, rook_core::shell_undo::arguments(rest)?)?;
+            say!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        "review" => {
+            let vault = rook_core::Vault::load()?;
+            let report = rook.review_request(*session, rook_core::review::arguments(rest)?, &vault).await?;
+            say!("{}", serde_json::to_string_pretty(&report)?);
         }
         "worktree" => {
             let (child, token) = crate::commands::sessions::worktree_arguments(rest)?;

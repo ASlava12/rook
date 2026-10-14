@@ -5,6 +5,7 @@
 //! to *use* the agent rather than only to read what it did.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -25,6 +26,7 @@ use rook_tools::policy::{Approval, ChannelApprover};
 use crate::AppState;
 
 use rook_core::delivery;
+pub(crate) mod activity;
 pub(crate) mod followups;
 mod replay;
 
@@ -1225,6 +1227,8 @@ async fn send_inputs(live: &Live, to_window: &delivery::Sender) -> Result<(), de
 }
 
 /// Start a turn that belongs to the daemon.
+pub(crate) mod telegram;
+
 enum StartTurn {
     Prompt(String, Option<String>),
     FollowUps,
@@ -1252,6 +1256,8 @@ async fn begin(
     let (from_turn, events) = mpsc::unbounded_channel::<ChatEvent>();
     let (approver, relay) = approver(from_turn.clone(), patience, input_limits);
     let (asker, ask_relay) = asker(from_turn.clone(), deciding, input_limits);
+    let activity = activity::Observation::new(&*engine.read().await, session);
+    let watchdog = activity.start(approver.clone(), asker.clone(), from_turn.clone());
 
     let (said, _) = tokio::sync::broadcast::channel::<u64>(BROADCAST);
     let replay_limits = engine.read().await.config.server.clone();
@@ -1266,25 +1272,44 @@ async fn begin(
     let counted = state.turn_started();
     let running_turn = turn(
         engine.clone(),
-        Connection { approver: approver.clone(), asker: asker.clone(), settings: settings.clone(), options },
+        Connection {
+            approver: approver.clone(),
+            asker: asker.clone(),
+            settings: settings.clone(),
+            options,
+            activity: Some(activity.clone()),
+        },
         shared.clone(),
         from_turn,
         session,
         prompt,
     );
-    let helpers = vec![relay.abort_handle(), ask_relay.abort_handle()];
+    let helpers = vec![relay.abort_handle(), ask_relay.abort_handle(), watchdog.abort_handle()];
     let ending = helpers.clone();
+    let completed = Arc::new(AtomicBool::new(false));
     let task = tokio::spawn({
-        let (said, backlog) = (said.clone(), backlog.clone());
+        let (said, backlog, activity) = (said.clone(), backlog.clone(), activity.clone());
+        let completed = completed.clone();
         async move {
             // Dropped with the future, so a cancelled turn stops being counted
             // where it stops running.
             let _counted = counted;
-            everything_it_says(running_turn, events, said, backlog, ending).await;
+            everything_it_says(running_turn, events, said, backlog, ending, Some(activity), completed).await;
         }
     });
 
-    Arc::new(Live { task, helpers, said, backlog, approver, asker, settings: settings.clone() })
+    Arc::new(Live {
+        epoch: rook_store::format_session_id(rook_store::new_session_id()),
+        task,
+        helpers,
+        said,
+        backlog,
+        approver,
+        asker,
+        settings: settings.clone(),
+        activity: Some(activity),
+        completed,
+    })
 }
 
 fn session_goal(rook: &rook_core::Rook, session: u128) -> Result<Option<Run>, String> {
@@ -1367,6 +1392,9 @@ where
 /// approver and the asker belong to the turn, so a question put while nobody
 /// was watching is still there to answer when somebody is.
 pub struct Live {
+    epoch: String,
+    activity: Option<Arc<activity::Observation>>,
+    completed: Arc<AtomicBool>,
     /// Aborting this is what `Cancel` means, and the only thing that ends a
     /// turn early. A window closing is a window closing.
     task: tokio::task::JoinHandle<()>,
@@ -1414,6 +1442,8 @@ async fn everything_it_says(
     said: tokio::sync::broadcast::Sender<u64>,
     backlog: Arc<std::sync::Mutex<replay::Replay>>,
     ending: Vec<tokio::task::AbortHandle>,
+    activity: Option<Arc<activity::Observation>>,
+    completed: Arc<AtomicBool>,
 ) {
     tokio::pin!(running_turn);
     loop {
@@ -1421,7 +1451,13 @@ async fn everything_it_says(
             // What has been said goes out before the turn is noticed to have
             // ended, so the two cannot swap places.
             biased;
-            Some(event) = events.recv() => fan_out(&backlog, &said, event),
+            Some(event) = events.recv() => {
+                if matches!(event, ChatEvent::Done { .. } | ChatEvent::Failed { .. } | ChatEvent::Cancelled) {
+                    if let Some(activity) = &activity { activity.observe(&event); }
+                    completed.store(true, Ordering::Release);
+                }
+                fan_out(&backlog, &said, event);
+            },
             () = &mut running_turn => break,
         }
     }
@@ -1436,7 +1472,16 @@ async fn everything_it_says(
     // reading it out is exact rather than a pause long enough to probably be
     // enough.
     while let Ok(event) = events.try_recv() {
+        if matches!(event, ChatEvent::Done { .. } | ChatEvent::Failed { .. } | ChatEvent::Cancelled) {
+            if let Some(activity) = &activity {
+                activity.observe(&event);
+            }
+            completed.store(true, Ordering::Release);
+        }
         fan_out(&backlog, &said, event);
+    }
+    if let Some(activity) = &activity {
+        activity.finish();
     }
 }
 
@@ -1460,6 +1505,9 @@ fn fan_out(
 const BROADCAST: usize = 4_096;
 
 impl Live {
+    pub(crate) fn activity(&self) -> Option<rook_proto::activity::Snapshot> {
+        self.activity.as_ref().map(|activity| activity.snapshot(self.running()))
+    }
     pub(crate) fn queue_notice(&self, receipt: rook_proto::queue::Notice, text: String) {
         if self.running() {
             let status = match receipt.status {
@@ -1495,7 +1543,10 @@ impl Live {
         asker: Arc<ChannelAsker>,
     ) -> Self {
         Self {
+            epoch: rook_store::format_session_id(rook_store::new_session_id()),
             task,
+            activity: None,
+            completed: Default::default(),
             helpers,
             said,
             backlog: Default::default(),
@@ -1506,7 +1557,9 @@ impl Live {
     }
 
     pub fn running(&self) -> bool {
-        !self.task.is_finished()
+        // Publishing an ending commits completion, even while helpers and
+        // persisted observations are still being cleaned up.
+        !self.completed.load(Ordering::Acquire) && !self.task.is_finished()
     }
 
     /// Everything said so far, then everything said from now on.
@@ -1523,6 +1576,10 @@ impl Live {
             .filter(|event| !matches!(event, ChatEvent::Approval { .. } | ChatEvent::Ask { .. }))
             .collect();
         missed.extend(self.inputs());
+        if let Some(state) = self.activity() {
+            missed.retain(|event| !matches!(event, ChatEvent::Activity { .. }));
+            missed.push(ChatEvent::Activity { state });
+        }
         (live, missed, truncated)
     }
 
@@ -1568,6 +1625,7 @@ impl Live {
 
 #[derive(Clone)]
 struct Connection {
+    activity: Option<Arc<activity::Observation>>,
     options: rook_proto::TurnOptions,
     approver: Arc<ChannelApprover>,
     asker: Arc<ChannelAsker>,
@@ -1624,12 +1682,19 @@ async fn turn(
     let shared = shared.get_or_init(|| Shared::for_project(&rook)).await;
 
     let mut agent = AgentLoop::new(&rook, provider.into(), session);
+    agent.observer = connection
+        .activity
+        .clone()
+        .map(|observation| observation as Arc<dyn rook_core::agent::observe::Observer>);
     agent.submission_key = match &prompt {
         StartTurn::Prompt(_, key) => key.clone(),
         StartTurn::FollowUps => None,
     };
     followups::configure(&mut agent, connection.settings.clone());
     agent.policy = connection.settings.policy.clone();
+    if let Err(e) = telegram::configure(&mut agent) {
+        return ended_badly(&rook, session, &outbound, e.to_string());
+    }
     agent.effort = connection.settings.effort();
     agent.approver = connection.approver.clone();
     agent.ask_via(connection.asker.clone());
@@ -1752,8 +1817,13 @@ async fn goal_turn(
                 let named = connection.settings.model();
                 let provider = rook_core::models::chosen(&rook.config, named.as_deref())?;
                 let mut agent = AgentLoop::new(&rook, provider.into(), session);
+                agent.observer = connection
+                    .activity
+                    .clone()
+                    .map(|observation| observation as Arc<dyn rook_core::agent::observe::Observer>);
                 followups::configure(&mut agent, connection.settings.clone());
                 agent.policy = connection.settings.policy.clone();
+                telegram::configure(&mut agent)?;
                 agent.effort = connection.settings.effort();
                 agent.approver = connection.approver.clone();
                 agent.ask_via(connection.asker.clone());
@@ -1843,8 +1913,16 @@ async fn ended_goal(
             }
         };
         let mut agent = AgentLoop::new(rook, provider.into(), session);
+        agent.observer = connection
+            .activity
+            .clone()
+            .map(|observation| observation as Arc<dyn rook_core::agent::observe::Observer>);
         followups::configure(&mut agent, connection.settings.clone());
         agent.policy = connection.settings.policy.clone();
+        if let Err(e) = telegram::configure(&mut agent) {
+            ended_badly(rook, session, outbound, e.to_string());
+            return false;
+        }
         agent.effort = connection.settings.effort();
         agent.approver = connection.approver.clone();
         agent.ask_via(connection.asker.clone());
@@ -2212,7 +2290,10 @@ mod tests {
             approver(to_turn.clone(), std::time::Duration::from_secs(1), Default::default());
         let (asker, ask_relay) = asker(to_turn, std::time::Duration::from_secs(1), Default::default());
         Live {
+            epoch: rook_store::format_session_id(rook_store::new_session_id()),
             task: tokio::spawn(std::future::pending()),
+            activity: None,
+            completed: Default::default(),
             helpers: vec![relay.abort_handle(), ask_relay.abort_handle()],
             said,
             backlog: Default::default(),
@@ -2602,7 +2683,7 @@ mod tests {
         };
         drop(from_turn);
 
-        everything_it_says(turn, events, said, backlog.clone(), vec![]).await;
+        everything_it_says(turn, events, said, backlog.clone(), vec![], None, Default::default()).await;
 
         let watched: Vec<ChatEvent> = std::iter::from_fn(|| watching.try_recv().ok())
             .map(|sequence| backlog.lock().unwrap().get(sequence).unwrap())
@@ -2615,6 +2696,32 @@ mod tests {
             matches!(kept.last(), Some(ChatEvent::Cancelled)),
             "a window attaching afterwards reads {kept:?} and would wait for an ending that had passed"
         );
+    }
+
+    #[tokio::test]
+    async fn publishing_an_ending_finishes_the_owner_before_cleanup_returns() {
+        let (said, mut watching) = tokio::sync::broadcast::channel(8);
+        let mut live = parked(said.clone());
+        live.task.abort();
+        let (outbound, events) = mpsc::unbounded_channel();
+        let (release, cleanup) = tokio::sync::oneshot::channel();
+        live.task = tokio::spawn(everything_it_says(
+            async move {
+                outbound.send(ChatEvent::Cancelled).unwrap();
+                cleanup.await.unwrap();
+            },
+            events,
+            said,
+            live.backlog.clone(),
+            Vec::new(),
+            None,
+            live.completed.clone(),
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(10), watching.recv()).await.unwrap().unwrap();
+        assert!(!live.task.is_finished(), "cleanup is still blocked until explicitly released");
+        assert!(!live.running(), "a retry after the ending must not attach to a finished turn");
+        release.send(()).unwrap();
+        live.shutdown().await;
     }
 
     /// A turn that ends badly says why in the session, not only to the window.
@@ -2652,6 +2759,7 @@ mod tests {
             engine.clone(),
             Connection {
                 options: Default::default(),
+                activity: None,
                 approver,
                 asker,
                 settings: Arc::new(Settings::for_test()),

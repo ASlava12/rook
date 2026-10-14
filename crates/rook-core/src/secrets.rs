@@ -292,6 +292,18 @@ impl Vault {
     /// base64'd, or printed a character at a time goes through. What it stops is
     /// the ordinary way a secret ends up in a transcript — `echo $TOKEN`, a
     /// curl trace, a config file printed by `cat`.
+    // Review anchors must survive redaction of multiline credential values.
+    pub(crate) fn redact_source(&self, text: &str) -> String {
+        let handed = self.handed_out.lock().unwrap_or_else(|error| error.into_inner());
+        let mut output = text.to_owned();
+        for value in handed.iter().filter(|value| value.len() >= 6) {
+            let replacement =
+                format!("${{secret}}{}", "\n".repeat(value.bytes().filter(|byte| *byte == b'\n').count()));
+            output = output.replace(value.as_str(), &replacement);
+        }
+        output
+    }
+
     pub fn redact(&self, text: &str) -> String {
         let handed = self.handed_out.lock().unwrap_or_else(|e| e.into_inner());
         let mut out = text.to_string();

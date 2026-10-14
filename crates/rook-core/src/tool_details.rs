@@ -65,7 +65,19 @@ pub(crate) fn note(
         }
         // Sentinel -1 means signal termination or unavailable status, not an
         // exit code supplied by a completed process.
-        ToolResultDetails::Command { exit_code: exit_code.filter(|code| *code >= 0), timed_out, running }
+        ToolResultDetails::Command {
+            exit_code: exit_code.filter(|code| *code >= 0),
+            timed_out,
+            running,
+            environment: outcome.meta.get("execution_environment").and_then(|meta| {
+                let env = crate::transcript::EnvironmentDetails {
+                    profile: meta.get("profile")?.as_str()?.to_owned(),
+                    kind: meta.get("kind")?.as_str()?.to_owned(),
+                    resource: meta.get("resource")?.as_str()?.to_owned(),
+                };
+                env.valid().then_some(env)
+            }),
+        }
     } else if name == "search" {
         ToolResultDetails::Search {
             matches: outcome.meta.get("matches")?.as_u64()?,
@@ -144,9 +156,10 @@ pub(crate) fn load(rook: &Rook, result: &Event) -> Result<Option<ToolDetails>> {
         return Ok(None);
     }
     let valid = match &note.result {
-        ToolResultDetails::Command { exit_code, timed_out, running } => {
+        ToolResultDetails::Command { exit_code, timed_out, running, environment } => {
             matches!(note.tool.as_str(), "run_command" | "job")
                 && exit_code.is_none_or(|code| code >= 0)
+                && environment.as_ref().is_none_or(|env| env.valid())
                 && !(*timed_out && *running)
                 && (!(*timed_out || *running) || exit_code.is_none())
         }

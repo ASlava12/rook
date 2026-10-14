@@ -34,6 +34,16 @@ pub(crate) enum Command {
     Init,
     /// Report what Rook detected about this machine and what it means for skills.
     Doctor,
+    /// Inspect durable inbound delivery receipts; empty lists the newest page.
+    Events {
+        #[arg(default_value = "")]
+        request: String,
+    },
+    /// Inspect Telegram routing and outbound delivery decisions.
+    Telegram {
+        #[arg(default_value = "")]
+        request: String,
+    },
     /// Check GitHub for a newer rook, and fetch it.
     ///
     /// The previous version is kept beside the new one as `rook.previous`, so
@@ -530,6 +540,50 @@ pub(crate) enum SessionCmd {
         /// Every workspace, not just this one.
         #[arg(long)]
         all: bool,
+    },
+    /// Find previous conversations in the current workspace, or read a hit.
+    Recall {
+        /// Literal search text, or a JSON request with session/around/cursor.
+        request: String,
+    },
+    /// Inspect composite recipe stages, bounded sources and reviewed interruptions.
+    Recipes {
+        id: String,
+        #[arg(default_value = "")]
+        request: String,
+    },
+    /// Inspect the selected execution environment or explicitly release a retained resource.
+    Environment {
+        id: String,
+        #[arg(default_value = "")]
+        request: String,
+    },
+    /// Review, revise, apply and undo task-grounded knowledge proposals.
+    Learning {
+        id: String,
+        /// JSON action; empty lists reviewable knowledge proposals.
+        #[arg(default_value = "")]
+        request: String,
+    },
+    /// Create, run, compare and inspect a retained experiment tree.
+    Experiment {
+        id: String,
+        /// JSON action; empty lists the experiment tree.
+        #[arg(default_value = "")]
+        request: String,
+    },
+    /// Inspect shell preimages, prepare selected restore, or recover interrupted captures.
+    ShellUndo {
+        id: String,
+        #[arg(default_value = "")]
+        request: String,
+    },
+    /// Capture/inspect a frozen review, read its source, or add line comments.
+    Review {
+        id: String,
+        /// JSON action; empty captures current working changes.
+        #[arg(default_value = "")]
+        request: String,
     },
     /// Browse a bounded page (newest by default), or jump to one event.
     History {

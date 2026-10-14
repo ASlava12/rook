@@ -90,10 +90,16 @@ impl Sender {
     }
 
     pub async fn send(&self, event: ChatEvent) -> Result<(), Closed> {
+        self.send_serialized(&event).await
+    }
+
+    /// Borrowed protocol payloads use the same escaped-byte admission before
+    /// encoding; a replay can await capacity without retaining a second queue.
+    pub async fn send_serialized(&self, event: &impl serde::Serialize) -> Result<(), Closed> {
         let slot = self.slots.clone().acquire_owned().await.map_err(|_| Closed)?;
         // Count escaped JSON without allocating it; byte admission precedes
         // encoding, so waiting producers cannot accumulate encoded frames.
-        let Some(size) = encoded_size(&event, self.limit) else {
+        let Some(size) = encoded_size(event, self.limit) else {
             // A partial event is not an approval or a terminal result. Close
             // this view instead of silently dropping an oversized event.
             self.failed.send_replace(true);
@@ -103,7 +109,7 @@ impl Sender {
         };
         let bytes = self.bytes.clone().acquire_many_owned(size as u32).await.map_err(|_| Closed)?;
         let mut encoded = Vec::with_capacity(size);
-        serde_json::to_writer(&mut encoded, &event).map_err(|_| Closed)?;
+        serde_json::to_writer(&mut encoded, event).map_err(|_| Closed)?;
         let text = String::from_utf8(encoded).map_err(|_| Closed)?;
         self.frames.send(Frame { text, _slot: slot, _bytes: bytes }).await.map_err(|_| Closed)
     }

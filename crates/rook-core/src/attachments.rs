@@ -12,7 +12,7 @@ pub const MAX_ATTACHMENTS: usize = rook_llm::images::MAX_IMAGES_PER_MESSAGE;
 pub const MAX_IMAGE_BYTES: usize = rook_llm::images::MAX_IMAGE_BYTES;
 pub const MAX_TEXT_BYTES: usize = 256 * 1024;
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
-pub(crate) const LABEL: &str = "rook:attachments:v1";
+pub const LABEL: &str = "rook:attachments:v1";
 
 /// Material returned to an editor; it is never an automatic submission.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -188,7 +188,10 @@ pub fn from_file(path: &Path, is_image: bool) -> Result<Attachment> {
     Ok(attachment)
 }
 
-pub(crate) fn decode(body: &str) -> Result<Message> {
+pub fn decode(body: &str) -> Result<Message> {
+    if body.len() > MAX_FRAME_BYTES {
+        return Err(bad("stored attachment message exceeds 16 MiB"));
+    }
     let message: Message = serde_json::from_str(body)?;
     if message.role != rook_llm::Role::User || message.images.len() > MAX_ATTACHMENTS {
         return Err(bad("invalid stored attachment message"));

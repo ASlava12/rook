@@ -54,6 +54,48 @@ pub(crate) fn diagnostic_arguments(arguments: &str) -> Result<(bool, std::path::
 }
 
 pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, json: bool) -> Result<()> {
+    if let SessionCmd::Recipes { id, request } = &cmd {
+        let session = source.session_named(id, workspace)?;
+        println!("{}", source.recipes_command(session, request)?);
+        return Ok(());
+    }
+    if let SessionCmd::Environment { id, request } = &cmd {
+        let session = source.session_named(id, workspace)?;
+        println!("{}", source.environment_command(session, request)?);
+        return Ok(());
+    }
+    if let SessionCmd::Learning { id, request } = &cmd {
+        let session = source.session_named(id, workspace)?;
+        println!("{}", source.learning_command(session, request)?);
+        return Ok(());
+    }
+    if let SessionCmd::Experiment { id, request } = &cmd {
+        let session = source.session_named(id, workspace)?;
+        println!("{}", source.experiment_command(session, request)?);
+        return Ok(());
+    }
+    if let SessionCmd::ShellUndo { id, request } = &cmd {
+        let session = source.session_named(id, workspace)?;
+        println!("{}", source.shell_undo_command(session, request)?);
+        return Ok(());
+    }
+    if let SessionCmd::Review { id, request } = &cmd {
+        let session = source.session_named(id, workspace)?;
+        println!("{}", source.review_command(session, request)?);
+        return Ok(());
+    }
+    if let SessionCmd::Recall { request } = &cmd {
+        let response = source.session_recall(&rook_core::session_recall::arguments(request)?)?;
+        println!(
+            "{}",
+            if json {
+                serde_json::to_string_pretty(&response)?
+            } else {
+                rook_core::session_recall::describe(&response)
+            }
+        );
+        return Ok(());
+    }
     if let SessionCmd::Worktree { parent, child, restore } = &cmd {
         let parent = source.session_named(parent, workspace)?;
         let child = session_id(child)?;
@@ -382,6 +424,13 @@ pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, js
         | SessionCmd::Turns { .. }
         | SessionCmd::Queue { .. }
         | SessionCmd::History { .. }
+        | SessionCmd::Recall { .. }
+        | SessionCmd::Review { .. }
+        | SessionCmd::ShellUndo { .. }
+        | SessionCmd::Experiment { .. }
+        | SessionCmd::Recipes { .. }
+        | SessionCmd::Environment { .. }
+        | SessionCmd::Learning { .. }
         | SessionCmd::ExportHtml { .. }
         | SessionCmd::Find { .. }
         | SessionCmd::Entry { .. }

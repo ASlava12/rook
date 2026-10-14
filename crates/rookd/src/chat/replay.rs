@@ -171,6 +171,7 @@ fn state_kind(event: &ChatEvent) -> Option<u8> {
         ChatEvent::Spent { .. } => Some(1),
         ChatEvent::Step { .. } => Some(2),
         ChatEvent::ModelRequest { .. } => Some(3),
+        ChatEvent::Activity { .. } => Some(4),
         _ => None,
     }
 }

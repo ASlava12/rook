@@ -198,6 +198,41 @@ async fn dropping_a_server_takes_its_child_process_with_it() {
     panic!("the child outlived the session it belonged to");
 }
 
+#[tokio::test]
+async fn process_admission_refuses_before_spawn_and_shutdown_releases_the_reservation() {
+    let _one = one_at_a_time().await;
+    let server = Server::connect(&mock("ok"), &Default::default()).await.unwrap();
+    assert!(server.child_pid().await.is_some(), "one process must already own capacity");
+    let mut refused = mock("ok");
+    refused.stdio_max_processes = 1;
+    refused.command = "rook-this-program-must-not-be-started".into();
+    let error = match Server::connect(&refused, &Default::default()).await {
+        Ok(_) => panic!("admission must refuse at the process bound"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("process budget reached"), "{error}");
+    server.shutdown().await;
+    let mut fresh = mock("ok");
+    fresh.stdio_max_processes = 1;
+    // Earlier restart tests may still be gracefully closing another driver.
+    // Reconnect only after that explicit resource refusal, never after an effect.
+    let connected = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            match Server::connect(&fresh, &Default::default()).await {
+                Ok(server) => break server,
+                Err(error) if error.to_string().contains("process budget reached") => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(error) => panic!("unexpected reconnect error: {error}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(connected.info().server.name, "mock");
+    connected.shutdown().await;
+}
+
 /// A server that dies took its tools out for the rest of the run: every later
 /// call returned the same transport error and nothing tried again. One restart
 /// and one retry per call, a few per run.

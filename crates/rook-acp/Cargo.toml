@@ -10,6 +10,7 @@ authors.workspace = true
 [dependencies]
 async-trait = "0.1.92"
 rook-core.workspace = true
+rook-mcp = { path = "../rook-mcp" }
 rook-proto.workspace = true
 base64 = "0.22.1"
 rook-llm.workspace = true
@@ -22,6 +23,7 @@ tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "io-std",
 tracing = "0.1.44"
 
 [dev-dependencies]
+rook-contain = { path = "../rook-contain" }
 rook-skills.workspace = true
 serde_json = "1.0.151"
 tempfile = "3.27.0"

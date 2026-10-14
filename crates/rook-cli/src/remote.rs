@@ -308,6 +308,11 @@ impl Watching {
         use std::io::Write;
         let mut out = std::io::stdout();
         match event {
+            ChatEvent::Activity { state } => {
+                if !self.json {
+                    let _ = writeln!(out, "\n{}", state.describe());
+                }
+            }
             ChatEvent::Snapshot { session, truncated, .. } => {
                 self.truncated = truncated;
                 self.session = session;

@@ -686,3 +686,46 @@ async fn compaction_preview_does_not_imply_child_preview_and_child_preview_does_
         editor.close().await;
     }
 }
+
+#[tokio::test]
+async fn closing_the_parent_refuses_child_controls_and_retains_unfinished_child_uncertainty() {
+    let model = Model::start(false).await;
+    let mut editor = Editor::start(model.config(), |_| {});
+    editor.initialize(json!({"subagents":{}})).await;
+    editor.request(2, "session/new", json!({"cwd":"."})).await;
+    let root = editor.until(2).await.last().unwrap()["result"]["sessionId"].as_str().unwrap().to_owned();
+    editor
+        .request(3, "session/prompt", json!({"sessionId":root,"prompt":[{"type":"text","text":"ROOT_TASK"}]}))
+        .await;
+    let waiting_child = loop {
+        let message = editor.next().await;
+        if message["method"] == "session/request_permission" {
+            break message["params"]["sessionId"].as_str().unwrap().to_owned();
+        }
+        assert!(message["method"].is_string(), "root finished before cancellation precondition: {message}");
+    };
+    editor.request(4, "session/close", json!({"sessionId":waiting_child})).await;
+    assert_eq!(editor.until(4).await.last().unwrap()["error"]["code"], -32602);
+    editor.request(5, "session/close", json!({"sessionId":root})).await;
+    let mut cancelled = false;
+    let mut unknown = false;
+    let mut closed = false;
+    while !(cancelled && unknown && closed) {
+        let message = editor.next().await;
+        if message["id"] == 3 && message["method"].is_null() {
+            assert!(!cancelled, "prompt answered twice");
+            assert_eq!(message["result"]["stopReason"], "cancelled");
+            cancelled = true;
+        }
+        if message["id"] == 5 && message["method"].is_null() {
+            assert!(message["result"].is_object(), "{message}");
+            closed = true;
+        }
+        if message["params"]["update"]["sessionId"] == waiting_child {
+            let state = &message["params"]["update"]["state"];
+            assert_ne!(state["state"], "idle", "dropping observation is not a completed child");
+            unknown |= state["state"] == "unknown";
+        }
+    }
+    editor.close().await;
+}

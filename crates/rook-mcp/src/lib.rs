@@ -25,6 +25,7 @@ mod catalog;
 pub mod http;
 pub mod oauth;
 pub mod protocol;
+mod reap;
 pub mod stdio;
 pub mod transport;
 
@@ -119,6 +120,9 @@ pub struct ServerConfig {
     /// stalling the agent's startup.
     pub startup_timeout_secs: u64,
     pub call_timeout_secs: u64,
+    /// Shared stdio process admission, including drivers retained for cleanup.
+    /// Applied before spawning; a process owns its cleanup capacity until reaped.
+    pub stdio_max_processes: usize,
     /// Whole-catalog limits apply across tools/list pages, before retaining descriptors.
     pub catalog_max_bytes: usize,
     pub catalog_max_tools: usize,
@@ -140,6 +144,7 @@ impl Default for ServerConfig {
             oauth: Default::default(),
             startup_timeout_secs: 20,
             call_timeout_secs: 120,
+            stdio_max_processes: 128,
             catalog_max_bytes: 8 * 1024 * 1024,
             catalog_max_tools: 4096,
             catalog_max_pages: 64,

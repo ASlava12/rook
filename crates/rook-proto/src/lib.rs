@@ -20,6 +20,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod activity;
 pub mod queue;
 pub mod schedule;
 pub mod work;
@@ -232,6 +233,10 @@ pub enum ApprovalDecision {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChatEvent {
+    /// One notice per inactivity episode; retained for clients joining later.
+    Activity {
+        state: activity::Snapshot,
+    },
     /// Durable execution turn currently running under this observer.
     Turn {
         id: String,

@@ -16,13 +16,15 @@
 //! approval modes are offered as session modes, so an editor's menu and
 //! `sandbox.stance` are the same knob.
 
+mod history;
 mod preview;
 pub mod protocol;
+mod sessions;
+mod setup;
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
@@ -100,17 +102,16 @@ where
     // Built once for the connection: an editor sends many prompts, and
     // reconnecting MCP or restarting a language server for each is wasted time.
     let policy = rook_core::agent::policy_for(&rook.config);
-    let settings =
-        Arc::new(Settings { policy: policy.clone(), effort: RwLock::new(rook.config.agent.effort()) });
-    let servers = rook_core::agent::servers_for(&rook.config, &rook.workspace);
-    let mcp = Arc::new(rook.connect_mcp().await);
-    let jobs = rook_core::agent::jobs_for(&rook.config);
+    let settings = Arc::new(Settings { policy: policy.clone(), effort: rook.config.agent.effort() });
+    let runtimes = Arc::new(std::sync::Mutex::new(HashMap::<u128, Shared>::new()));
     // Filled in by `initialize`, and read when a turn starts: the client may
     // serve its unsaved buffers, and the protocol forbids asking if it cannot.
     let client_files: Arc<Mutex<ClientFiles>> = Default::default();
 
     let peer = Arc::new(Peer::new(outbound, closed));
     let mut turn: Option<Turn> = None;
+    let mut opening: Option<Opening> = None;
+    let mut next_opening = 0u64;
 
     let read_result = loop {
         let next = tokio::select! {
@@ -171,7 +172,13 @@ where
                 if turn.as_ref().is_some_and(|turn| target.is_none_or(|target| target == turn.session))
                     && let Some(turn) = turn.take()
                 {
-                    turn.cancel(&peer);
+                    turn.cancel(&peer).await;
+                }
+                if opening.as_ref().is_some_and(|active| {
+                    target.is_none_or(|target| rook_store::parse_session_id(target) == active.session())
+                }) && let Some(active) = opening.take()
+                {
+                    active.cancel(&peer, &runtimes).await;
                 }
             }
             ("session/prompt", Some(id)) => {
@@ -214,13 +221,78 @@ where
                         continue;
                     }
                 };
-                if let Some(turn) = turn.take() {
-                    turn.cancel(&peer);
+                let (selected_mode, effort) = match settings.choice(&rook, session) {
+                    Ok(choice) => choice,
+                    Err(error) => {
+                        peer.respond(&id, Err(error));
+                        continue;
+                    }
+                };
+                if !runtimes.lock().unwrap_or_else(|error| error.into_inner()).contains_key(&session)
+                    && runtimes.lock().unwrap_or_else(|error| error.into_inner()).len()
+                        >= rook.config.server.max_acp_sessions
+                {
+                    peer.respond(&id, Err(Error::invalid_params(format!(
+                        "server.max_acp_sessions={} reached; close an active session before starting another",
+                        rook.config.server.max_acp_sessions,
+                    ))));
+                    continue;
                 }
+                if let Some(turn) = turn.take() {
+                    turn.cancel(&peer).await;
+                }
+                let existing =
+                    runtimes.lock().unwrap_or_else(|error| error.into_inner()).get(&session).cloned();
+                let shared = match existing {
+                    Some(shared) => {
+                        if !shared.ready.load(Ordering::Acquire) {
+                            peer.respond(
+                                &id,
+                                Err(Error::invalid_params(
+                                    "session setup is still initializing; wait for its response or close it",
+                                )),
+                            );
+                            continue;
+                        }
+                        shared
+                    }
+                    None => {
+                        let prepared = match setup::prepare(
+                            &rook,
+                            Some(session),
+                            &serde_json::json!({"sessionId":session_id}),
+                        ) {
+                            Ok(prepared) => prepared,
+                            Err(error) => {
+                                peer.respond(&id, Err(error));
+                                continue;
+                            }
+                        };
+                        let project = match prepared.build(&rook) {
+                            Ok(project) => project,
+                            Err(error) => {
+                                peer.respond(&id, Err(error));
+                                continue;
+                            }
+                        };
+                        let shared = Shared::new(project, selected_mode).await;
+                        {
+                            let mut pool = runtimes.lock().unwrap_or_else(|error| error.into_inner());
+                            if !pool.contains_key(&session)
+                                && pool.len() >= rook.config.server.max_acp_sessions
+                            {
+                                peer.respond(&id, Err(Error::invalid_params("server.max_acp_sessions reached during prompt preparation; close an active session")));
+                                continue;
+                            }
+                            pool.insert(session, shared.clone());
+                        }
+                        shared
+                    }
+                };
                 let replied = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 // Read out of the lock before the spawn: a guard living to the
                 // end of the statement would travel into the task with it.
-                let effort = *settings.effort.read().unwrap_or_else(|e| e.into_inner());
+                shared.policy.set_stance(selected_mode);
                 let client = *client_files.lock().await;
                 let display = Arc::new(preview::Preview::new(
                     rook.clone(),
@@ -235,14 +307,9 @@ where
                     replied: replied.clone(),
                     display: display.clone(),
                     handle: tokio::spawn(prompt(
-                        rook.clone(),
+                        shared.rook.clone(),
                         peer.clone(),
-                        Shared {
-                            policy: policy.clone(),
-                            servers: servers.clone(),
-                            mcp: mcp.clone(),
-                            jobs: jobs.clone(),
-                        },
+                        shared,
                         TurnSetup { client, effort, display },
                         id,
                         PreparedPrompt { session, session_id, text, attachments },
@@ -250,9 +317,191 @@ where
                     )),
                 });
             }
+            ("session/new" | "session/resume" | "session/load", Some(id)) => {
+                if opening.as_ref().is_some_and(|active| !active.handle.is_finished()) {
+                    peer.respond(
+                        &id,
+                        Err(Error::invalid_params(
+                            "one ACP setup request is already initializing; cancel/close it before another",
+                        )),
+                    );
+                    continue;
+                }
+                if let Some(previous) = opening.take() {
+                    previous.cancel(&peer, &runtimes).await;
+                }
+                let session = if method != "session/new" {
+                    match sessions::existing(&rook, &params) {
+                        Ok(session) => {
+                            if preview::restricted(&rook, &rook_store::format_session_id(session))
+                                .unwrap_or(true)
+                            {
+                                peer.respond(
+                                    &id,
+                                    Err(Error::invalid_params("child resume is not advertised")),
+                                );
+                                continue;
+                            }
+                            Some(session)
+                        }
+                        Err(error) => {
+                            peer.respond(&id, Err(error));
+                            continue;
+                        }
+                    }
+                } else {
+                    None
+                };
+                let prepared = match setup::prepare(&rook, session, &params) {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        peer.respond(&id, Err(error));
+                        continue;
+                    }
+                };
+                let full = {
+                    let pool = runtimes.lock().unwrap_or_else(|error| error.into_inner());
+                    !prepared.names.is_empty()
+                        && pool.len() >= rook.config.server.max_acp_sessions
+                        && session.is_none_or(|session| !pool.contains_key(&session))
+                };
+                if full {
+                    peer.respond(
+                        &id,
+                        Err(Error::invalid_params(
+                            "server.max_acp_sessions reached; close an active session before connecting MCP",
+                        )),
+                    );
+                    continue;
+                }
+                next_opening = next_opening.saturating_add(1);
+                let epoch = next_opening;
+                let identity = Arc::new(std::sync::Mutex::new(session));
+                let replied = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let output = replied.clone();
+                let current = identity.clone();
+                let base = rook.clone();
+                let selections = settings.clone();
+                let pool = runtimes.clone();
+                let connection = peer.clone();
+                let request_id = id.clone();
+                let client = *client_files.lock().await;
+                let executing = turn.as_ref().is_some_and(|active| {
+                    !active.handle.is_finished() && session == rook_store::parse_session_id(&active.session)
+                });
+                let current_view = turn
+                    .as_ref()
+                    .filter(|active| {
+                        client.subagents && session == rook_store::parse_session_id(&active.session)
+                    })
+                    .map(|active| active.display.clone());
+                opening = Some(Opening {
+                    session: identity,
+                    id,
+                    replied,
+                    epoch,
+                    handle: tokio::spawn(async move {
+                        let outcome = async {
+                            let wanted = prepared.names.clone();
+                            let built = tokio::task::spawn_blocking(move || prepared.build(&base)).await
+                                .map_err(|_| Error::internal("workspace discovery could not finish"))??;
+                            let session = match session {
+                                Some(session) => session,
+                                None => built.start_session("").map_err(|_| Error::internal("could not create the ACP session"))?,
+                            };
+                            *current.lock().unwrap_or_else(|error| error.into_inner()) = Some(session);
+                            let (mode, _) = selections.choice(&built, session)?;
+                            let existing = pool.lock().unwrap_or_else(|error| error.into_inner()).get(&session).cloned();
+                            let shared = match existing {
+                                Some(shared) if shared.rook.workspace == built.workspace
+                                    && shared.rook.mcp_servers().eq(built.mcp_servers()) => Some(shared),
+                                Some(_) if executing => return Err(Error::invalid_params("session is executing; cancel or finish its turn before replacing MCP setup")),
+                                Some(_) => {
+                                    let old = pool.lock().unwrap_or_else(|error| error.into_inner()).remove(&session);
+                                    if let Some(old) = old { old.shutdown().await; }
+                                    if wanted.is_empty() { None } else {
+                                        let mut shared = Shared::new(built.clone(), mode).await;
+                                        shared.epoch = epoch; shared.ready.store(false, Ordering::Release);
+                                        pool.lock().unwrap_or_else(|error| error.into_inner()).insert(session, shared.clone());
+                                        Some(shared)
+                                    }
+                                },
+                                None if wanted.is_empty() => None,
+                                None => {
+                                    let mut shared = Shared::new(built.clone(), mode).await;
+                                    shared.epoch = epoch;
+                                    shared.ready.store(false, Ordering::Release);
+                                    {
+                                        let mut pool = pool.lock().unwrap_or_else(|error| error.into_inner());
+                                        if !pool.contains_key(&session) && pool.len() >= built.config.server.max_acp_sessions {
+                                            return Err(Error::invalid_params("server.max_acp_sessions reached during setup; close an active session"));
+                                        }
+                                        pool.insert(session, shared.clone());
+                                    }
+                                    Some(shared)
+                                }
+                            };
+                            if let Some(shared) = &shared {
+                                let mcp = shared.mcp.get_or_init(|| async { Arc::new(shared.rook.connect_mcp().await) }).await;
+                                if wanted.iter().any(|name| !mcp.report().servers.iter().any(|server| &server.name == name && server.state == "connected")) {
+                                    let removed = pool.lock().unwrap_or_else(|error| error.into_inner()).remove(&session);
+                                    if let Some(shared) = removed { shared.shutdown().await; }
+                                    return Err(Error::internal(format!("requested MCP initialization failed; retained session {} can be inspected/retried explicitly", rook_store::format_session_id(session))));
+                                }
+                                shared.ready.store(true, Ordering::Release);
+                            }
+                            let (mode, effort) = selections.choice(&built, session)?;
+                            if let Some(shared) = &shared { shared.policy.set_stance(mode); }
+                            let mut result = serde_json::json!({"modes":protocol::modes(mode),"configOptions":protocol::config_options(mode,effort)});
+                            if method == "session/new" { result["sessionId"] = rook_store::format_session_id(session).into(); }
+                            Ok((result, built, session))
+                        }.await;
+                        match outcome {
+                            Ok((result, project, session)) if method == "session/load" => {
+                                // This task owns replay too: aborting setup destroys its
+                                // history producer rather than detaching another task.
+                                let mut result = Ok(result);
+                                if client.subagents || client.compaction {
+                                    let recovery = preview::Preview::new(
+                                        project.clone(),
+                                        connection.clone(),
+                                        session,
+                                        client.subagents,
+                                        client.compaction,
+                                    );
+                                    result = recovery.recover().map_err(|_| Error::internal("historical preview recovery failed"))
+                                        .map(|truncated| {
+                                            let mut result = result.unwrap_or_else(|_| serde_json::json!({}));
+                                            result["_meta"]["rook"]["recovery"] = serde_json::json!({"truncated":truncated,"maxSessions":64,"maxCompactions":32,"eventsPerSession":128,"childHistoryReplayed":false});
+                                            result
+                                        });
+                                }
+                                if result.is_ok() {
+                                    result = history::replay(&project, &connection, session).await.and_then(|through| result.map(|mut result| {
+                                        result["_meta"]["rook"]["history"] = serde_json::json!({"through":through,"rootComplete":true}); result
+                                    }));
+                                }
+                                let succeeded = result.is_ok();
+                                if connection.respond_wait(&request_id, result).await.is_ok() {
+                                    output.store(true, Ordering::Release);
+                                    if succeeded && let Some(view) = current_view {
+                                        view.snapshot();
+                                    }
+                                }
+                            }
+                            Ok((result, _, _)) => {
+                                connection.respond(&request_id, Ok(result));
+                                output.store(true, Ordering::Release);
+                            }
+                            Err(error) => {
+                                connection.respond(&request_id, Err(error));
+                                output.store(true, Ordering::Release);
+                            }
+                        }
+                    }),
+                });
+            }
             (_, Some(id)) => {
-                let mut recovery = None;
-                let mut current = None;
                 if method == "initialize" {
                     *client_files.lock().await = ClientFiles::from_initialize(&params);
                 }
@@ -280,46 +529,60 @@ where
                     );
                     continue;
                 }
-                if matches!(method.as_str(), "session/load" | "session/resume")
-                    && let Some(session) = params["sessionId"].as_str().and_then(rook_store::parse_session_id)
-                    && rook.store.get_session(session).ok().flatten().is_some()
-                {
-                    let client = *client_files.lock().await;
-                    // Replay before the response is historical. Confirm only
-                    // states this connection actually observed after load succeeds.
-                    current = turn
+                if method == "session/close" {
+                    let session = match sessions::existing(&rook, &params) {
+                        Ok(session) => session,
+                        Err(error) => {
+                            peer.respond(&id, Err(error));
+                            continue;
+                        }
+                    };
+                    if turn
                         .as_ref()
-                        .filter(|turn| client.subagents && turn.session == params["sessionId"])
-                        .map(|turn| turn.display.clone());
-                    if client.subagents || client.compaction {
-                        let recovering = preview::Preview::new(
-                            rook.clone(),
-                            peer.clone(),
-                            session,
-                            client.subagents,
-                            client.compaction,
-                        );
-                        match recovering.recover() {
-                            Ok(truncated) => recovery = Some(truncated),
+                        .is_some_and(|active| rook_store::parse_session_id(&active.session) == Some(session))
+                        && let Some(active) = turn.take()
+                    {
+                        active.cancel(&peer).await;
+                    }
+                    if opening.as_ref().is_some_and(|active| active.session() == Some(session))
+                        && let Some(active) = opening.take()
+                    {
+                        active.cancel(&peer, &runtimes).await;
+                    }
+                    let removed = runtimes.lock().unwrap_or_else(|error| error.into_inner()).remove(&session);
+                    if let Some(shared) = removed {
+                        shared.shutdown().await;
+                    }
+                    peer.respond(&id, Ok(serde_json::json!({})));
+                    continue;
+                }
+                let selected_session = params["sessionId"].as_str().and_then(rook_store::parse_session_id);
+                let mut outcome = dispatch(&rook, &settings, &method, params);
+                let succeeded = outcome.is_ok();
+                if succeeded && method == "session/set_stance" {
+                    for (&session, runtime) in
+                        runtimes.lock().unwrap_or_else(|error| error.into_inner()).iter()
+                    {
+                        match settings.choice(&rook, session) {
+                            Ok((mode, _)) => runtime.policy.set_stance(mode),
                             Err(error) => {
-                                peer.respond(&id, Err(Error::internal(error.to_string())));
-                                continue;
+                                outcome = Err(error);
+                                break;
                             }
                         }
                     }
+                } else if succeeded
+                    && matches!(method.as_str(), "session/set_mode" | "session/set_config_option")
+                    && let Some(session) = selected_session
+                    && let Some(runtime) =
+                        runtimes.lock().unwrap_or_else(|error| error.into_inner()).get(&session)
+                {
+                    match settings.choice(&rook, session) {
+                        Ok((mode, _)) => runtime.policy.set_stance(mode),
+                        Err(error) => outcome = Err(error),
+                    }
                 }
-                let mut outcome = dispatch(&rook, &settings, &method, params);
-                if let (Ok(result), Some(truncated)) = (&mut outcome, recovery) {
-                    result["_meta"]["rook"]["recovery"] = serde_json::json!({
-                        "truncated":truncated,"maxSessions":64,"maxCompactions":32,"eventsPerSession":128,
-                        "childHistoryReplayed":false,
-                    });
-                }
-                let succeeded = outcome.is_ok();
                 peer.respond(&id, outcome);
-                if succeeded && let Some(current) = current {
-                    current.snapshot();
-                }
             }
             // A notification we do not handle is not an error.
             (_, None) => tracing::debug!("ignoring notification {method}"),
@@ -330,8 +593,14 @@ where
         turn.handle.abort();
         let _ = turn.handle.await;
     }
-    mcp.shutdown().await;
-    servers.shutdown().await;
+    if let Some(opening) = opening {
+        opening.handle.abort();
+        let _ = opening.handle.await;
+    }
+    let equipment = std::mem::take(&mut *runtimes.lock().unwrap_or_else(|error| error.into_inner()));
+    for shared in equipment.into_values() {
+        shared.shutdown().await;
+    }
     drop(peer);
     if read_result.is_err() {
         writer.abort();
@@ -352,28 +621,84 @@ where
 /// nowhere else to live.
 struct Settings {
     policy: Arc<rook_tools::policy::Policy>,
-    effort: RwLock<rook_llm::Effort>,
+    effort: rook_llm::Effort,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SessionSettings {
+    version: u8,
+    mode: Option<rook_tools::policy::Stance>,
+    effort: Option<rook_llm::Effort>,
 }
 
 impl Settings {
-    fn describe(&self) -> serde_json::Value {
-        protocol::config_options(self.policy.stance(), *self.effort.read().unwrap_or_else(|e| e.into_inner()))
+    fn saved(&self, rook: &Rook, session: u128) -> Result<SessionSettings, Error> {
+        let raw = rook
+            .store
+            .kv_get_limited(&format!("acp-settings/{session:032x}"), 1024)
+            .map_err(|error| Error::internal(error.to_string()))?;
+        let Some(raw) = raw else {
+            return Ok(SessionSettings { version: 1, mode: None, effort: None });
+        };
+        let saved: SessionSettings = serde_json::from_slice(&raw).map_err(|_| {
+            Error::internal("invalid saved ACP session settings; inspect this session's state")
+        })?;
+        if saved.version != 1 {
+            return Err(Error::internal("unsupported saved ACP session settings version"));
+        }
+        Ok(saved)
     }
 
-    fn set(&self, id: &str, value: &str) -> Result<(), Error> {
+    fn choice(
+        &self,
+        rook: &Rook,
+        session: u128,
+    ) -> Result<(rook_tools::policy::Stance, rook_llm::Effort), Error> {
+        let saved = self.saved(rook, session)?;
+        Ok((saved.mode.unwrap_or_else(|| self.policy.stance()), saved.effort.unwrap_or(self.effort)))
+    }
+
+    fn describe_in(&self, rook: &Rook, session: u128) -> Result<serde_json::Value, Error> {
+        let (mode, effort) = self.choice(rook, session)?;
+        Ok(protocol::config_options(mode, effort))
+    }
+
+    fn set_in(&self, rook: &Rook, session: u128, id: &str, value: &str) -> Result<(), Error> {
+        if id.len() > 64 || value.len() > 64 {
+            return Err(Error::invalid_params(
+                "ACP setting identifiers and values must contain at most 64 bytes",
+            ));
+        }
+        let mut saved = self.saved(rook, session)?;
         match id {
             "mode" => {
-                let mode = protocol::mode_from_id(value)
-                    .ok_or_else(|| Error::invalid_params(format!("no mode {value:?}")))?;
-                self.policy.set_stance(mode);
+                saved.mode = Some(
+                    protocol::mode_from_id(value)
+                        .ok_or_else(|| Error::invalid_params(format!("no mode {value:?}")))?,
+                )
             }
             "effort" => {
-                let effort = rook_llm::Effort::parse(value)
-                    .ok_or_else(|| Error::invalid_params(format!("no effort {value:?}")))?;
-                *self.effort.write().unwrap_or_else(|e| e.into_inner()) = effort;
+                saved.effort = Some(
+                    rook_llm::Effort::parse(value)
+                        .ok_or_else(|| Error::invalid_params(format!("no effort {value:?}")))?,
+                )
             }
             other => return Err(Error::invalid_params(format!("no setting {other:?}"))),
         }
+        // Only closed enums and a version byte can enter this fixed record.
+        // Input length validation precedes parsing/diagnostics and enum encoding.
+        let bytes = serde_json::to_vec(&saved).map_err(|error| Error::internal(error.to_string()))?;
+        rook.store
+            .kv_update_session_values(session, &[(&format!("acp-settings/{session:032x}"), &bytes)])
+            .map_err(|error| Error::internal(error.to_string()))
+    }
+    fn set_legacy_mode(&self, value: &str) -> Result<(), Error> {
+        if value.len() > 64 {
+            return Err(Error::invalid_params("ACP mode value must contain at most 64 bytes"));
+        }
+        let mode = protocol::mode_from_id(value)
+            .ok_or_else(|| Error::invalid_params(format!("no mode {value:?}")))?;
+        self.policy.set_stance(mode);
         Ok(())
     }
 }
@@ -386,7 +711,12 @@ fn dispatch(
 ) -> Result<serde_json::Value, Error> {
     match method {
         "session/set_stance" => {
-            settings.set("mode", params["modeId"].as_str().unwrap_or_default())?;
+            settings.set_legacy_mode(params["modeId"].as_str().unwrap_or_default())?;
+            Ok(serde_json::json!({}))
+        }
+        "session/set_mode" => {
+            let session = sessions::existing(rook, &params)?;
+            settings.set_in(rook, session, "mode", params["modeId"].as_str().unwrap_or_default())?;
             Ok(serde_json::json!({}))
         }
 
@@ -396,8 +726,9 @@ fn dispatch(
             // value of the wrong shape should say so rather than be coerced.
             let value =
                 params["value"].as_str().ok_or_else(|| Error::invalid_params("value must be a string"))?;
-            settings.set(id, value)?;
-            Ok(serde_json::json!({ "configOptions": settings.describe() }))
+            let session = sessions::existing(rook, &params)?;
+            settings.set_in(rook, session, id, value)?;
+            Ok(serde_json::json!({ "configOptions": settings.describe_in(rook, session)? }))
         }
 
         "initialize" => Ok(serde_json::json!({
@@ -405,54 +736,16 @@ fn dispatch(
             "agentInfo": { "name": "rook", "version": rook_core::AGENT_VERSION },
             "agentCapabilities": {
                 "loadSession": true,
+                "mcpCapabilities": { "http": true, "sse": false },
+                "sessionCapabilities": { "list": {}, "resume": {}, "close": {} },
                 "promptCapabilities": { "image": true, "audio": false, "embeddedContext": true },
             },
             "authMethods": [],
         })),
 
-        "session/new" => {
-            // Parsed to reject a malformed request before a session exists for
-            // it, though nothing in it is needed: the workspace is the one the
-            // process was started in, and the title comes from the first prompt.
-            let _: protocol::NewSession =
-                serde_json::from_value(params).map_err(|e| Error::invalid_params(e.to_string()))?;
-            let session = rook.start_session("").map_err(|e| Error::internal(e.to_string()))?;
-            Ok(serde_json::json!({
-                "sessionId": rook_store::format_session_id(session),
-                "modes": protocol::modes(settings.policy.stance()),
-                "configOptions": settings.describe(),
-            }))
-        }
+        "session/list" => sessions::list(rook, params),
 
-        // Resuming an existing session needs nothing beyond checking it exists:
-        // the loop replays the log on its own.
-        "session/load" | "session/resume" => {
-            let request: protocol::SessionRef =
-                serde_json::from_value(params).map_err(|e| Error::invalid_params(e.to_string()))?;
-            let id = rook_store::parse_session_id(&request.session_id)
-                .ok_or_else(|| Error::invalid_params("not a session id"))?;
-            match rook.store.get_session(id) {
-                Ok(Some(_)) => Ok(serde_json::json!({
-                    "modes": protocol::modes(settings.policy.stance()),
-                    "configOptions": settings.describe(),
-                })),
-                Ok(None) => Err(Error::invalid_params("no such session")),
-                Err(e) => Err(Error::internal(e.to_string())),
-            }
-        }
-
-        "session/list" => {
-            let sessions = rook.sessions().map_err(|e| Error::internal(e.to_string()))?;
-            Ok(serde_json::json!({
-                "sessions": sessions.iter().map(|s| serde_json::json!({
-                    "sessionId": rook_store::format_session_id(s.id),
-                    "title": s.title,
-                    "cwd": s.workspace,
-                })).collect::<Vec<_>>()
-            }))
-        }
-
-        "authenticate" | "session/close" | "logout" => Ok(serde_json::json!({})),
+        "authenticate" | "logout" => Ok(serde_json::json!({})),
         other => Err(Error::method_not_found(other)),
     }
 }
@@ -471,10 +764,50 @@ struct Turn {
 }
 
 impl Turn {
-    fn cancel(self, peer: &Peer) {
+    async fn cancel(self, peer: &Peer) {
         self.handle.abort();
+        // Await destruction before replacement or close acknowledges cleanup.
+        // Otherwise old editor requests and terminal guards outlive the response.
+        let _ = self.handle.await;
         if !self.replied.swap(true, std::sync::atomic::Ordering::SeqCst) {
             peer.respond(&self.id, Ok(serde_json::json!({ "stopReason": "cancelled" })));
+        }
+    }
+}
+
+struct Opening {
+    session: Arc<std::sync::Mutex<Option<u128>>>,
+    id: serde_json::Value,
+    replied: Arc<std::sync::atomic::AtomicBool>,
+    epoch: u64,
+    handle: tokio::task::JoinHandle<()>,
+}
+impl Opening {
+    fn session(&self) -> Option<u128> {
+        *self.session.lock().unwrap_or_else(|error| error.into_inner())
+    }
+    async fn cancel(self, peer: &Peer, pool: &std::sync::Mutex<HashMap<u128, Shared>>) {
+        let session = self.session();
+        self.handle.abort();
+        let _ = self.handle.await;
+        if !self.replied.swap(true, Ordering::AcqRel) {
+            if let Some(session) = session {
+                let removed = {
+                    let mut pool = pool.lock().unwrap_or_else(|error| error.into_inner());
+                    if pool.get(&session).is_some_and(|shared| shared.epoch == self.epoch) {
+                        pool.remove(&session)
+                    } else {
+                        None
+                    }
+                };
+                if let Some(shared) = removed {
+                    shared.shutdown().await;
+                }
+            }
+            peer.respond(
+                &self.id,
+                Err(Error::internal("session setup cancelled; retained history is unchanged")),
+            );
         }
     }
 }
@@ -482,10 +815,39 @@ impl Turn {
 /// What the connection keeps between prompts.
 #[derive(Clone)]
 struct Shared {
+    rook: Arc<Rook>,
+    epoch: u64,
+    ready: Arc<std::sync::atomic::AtomicBool>,
     policy: Arc<rook_tools::policy::Policy>,
     servers: Arc<rook_core::lsp::Servers>,
-    mcp: Arc<rook_core::McpSession>,
+    mcp: Arc<tokio::sync::OnceCell<Arc<rook_core::McpSession>>>,
     jobs: Arc<rook_tools::jobs::Jobs>,
+}
+
+impl Shared {
+    async fn new(rook: Arc<Rook>, stance: rook_tools::policy::Stance) -> Self {
+        let policy = rook_core::agent::policy_for(&rook.config);
+        policy.set_stance(stance);
+        Self {
+            epoch: 0,
+            ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            policy,
+            servers: rook_core::agent::servers_for(&rook.config, &rook.workspace),
+            mcp: Arc::new(tokio::sync::OnceCell::new()),
+            jobs: rook_core::agent::jobs_for(&rook.config),
+            rook,
+        }
+    }
+
+    async fn shutdown(self) {
+        // Jobs own local process groups and remote leases. Drop them before
+        // waiting on protocol shutdown, which may need its own patience.
+        drop(self.jobs);
+        if let Some(mcp) = self.mcp.get() {
+            mcp.shutdown().await;
+        }
+        self.servers.shutdown().await;
+    }
 }
 
 async fn prompt(
@@ -510,11 +872,17 @@ async fn prompt(
     };
 
     let mut agent = AgentLoop::new(&rook, provider.into(), session);
+    for value in setup::secrets(&rook) {
+        agent.hide_connection_secret(&value);
+    }
     let display = setup.display;
     agent.observer = Some(display.clone());
     agent.options.attachments = attachments;
     agent.policy = shared.policy.clone();
-    rook_core::agent::equip(&mut agent, shared.servers.clone(), &shared.mcp, shared.jobs.clone());
+    // Connection initialization belongs to the owned turn: the input reader
+    // must remain available to cancel/close a server that never handshakes.
+    let mcp = shared.mcp.get_or_init(|| async { Arc::new(rook.connect_mcp().await) }).await;
+    rook_core::agent::equip(&mut agent, shared.servers.clone(), mcp, shared.jobs.clone());
     let editor = Arc::new(EditorApprover {
         peer: peer.clone(),
         session: session_id.clone(),
@@ -736,6 +1104,37 @@ impl Peer {
         self.send(&protocol::Response { jsonrpc: "2.0", id, result, error });
     }
 
+    async fn notify_wait(&self, method: &str, params: &(impl serde::Serialize + Sync)) -> Result<(), Error> {
+        self.send_wait(&protocol::Notification { jsonrpc: "2.0", method, params }).await
+    }
+
+    async fn respond_wait(
+        &self,
+        id: &serde_json::Value,
+        outcome: Result<serde_json::Value, Error>,
+    ) -> Result<(), Error> {
+        let (result, error) = match outcome {
+            Ok(result) => (Some(result), None),
+            Err(error) => (None, Some(error)),
+        };
+        self.send_wait(&protocol::Response { jsonrpc: "2.0", id, result, error }).await
+    }
+
+    async fn send_wait(&self, value: &(impl serde::Serialize + Sync)) -> Result<(), Error> {
+        if rook_core::delivery::encoded_size(value, self.outbound.byte_limit()).is_none() {
+            return Err(Error::internal(
+                "retained ACP history frame exceeds server.chat_queue_bytes; increase it to display the complete retained image",
+            ));
+        }
+        if self.outbound.send_serialized(value).await.is_err() {
+            self.closed.notify_one();
+            return Err(Error::internal(
+                "ACP history frame exceeds server.chat_queue_bytes or delivery closed; increase the queue byte limit for retained images",
+            ));
+        }
+        Ok(())
+    }
+
     async fn request(&self, method: &str, params: serde_json::Value) -> Option<serde_json::Value> {
         let limit = (method != "terminal/wait_for_exit").then(|| std::time::Duration::from_secs(60));
         self.request_within(method, params, limit).await
@@ -777,6 +1176,11 @@ impl Peer {
                 None
             }
         })
+    }
+
+    fn cleanup_request(&self, method: &str, params: serde_json::Value) {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.send(&protocol::Request { jsonrpc: "2.0", id, method, params });
     }
 
     async fn resolve(&self, id: u64, result: Result<serde_json::Value, Error>) {
@@ -978,17 +1382,26 @@ impl rook_tools::Files for EditorFiles {
         })
     }
     async fn read(&self, path: &Path) -> rook_tools::Result<String> {
-        let params = serde_json::json!({ "sessionId": self.session, "path": path });
+        self.read_limited(path, 16 * 1024 * 1024).await
+    }
+    async fn read_limited(&self, path: &Path, maximum: usize) -> rook_tools::Result<String> {
+        let params = serde_json::json!({"sessionId":self.session,"path":path});
         let answer = self.peer.request("fs/read_text_file", params).await.ok_or_else(|| {
             rook_tools::ToolError::Io {
                 path: path.to_path_buf(),
                 source: std::io::Error::other("the editor closed the connection"),
             }
         })?;
-        answer["content"].as_str().map(str::to_string).ok_or_else(|| rook_tools::ToolError::Io {
-            path: path.to_path_buf(),
-            source: std::io::Error::other(format!("the editor answered {answer}")),
-        })
+        let text = answer
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| rook_tools::ToolError::Denied("The editor returned no text content".into()))?;
+        if text.len() > maximum {
+            return Err(rook_tools::ToolError::Denied(format!(
+                "Editor content exceeds the {maximum}-byte raw read limit; no text copy was accepted"
+            )));
+        }
+        Ok(text.to_owned())
     }
 
     async fn write(&self, path: &Path, contents: &str) -> rook_tools::Result<()> {
@@ -1073,6 +1486,24 @@ impl EditorTerminals {
     }
 }
 
+struct TerminalCleanup {
+    peer: Arc<Peer>,
+    session: String,
+    terminal: Option<String>,
+}
+
+impl Drop for TerminalCleanup {
+    fn drop(&mut self) {
+        if let Some(terminal) = self.terminal.take() {
+            let params = serde_json::json!({ "sessionId": self.session, "terminalId": terminal });
+            // Cancellation cannot await editor replies. Request cleanup on the
+            // still-live connection; this does not certify the remote process died.
+            self.peer.cleanup_request("terminal/kill", params.clone());
+            self.peer.cleanup_request("terminal/release", params);
+        }
+    }
+}
+
 #[async_trait]
 impl rook_tools::Terminals for EditorTerminals {
     fn for_session(&self, session: &str) -> Option<Arc<dyn rook_tools::Terminals>> {
@@ -1106,9 +1537,19 @@ impl rook_tools::Terminals for EditorTerminals {
             .await?;
         let terminal = created["terminalId"]
             .as_str()
-            .ok_or_else(|| rook_tools::ToolError::Denied(format!("no terminalId in {created}")))?
+            .filter(|id| !id.is_empty() && id.len() <= 1024)
+            .ok_or_else(|| {
+                rook_tools::ToolError::Denied(
+                    "editor terminalId must contain 1..=1024 bytes; creation remains uncertain".into(),
+                )
+            })?
             .to_string();
 
+        let mut cleanup = TerminalCleanup {
+            peer: self.peer.clone(),
+            session: self.session.clone(),
+            terminal: Some(terminal.clone()),
+        };
         let waited =
             tokio::time::timeout(self.timeout, self.call("terminal/wait_for_exit", self.about(&terminal)))
                 .await;
@@ -1120,7 +1561,9 @@ impl rook_tools::Terminals for EditorTerminals {
         // Read before releasing: the client is free to forget the terminal the
         // moment it is released.
         let read = self.call("terminal/output", self.about(&terminal)).await;
-        let _ = self.call("terminal/release", self.about(&terminal)).await;
+        if self.call("terminal/release", self.about(&terminal)).await.is_ok() {
+            cleanup.terminal = None;
+        }
         let read = read?;
 
         Ok(rook_tools::Ran {
@@ -1145,6 +1588,83 @@ mod audit_tests {
             assert_eq!(caps.compaction, version == 1);
         }
     }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn session_equipment_reuses_owned_jobs_and_grants_then_releases_only_that_session() {
+        use rook_tools::policy::{Decision, Stance};
+        let state = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let rook = Rook::from_parts(
+            rook_store::Store::open(state.path()).unwrap(),
+            rook_core::Config::default(),
+            rook_skills::Environment::bare("linux", "x86_64", "0.1.0"),
+            rook_skills::SkillIndex::default(),
+            workspace.path().to_path_buf(),
+        );
+        let rook = Arc::new(rook);
+        let a = Shared::new(rook.clone(), Stance::Assist).await;
+        let b = Shared::new(rook.clone(), Stance::Assist).await;
+        let risk = Risk::Execute("touch owned-marker".into());
+        assert!(!matches!(a.policy.decide(&risk), Decision::Allow));
+        a.policy.grant_for_run(&risk.subject());
+        assert!(matches!(a.policy.decide(&risk), Decision::Allow));
+        assert!(
+            !matches!(b.policy.decide(&risk), Decision::Allow),
+            "a session grant cannot reach another session"
+        );
+        let original_jobs = a.jobs.identity();
+        let reused = a.clone();
+        assert!(Arc::ptr_eq(&a.jobs, &reused.jobs));
+        assert!(Arc::ptr_eq(&a.policy, &reused.policy));
+        drop(reused);
+        a.jobs.start(r#"printf '%s' "$$" > owned-a.pid; exec sleep 60"#, &rook.workspace, None).unwrap();
+        b.jobs.start(r#"printf '%s' "$$" > owned-b.pid; exec sleep 60"#, &rook.workspace, None).unwrap();
+        async fn pid(path: &Path) -> String {
+            tokio::time::timeout(std::time::Duration::from_secs(60), async {
+                loop {
+                    if let Ok(pid) = std::fs::read_to_string(path)
+                        && !pid.is_empty()
+                    {
+                        return pid;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("owned command must actually start")
+        }
+        fn alive(pid: &str) -> bool {
+            rook_contain::quietly(&mut std::process::Command::new("kill"))
+                .args(["-0", pid])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        }
+        async fn stopped(pid: &str) {
+            tokio::time::timeout(std::time::Duration::from_secs(60), async {
+                while alive(pid) {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("owned command process must actually die");
+        }
+        let pid_a = pid(&rook.workspace.join("owned-a.pid")).await;
+        let pid_b = pid(&rook.workspace.join("owned-b.pid")).await;
+        assert!(alive(&pid_a) && alive(&pid_b), "both physical processes must start before cleanup");
+        a.shutdown().await;
+        stopped(&pid_a).await;
+        assert!(alive(&pid_b), "closing one session must not end another session's jobs");
+        let resumed = Shared::new(rook.clone(), Stance::Assist).await;
+        assert_ne!(resumed.jobs.identity(), original_jobs, "resume after close has fresh equipment");
+        assert!(!matches!(resumed.policy.decide(&risk), Decision::Allow), "close releases run grants");
+        resumed.shutdown().await;
+        b.shutdown().await;
+        stopped(&pid_b).await;
+    }
+
     #[tokio::test]
     async fn pending_editor_requests_are_bounded_and_cancelled_owners_release_all_entries() {
         let (send, mut requests) = rook_core::delivery::channel(4096, 65536);

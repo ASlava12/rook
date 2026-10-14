@@ -1,5 +1,6 @@
 // The read-mostly tabs: search, memory, skills, jobs and the store.
 import { $, el, api, ago, bytes, state } from './lib.js';
+import { recallPanel } from './recall.js';
 
 export async function renderSearch() {
   const input = el('input', { placeholder: 'Search everything said, read and run…', value: state.query });
@@ -30,7 +31,14 @@ export async function renderSearch() {
   const form = el('form', { class: 'ask', onsubmit: (e) => { e.preventDefault(); look(); } },
     input, el('button', {}, 'Find'));
 
-  $('#view').replaceChildren(el('div', { class: 'card' }, el('h2', {}, 'search'), form, results));
+  const recall = el('div');
+  const openRecall = async () => {
+    const health = await api('/api/health');
+    if (!recall.isConnected) return;
+    recall.replaceChildren(recallPanel(health.workspace));
+  };
+  $('#view').replaceChildren(el('div', { class: 'card' }, el('h2', {}, 'search'), form,
+    el('button', { onclick: () => openRecall().catch(error => results.replaceChildren(el('p', {}, error.error || String(error)))) }, 'Find past conversations'), recall, results));
   input.focus();
   if (state.query) look();
 }

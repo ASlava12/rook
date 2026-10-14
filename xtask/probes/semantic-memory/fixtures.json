@@ -1,0 +1,256 @@
+{
+  "facts": [
+    {
+      "id": "daemon",
+      "text": "Policy DMN-001: never restart the daemon while a translation task is running."
+    },
+    {
+      "id": "undo",
+      "text": "Policy UNDO-002: shell checkpoints must retain preimages of removed files as well as newly created paths."
+    },
+    {
+      "id": "tunnel",
+      "text": "The loopback model tunnel is enabled only when traveling away from home. At home, use the direct LAN endpoint."
+    },
+    {
+      "id": "approval",
+      "text": "Unanswered tool permission requests are human approval waits, not agent hangs."
+    },
+    {
+      "id": "models",
+      "text": "Inference server HOST-046 listens at 192.168.1.46:1234 and exposes an OpenAI compatible API."
+    },
+    {
+      "id": "translation",
+      "text": "Experiment TRANS-006 found that translating Russian requests through English reduced task correctness."
+    },
+    {
+      "id": "recall",
+      "text": "Past conversations can be searched within the workspace and read around their saved event numbers."
+    },
+    {
+      "id": "scope",
+      "text": "Project memory must never leak a workspace-specific secret into another repository."
+    },
+    {
+      "id": "threads",
+      "text": "Telegram topic TG-009 has a persistent binding to exactly one agent conversation."
+    },
+    {
+      "id": "browser",
+      "text": "Browser interaction uses snapshot element references for click and type operations."
+    },
+    {
+      "id": "experiments",
+      "text": "Experiment siblings keep immutable source snapshots and compare measured metrics against a baseline."
+    },
+    {
+      "id": "cancel",
+      "text": "Remote SSH commands must propagate cancellation and bound their captured stdout and stderr."
+    },
+    {
+      "id": "recipes",
+      "text": "Composite recipe stages run in isolated sessions and share a tighter total budget."
+    },
+    {
+      "id": "webhook",
+      "text": "Webhook delivery EVT-014 requires authentication and a durable idempotency key to reject retries."
+    },
+    {
+      "id": "review",
+      "text": "Review findings attach severity and exact source file and line; the reviewer does not edit the workspace."
+    },
+    {
+      "id": "cache",
+      "text": "Memory embedding cache EMB-016 is bounded, local, versioned by model and falls back to keyword retrieval."
+    },
+    {
+      "id": "noise0",
+      "text": "Перевод экрана приложения доступен через настройки языка интерфейса."
+    },
+    {
+      "id": "noise1",
+      "text": "Новая сеть дома использует отдельный пароль от рабочего Wi-Fi."
+    },
+    {
+      "id": "noise2",
+      "text": "Команда запускает сервер игры на удалённом компьютере каждую пятницу."
+    },
+    {
+      "id": "noise3",
+      "text": "English documents must use a consistent spelling of product names."
+    },
+    {
+      "id": "noise4",
+      "text": "Linux package manager commands may require administrator permissions."
+    },
+    {
+      "id": "noise5",
+      "text": "The browser toolbar can be hidden to make more room for the page."
+    },
+    {
+      "id": "noise6",
+      "text": "Annual expense reports compare travel costs against a planned budget."
+    },
+    {
+      "id": "noise7",
+      "text": "The family messaging group contains unrelated meal planning discussions."
+    },
+    {
+      "id": "noise8",
+      "text": "An archive stores backup source files from last year."
+    }
+  ],
+  "queries": [
+    {
+      "text": "Как поступить с демоном, если перевод ещё выполняется?",
+      "expected": "daemon",
+      "group": "cross_language"
+    },
+    {
+      "text": "Как откатить файл, который команда удалила?",
+      "expected": "undo",
+      "group": "cross_language"
+    },
+    {
+      "text": "Нужен ли локальный туннель, когда я работаю дома?",
+      "expected": "tunnel",
+      "group": "cross_language"
+    },
+    {
+      "text": "Почему агент ждёт подтверждения опасной команды?",
+      "expected": "approval",
+      "group": "cross_language"
+    },
+    {
+      "text": "На каком компьютере доступна генерация текста?",
+      "expected": "models",
+      "group": "cross_language"
+    },
+    {
+      "text": "Стоит ли переводить запрос на английский перед отправкой модели?",
+      "expected": "translation",
+      "group": "cross_language"
+    },
+    {
+      "text": "Как найти потерянный диалог о старой задаче?",
+      "expected": "recall",
+      "group": "cross_language"
+    },
+    {
+      "text": "Можно ли переносить секреты проекта в другой репозиторий?",
+      "expected": "scope",
+      "group": "cross_language"
+    },
+    {
+      "text": "Как телеграм-топик связан с разговором агента?",
+      "expected": "threads",
+      "group": "cross_language"
+    },
+    {
+      "text": "Как агент выбирает элемент страницы для нажатия?",
+      "expected": "browser",
+      "group": "cross_language"
+    },
+    {
+      "text": "Как сравнивать варианты эксперимента с исходным решением?",
+      "expected": "experiments",
+      "group": "cross_language"
+    },
+    {
+      "text": "Что должно происходить при отмене команды на удалённом хосте?",
+      "expected": "cancel",
+      "group": "cross_language"
+    },
+    {
+      "text": "Can I bounce the agent service while the language conversion job is active?",
+      "expected": "daemon",
+      "group": "paraphrase"
+    },
+    {
+      "text": "How can a terminal deletion be reversed?",
+      "expected": "undo",
+      "group": "paraphrase"
+    },
+    {
+      "text": "Which route should be used for inference when working at the house?",
+      "expected": "tunnel",
+      "group": "paraphrase"
+    },
+    {
+      "text": "Should a pending consent request be considered a frozen execution?",
+      "expected": "approval",
+      "group": "paraphrase"
+    },
+    {
+      "text": "Where is the machine that serves completions?",
+      "expected": "models",
+      "group": "paraphrase"
+    },
+    {
+      "text": "Did the intermediate language conversion improve the agent answers?",
+      "expected": "translation",
+      "group": "paraphrase"
+    },
+    {
+      "text": "How do I recover the chat where the previous job was discussed?",
+      "expected": "recall",
+      "group": "paraphrase"
+    },
+    {
+      "text": "Are private facts from one codebase allowed in a different project context?",
+      "expected": "scope",
+      "group": "paraphrase"
+    },
+    {
+      "text": "Which thread owns the messaging session after a restart?",
+      "expected": "threads",
+      "group": "paraphrase"
+    },
+    {
+      "text": "How are page controls targeted before entering text?",
+      "expected": "browser",
+      "group": "paraphrase"
+    },
+    {
+      "text": "What must be preserved so competing trials are reproducible?",
+      "expected": "experiments",
+      "group": "paraphrase"
+    },
+    {
+      "text": "How should remote terminal output and interrupts be handled?",
+      "expected": "cancel",
+      "group": "paraphrase"
+    },
+    {
+      "text": "DMN-001",
+      "expected": "daemon",
+      "group": "exact_id"
+    },
+    {
+      "text": "UNDO-002",
+      "expected": "undo",
+      "group": "exact_id"
+    },
+    {
+      "text": "HOST-046",
+      "expected": "models",
+      "group": "exact_id"
+    },
+    {
+      "text": "EVT-014",
+      "expected": "webhook",
+      "group": "exact_id"
+    },
+    {
+      "text": "Best chocolate souffle baking temperature",
+      "expected": null,
+      "group": "irrelevant"
+    },
+    {
+      "text": "Расписание спектаклей городского театра",
+      "expected": null,
+      "group": "irrelevant"
+    }
+  ]
+}

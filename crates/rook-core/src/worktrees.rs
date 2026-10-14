@@ -110,6 +110,11 @@ impl Worktree {
 // No shell, no repository hooks or external diff programs. Bound both the wait
 // and captured bytes; a large diff is an error with a narrower alternative.
 pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<String> {
+    let out = git_bytes(root, args, GIT_BYTES).await?;
+    Ok(String::from_utf8_lossy(&out).into_owned())
+}
+
+pub(crate) async fn git_bytes(root: &Path, args: &[&str], maximum: usize) -> Result<Vec<u8>> {
     let mut command = tokio::process::Command::new("git");
     #[cfg(windows)]
     command.creation_flags(rook_contain::NO_WINDOW);
@@ -131,7 +136,10 @@ pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<String> {
     let mut child = command.spawn().map_err(|e| CoreError::Other(format!("git: {e}")))?;
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    async fn drain(pipe: Option<impl tokio::io::AsyncRead + Unpin>) -> std::io::Result<(Vec<u8>, bool)> {
+    async fn drain(
+        pipe: Option<impl tokio::io::AsyncRead + Unpin>,
+        maximum: usize,
+    ) -> std::io::Result<(Vec<u8>, bool)> {
         let mut kept = Vec::new();
         let mut overflow = false;
         if let Some(mut pipe) = pipe {
@@ -141,7 +149,7 @@ pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<String> {
                 if n == 0 {
                     break;
                 }
-                let take = n.min(GIT_BYTES.saturating_sub(kept.len()));
+                let take = n.min(maximum.saturating_sub(kept.len()));
                 kept.extend_from_slice(&buffer[..take]);
                 overflow |= take < n;
             }
@@ -149,7 +157,7 @@ pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<String> {
         Ok((kept, overflow))
     }
     let done = tokio::time::timeout(std::time::Duration::from_secs(60), async {
-        tokio::try_join!(child.wait(), drain(stdout), drain(stderr))
+        tokio::try_join!(child.wait(), drain(stdout, maximum), drain(stderr, GIT_BYTES))
     })
     .await
     .map_err(|_| {
@@ -163,11 +171,11 @@ pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<String> {
         return Err(CoreError::Other(format!("git: {}", String::from_utf8_lossy(&err))));
     }
     if too_big {
-        return Err(CoreError::Other(
-            "git output exceeds 256 KiB; use action=read for individual files".into(),
-        ));
+        return Err(CoreError::Other(format!(
+            "git output exceeds {maximum} bytes; select fewer or smaller source files"
+        )));
     }
-    Ok(String::from_utf8_lossy(&out).into_owned())
+    Ok(out)
 }
 
 pub(crate) async fn root(rook: &Rook) -> Result<PathBuf> {

@@ -223,6 +223,223 @@ fn fixture() -> Fixture {
     fixture_with(Config::default())
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn command_pipe_activity_reaches_the_runtime_observer_before_completion() {
+    use rook_core::agent::observe::{Event, Observer};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[derive(Default)]
+    struct Activity {
+        bytes: AtomicUsize,
+        ended: AtomicUsize,
+        models: AtomicUsize,
+        signal: tokio::sync::Notify,
+    }
+    impl Observer for Activity {
+        fn observe(&self, event: Event<'_>) {
+            match event {
+                Event::ToolOutput { .. } => {
+                    self.bytes.fetch_add(1, Ordering::Relaxed);
+                    self.signal.notify_one();
+                }
+                Event::ModelStarted { .. } => {
+                    self.models.fetch_add(1, Ordering::Relaxed);
+                }
+                Event::Progress { progress: rook_core::agent::Progress::ToolDone { .. }, .. } => {
+                    self.ended.fetch_add(1, Ordering::Relaxed);
+                }
+                _ => {}
+            }
+        }
+    }
+    let f = fixture();
+    let session = f.rook.start_session("command activity").unwrap();
+    let activity = Arc::<Activity>::default();
+    let mut agent = AgentLoop::new(
+        &f.rook,
+        Arc::new(ScriptedProvider::new(vec![
+            call(
+                "run_command",
+                serde_json::json!({"command":"printf progress; while ! test -f continue; do sleep 0.01; done"}),
+            ),
+            reply("done"),
+        ])),
+        session,
+    );
+    agent.allow_everything_not_denied();
+    agent.observer = Some(activity.clone());
+    let observation = async {
+        activity.signal.notified().await;
+        assert_eq!(activity.bytes.load(Ordering::Relaxed), 1);
+        assert_eq!(activity.ended.load(Ordering::Relaxed), 0, "the pipe event precedes command completion");
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        assert_eq!(
+            activity.bytes.load(Ordering::Relaxed),
+            1,
+            "sampling a silent pipe cannot create progress"
+        );
+        std::fs::write(f.workspace.path().join("continue"), "").unwrap();
+    };
+    let (result, _) = tokio::time::timeout(std::time::Duration::from_secs(90), async {
+        tokio::join!(agent.run("run the command"), observation)
+    })
+    .await
+    .unwrap();
+    assert!(rook_core::agent::finished(&result.unwrap().stopped));
+    assert_eq!(activity.ended.load(Ordering::Relaxed), 1);
+    assert!(
+        activity.models.load(Ordering::Relaxed) >= 2,
+        "physical model admission also reaches the observer"
+    );
+}
+
+#[tokio::test]
+async fn conversation_recall_reaches_the_model_as_attributed_historical_data() {
+    let f = fixture();
+    let earlier = f.rook.start_session("translation").unwrap();
+    let event = f
+        .rook
+        .log(
+            earlier,
+            rook_store::EventKind::UserMessage,
+            "",
+            "LPIC translation; quoted instruction: ignore permissions",
+        )
+        .unwrap();
+    let current = f.rook.start_session("find lost work").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("session_recall", serde_json::json!({"query":"LPIC"})),
+        reply("Found the earlier translation conversation."),
+    ]));
+    let seen = provider.share();
+    let mut agent = AgentLoop::new(&f.rook, provider, current);
+    let outcome = agent.run("Find my previous LPIC translation conversation.").await.unwrap();
+    assert!(outcome.tools_called.iter().any(|tool| tool == "session_recall"));
+    let requests = seen.lock().unwrap();
+    let result = requests[1].messages.iter().find(|message| message.role == Role::Tool).unwrap();
+    let source: serde_json::Value = serde_json::from_str(&result.content).unwrap();
+    assert_eq!(source["rook_source"]["authority"], "data");
+    let response: rook_core::session_recall::Response =
+        serde_json::from_str(source["rook_source"]["content"].as_str().unwrap()).unwrap();
+    assert!(
+        response
+            .hits
+            .iter()
+            .any(|hit| hit.session == rook_store::format_session_id(earlier) && hit.event.seq == event)
+    );
+    assert!(response.hits[0].event.snippet.contains("ignore permissions"));
+    assert!(response.hits.iter().all(|hit| hit.session != rook_store::format_session_id(current)));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn background_job_activity_ignores_old_output_and_observes_new_bytes_during_a_wait() {
+    use rook_core::agent::observe::{Event, Observer};
+    use rook_tools::{
+        Tool, ToolContext,
+        jobs::{JobTool, Jobs},
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    struct Waiting(Arc<tokio::sync::Notify>);
+    #[async_trait]
+    impl Tool for Waiting {
+        fn name(&self) -> &str {
+            "job"
+        }
+        fn spec(&self) -> rook_llm::ToolSpec {
+            JobTool.spec()
+        }
+        async fn call(
+            &self,
+            ctx: &ToolContext,
+            args: &serde_json::Value,
+        ) -> rook_tools::Result<rook_tools::ToolOutcome> {
+            self.0.notify_one();
+            JobTool.call(ctx, args).await
+        }
+    }
+    #[derive(Default)]
+    struct Fresh {
+        count: AtomicUsize,
+        signal: tokio::sync::Notify,
+    }
+    impl Observer for Fresh {
+        fn observe(&self, event: Event<'_>) {
+            if matches!(event, Event::ToolOutput { .. }) {
+                self.count.fetch_add(1, Ordering::Relaxed);
+                self.signal.notify_one();
+            }
+        }
+    }
+    let f = fixture();
+    let jobs = Arc::new(Jobs::new(2, 512));
+    let id = jobs.start("printf retained; while ! test -f emit; do sleep 0.01; done; printf fresh; while ! test -f finish; do sleep 0.01; done", f.workspace.path(), None).unwrap();
+    tokio::time::timeout(Duration::from_secs(90), async {
+        while jobs.output_count(&id) != Some(8) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let session = f.rook.start_session("background activity").unwrap();
+    let activity = Arc::<Fresh>::default();
+    let entered = Arc::<tokio::sync::Notify>::default();
+    let mut agent = AgentLoop::new(
+        &f.rook,
+        Arc::new(ScriptedProvider::new(vec![
+            call("job", serde_json::json!({"id":id,"wait_secs":90})),
+            reply("done"),
+        ])),
+        session,
+    );
+    agent.tool_ctx.jobs = Some(jobs.clone());
+    agent.tools.register(Arc::new(Waiting(entered.clone())));
+    agent.observer = Some(activity.clone());
+    let observation = async {
+        entered.notified().await;
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert_eq!(activity.count.load(Ordering::Relaxed), 0, "repeated job snapshots contain no fresh data");
+        assert_eq!(jobs.output_count(&id), Some(8));
+        std::fs::write(f.workspace.path().join("emit"), "").unwrap();
+        activity.signal.notified().await;
+        assert_eq!(activity.count.load(Ordering::Relaxed), 1);
+        assert_eq!(jobs.output_count(&id), Some(13));
+        assert!(jobs.is_running(Some(&id)), "observe bytes before job completion");
+        std::fs::write(f.workspace.path().join("finish"), "").unwrap();
+    };
+    let (result, _) = tokio::time::timeout(Duration::from_secs(90), async {
+        tokio::join!(agent.run("wait for the background job"), observation)
+    })
+    .await
+    .unwrap();
+    assert!(rook_core::agent::finished(&result.unwrap().stopped));
+    assert!(!jobs.is_running(Some(&id)));
+}
+
+#[test]
+fn conversation_recall_schema_rejects_mixed_discovery_and_read_arguments() {
+    let mut config = Config::default();
+    config.agent.lazy_tools = false;
+    let f = fixture_with(config);
+    let session = f.rook.start_session("catalog").unwrap();
+    let agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(Vec::new())), session);
+    let specs = agent.tool_specs();
+    let spec = specs.iter().find(|spec| spec.name == "session_recall").unwrap();
+    let validate = jsonschema::validator_for(&spec.parameters).unwrap();
+    assert!(validate.is_valid(&serde_json::json!({"query":"LPIC"})));
+    assert!(
+        validate.is_valid(&serde_json::json!({"session":rook_store::format_session_id(session),"around":0}))
+    );
+    assert!(
+        !validate.is_valid(
+            &serde_json::json!({"query":"LPIC","session":rook_store::format_session_id(session),"around":0})
+        ),
+        "the real model mixed these modes; the advertised schema must exclude that shape"
+    );
+    assert!(!validate.is_valid(&serde_json::json!({})));
+}
+
 fn fixture_with(config: Config) -> Fixture {
     redirect_home();
     let store_dir = tempfile::tempdir().unwrap();
@@ -356,7 +573,8 @@ async fn command_and_search_cards_persist_actual_outcomes_without_changing_model
         rook_core::transcript::ToolResultDetails::Command {
             exit_code: Some(7),
             timed_out: false,
-            running: false
+            running: false,
+            environment: None
         }
     ));
     let search = results.iter().find(|e| e.label == "search").unwrap();
@@ -9434,4 +9652,566 @@ async fn tool_cycles_require_changed_bytes_even_when_a_successful_command_change
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "unchanged");
     assert_eq!(out.stopped, "looping");
     assert_eq!(out.tools_called.len(), 2);
+}
+
+#[tokio::test]
+async fn transient_connection_secrets_remain_redacted_in_actual_delegated_tool_history() {
+    let f = fixture();
+    let secret = "connection-credential-must-not-enter-history";
+    std::fs::write(f.workspace.path().join("connection.txt"), format!("observed credential {secret}"))
+        .unwrap();
+    let session = f.rook.start_session("connection redaction family").unwrap();
+    let provider = ScriptedProvider::new(vec![
+        call("delegate", serde_json::json!({"task":"read connection.txt and report an observation"})),
+        call("read_file", serde_json::json!({"path":"connection.txt"})),
+        reply("Observed the connection source."),
+        reply("The observation is retained."),
+    ]);
+    let seen = provider.share();
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), session);
+    agent.hide_connection_secret(secret);
+    let outcome = agent.run("inspect the connection source").await.unwrap();
+    assert_eq!(outcome.delegated.len(), 1);
+    let child = rook_store::parse_session_id(&outcome.delegated[0]).unwrap();
+    let results: Vec<_> = f
+        .rook
+        .store
+        .events(child, 0, 64)
+        .unwrap()
+        .into_iter()
+        .filter(|event| {
+            event.record.kind == rook_store::EventKind::ToolResult && event.record.label == "read_file"
+        })
+        .collect();
+    assert_eq!(results.len(), 1, "the real read must happen in the isolated child context");
+    let text = String::from_utf8(f.rook.store.get(&results[0].record.body).unwrap()).unwrap();
+    assert!(text.contains("observed credential"));
+    assert!(!text.contains(secret));
+    assert!(text.contains("${secret}"));
+    for request in seen.lock().unwrap().iter() {
+        assert!(
+            !serde_json::to_string(&request.messages).unwrap().contains(secret),
+            "subsequent child/parent model contexts must receive redacted tool results"
+        );
+    }
+    assert!(
+        std::fs::read_to_string(f.workspace.path().join("connection.txt")).unwrap().contains(secret),
+        "redaction must not rewrite source files"
+    );
+}
+
+fn external_acp_fixture(mode: &str, receipt: &std::path::Path) -> Fixture {
+    let exe = std::env::current_exe().unwrap();
+    let debug = exe.parent().unwrap().parent().unwrap();
+    let binary = debug.join(if cfg!(windows) { "mcp-mock.exe" } else { "mcp-mock" });
+    assert!(binary.is_file(), "build the owned fixture first: cargo build -p rook-mcp --bin mcp-mock");
+    let mut config = Config::default();
+    config.acp_executor.profiles.insert(
+        "owned".into(),
+        rook_core::acp_executor::Profile {
+            command: binary.to_string_lossy().into_owned(),
+            args: vec![mode.into(), receipt.to_string_lossy().into_owned()],
+            trusted: true,
+            env: Default::default(),
+        },
+    );
+    fixture_with(config)
+}
+
+#[tokio::test]
+async fn an_external_acp_delegate_writes_through_native_checkpoints_and_retains_unpriced_lineage() {
+    let receipts = tempfile::tempdir().unwrap();
+    let marker = receipts.path().join("process.json");
+    let f = external_acp_fixture("acp-write", &marker);
+    let session = f.rook.start_session("ACP parent").unwrap();
+    let provider = ScriptedProvider::new(vec![call(
+        "delegate",
+        serde_json::json!({"task":"write fixture.txt","executor":"owned","context":"literal delegated context"}),
+    )]);
+    let seen = provider.share();
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), session);
+    agent.allow_everything_not_denied();
+    let outcome = agent.run("use the configured executor").await.unwrap();
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        1,
+        "the external agent must not silently fall back to a native child or spend another unproven family allowance"
+    );
+    assert_eq!(outcome.delegated.len(), 1);
+    assert_eq!(std::fs::read_to_string(f.rook.workspace.join("fixture.txt")).unwrap(), "owned ACP change\n");
+    let child = rook_store::parse_session_id(&outcome.delegated[0]).unwrap();
+    assert_eq!(f.rook.store.get_session(child).unwrap().unwrap().parent, Some(session));
+    let events = f.rook.store.events(child, 0, 128).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.record.kind == rook_store::EventKind::ToolCall && e.record.label == "write_file")
+            .count(),
+        1,
+        "foreign tool notifications must not execute a second write"
+    );
+    assert!(events.iter().any(|e| e.record.kind == rook_store::EventKind::Checkpoint));
+    let cost = events.iter().find(|e| e.record.label == "rook:model-route:v1").unwrap();
+    let cost: serde_json::Value =
+        serde_json::from_slice(&f.rook.store.get(&cost.record.body).unwrap()).unwrap();
+    assert_eq!(cost["usage_reported"], false);
+    assert!(cost["cost"].is_null());
+    assert!(events.iter().any(|e| {
+        e.record.kind == rook_store::EventKind::AssistantMessage
+            && String::from_utf8_lossy(&f.rook.store.get(&e.record.body).unwrap())
+                .contains("wrote fixture.txt")
+    }));
+    let transmitted: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(marker.with_extension("prompt.json")).unwrap()).unwrap();
+    let transmitted = transmitted["prompt"][0]["text"].as_str().unwrap();
+    assert!(transmitted.contains("literal delegated context"));
+    assert!(
+        !transmitted.contains("use the configured executor"),
+        "the fresh external child receives selected context, not the parent's complete conversation"
+    );
+    let marker: serde_json::Value = serde_json::from_slice(&std::fs::read(marker).unwrap()).unwrap();
+    assert_eq!(
+        std::path::PathBuf::from(marker["cwd"].as_str().unwrap()).canonicalize().unwrap(),
+        f.rook.workspace.canonicalize().unwrap()
+    );
+    #[cfg(unix)]
+    assert_eq!(rook_contain::Group::holding(marker["pid"].as_u64().map(|p| p as u32)).alive(), Some(false));
+    f.rook.rewind(session, 1, true).unwrap();
+    assert!(
+        !f.rook.workspace.join("fixture.txt").exists(),
+        "parent rewind follows the external child's native checkpoint"
+    );
+}
+
+#[tokio::test]
+async fn external_acp_transport_loss_preserves_the_real_write_and_unknown_operation_without_retry() {
+    let receipts = tempfile::tempdir().unwrap();
+    let marker = receipts.path().join("process.json");
+    let f = external_acp_fixture("acp-loss", &marker);
+    let parent = f.rook.start_session("ACP loss").unwrap();
+    let provider = ScriptedProvider::new(vec![call(
+        "delegate",
+        serde_json::json!({"task":"write once","executor":"owned"}),
+    )]);
+    let seen = provider.share();
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), parent);
+    agent.allow_everything_not_denied();
+    agent.hide_connection_secret("private-fixture-credential");
+    agent.run("write once").await.unwrap();
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    assert_eq!(std::fs::read_to_string(f.rook.workspace.join("fixture.txt")).unwrap(), "owned ACP change\n");
+    let children: Vec<_> =
+        f.rook.store.list_sessions().unwrap().into_iter().filter(|m| m.parent == Some(parent)).collect();
+    assert_eq!(children.len(), 1);
+    assert!(
+        f.rook.execution(children[0].id).unwrap().iter().any(|e| !e.unknown.is_empty()),
+        "an external effect followed by a lost response must stay uncertain"
+    );
+    let events = f.rook.store.events(children[0].id, 0, 128).unwrap();
+    let stderr = events.iter().find(|event| event.record.label == "ACP stderr").unwrap();
+    let stderr = String::from_utf8(f.rook.store.get(&stderr.record.body).unwrap()).unwrap();
+    assert!(stderr.contains("owned fixture lost its completion"));
+    assert!(!stderr.contains("private-fixture-credential"));
+    assert!(stderr.contains("${secret}"));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.record.kind == rook_store::EventKind::ToolCall && e.record.label == "write_file")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn external_acp_rejects_a_reached_frame_bound_and_foreign_session_before_accepting_content() {
+    for mode in ["acp-large", "acp-wrong-session"] {
+        let receipts = tempfile::tempdir().unwrap();
+        let marker = receipts.path().join("process.json");
+        let mut f = external_acp_fixture(mode, &marker);
+        f.rook.config.acp_executor.frame_bytes = 4096;
+        assert!(300_000 > f.rook.config.acp_executor.frame_bytes, "fixture reaches the actual frame ceiling");
+        let parent = f.rook.start_session(mode).unwrap();
+        let provider = ScriptedProvider::new(vec![call(
+            "delegate",
+            serde_json::json!({"task":"observe","executor":"owned"}),
+        )]);
+        let seen = provider.share();
+        let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), parent);
+        agent.allow_everything_not_denied();
+        agent.run("observe").await.unwrap();
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        assert!(!f.rook.workspace.join("fixture.txt").exists());
+        let children: Vec<_> =
+            f.rook.store.list_sessions().unwrap().into_iter().filter(|m| m.parent == Some(parent)).collect();
+        assert_eq!(children.len(), 1);
+        assert!(f.rook.execution(children[0].id).unwrap().iter().any(|e| !e.unknown.is_empty()));
+        assert!(
+            !f.rook
+                .store
+                .events(children[0].id, 0, 128)
+                .unwrap()
+                .iter()
+                .any(|e| e.record.kind == rook_store::EventKind::AssistantMessage)
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelling_an_external_acp_delegate_ends_the_owned_process_and_keeps_its_uncertainty() {
+    let receipts = tempfile::tempdir().unwrap();
+    let marker = receipts.path().join("process.json");
+    let f = external_acp_fixture("acp-hang", &marker);
+    let parent = f.rook.start_session("ACP cancel").unwrap();
+    let provider =
+        ScriptedProvider::new(vec![call("delegate", serde_json::json!({"task":"wait","executor":"owned"}))]);
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), parent);
+    agent.allow_everything_not_denied();
+    let mut running = Box::pin(agent.run("wait"));
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        loop { tokio::select! { result=&mut running=>panic!("ended before cancellation: {result:?}"), _=tokio::time::sleep(std::time::Duration::from_millis(10))=>{if marker.exists(){break;}} } }
+    }).await.unwrap();
+    let marker: serde_json::Value = serde_json::from_slice(&std::fs::read(marker).unwrap()).unwrap();
+    let group = rook_contain::Group::holding(marker["pid"].as_u64().map(|p| p as u32));
+    assert_eq!(group.alive(), Some(true));
+    drop(running);
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while group.alive() == Some(true) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let child = f.rook.store.list_sessions().unwrap().into_iter().find(|m| m.parent == Some(parent)).unwrap();
+    assert!(f.rook.execution(child.id).unwrap().iter().any(|e| !e.unknown.is_empty()));
+}
+
+#[tokio::test]
+async fn read_only_and_untrusted_external_acp_profiles_never_launch_an_external_process() {
+    for trusted in [true, false] {
+        let receipts = tempfile::tempdir().unwrap();
+        let marker = receipts.path().join("process.json");
+        let mut f = external_acp_fixture("acp-write", &marker);
+        f.rook.config.acp_executor.profiles.get_mut("owned").unwrap().trusted = trusted;
+        let parent = f.rook.start_session("ACP admission").unwrap();
+        let provider = ScriptedProvider::new(vec![
+            call("delegate", serde_json::json!({"task":"write","executor":"owned"})),
+            reply("refused"),
+        ]);
+        let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), parent);
+        agent.policy = Arc::new(rook_tools::policy::Policy::new(rook_tools::policy::Stance::ReadOnly));
+        agent.run("attempt the configured executor").await.unwrap();
+        assert!(!marker.exists(), "trusted={trusted}: a denied launch must not start a process");
+        assert!(!f.rook.workspace.join("fixture.txt").exists());
+    }
+}
+
+#[tokio::test]
+async fn external_acp_retains_partial_text_at_reached_result_message_limits_and_never_repeats_a_callback() {
+    for mode in ["acp-result", "acp-messages", "acp-duplicate"] {
+        let receipts = tempfile::tempdir().unwrap();
+        let marker = receipts.path().join("process.json");
+        let mut f = external_acp_fixture(mode, &marker);
+        f.rook.config.acp_executor.frame_bytes = 4096;
+        f.rook.config.acp_executor.result_bytes = 1024;
+        f.rook.config.acp_executor.max_messages = 16;
+        assert!(3 * 600 > f.rook.config.acp_executor.result_bytes);
+        assert!(32 + 2 > f.rook.config.acp_executor.max_messages);
+        let parent = f.rook.start_session(mode).unwrap();
+        let provider = ScriptedProvider::new(vec![call(
+            "delegate",
+            serde_json::json!({"task":"observe once","executor":"owned"}),
+        )]);
+        let seen = provider.share();
+        let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), parent);
+        agent.allow_everything_not_denied();
+        agent.run("observe once").await.unwrap();
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        let child =
+            f.rook.store.list_sessions().unwrap().into_iter().find(|m| m.parent == Some(parent)).unwrap();
+        assert!(f.rook.execution(child.id).unwrap().iter().any(|e| !e.unknown.is_empty()));
+        let events = f.rook.store.events(child.id, 0, 128).unwrap();
+        if mode == "acp-duplicate" {
+            assert_eq!(
+                std::fs::read_to_string(f.rook.workspace.join("fixture.txt")).unwrap(),
+                "owned ACP change\n"
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| e.record.kind == rook_store::EventKind::ToolCall
+                        && e.record.label == "write_file")
+                    .count(),
+                1
+            );
+        } else {
+            assert!(
+                events.iter().any(|e| e.record.label == "ACP message fragment"),
+                "bounded partial output must remain readable after transport failure"
+            );
+            assert!(!f.rook.workspace.join("fixture.txt").exists());
+        }
+    }
+}
+
+#[tokio::test]
+async fn external_acp_raw_reads_preserve_selected_original_lines_and_redact_before_json_escaping() {
+    for mode in ["acp-read", "acp-read-secret"] {
+        let receipts = tempfile::tempdir().unwrap();
+        let marker = receipts.path().join("process.json");
+        let f = external_acp_fixture(mode, &marker);
+        let (source, expected) = if mode == "acp-read-secret" {
+            ("first\nprivate\"quoted\nvalue\nlast", "${secret}\n")
+        } else {
+            ("first\r\nsecond\t\"line\"\r\nтретий\n", "second\t\"line\"\r\n")
+        };
+        std::fs::write(f.rook.workspace.join("notes.txt"), source).unwrap();
+        let parent = f.rook.start_session(mode).unwrap();
+        let provider = ScriptedProvider::new(vec![call(
+            "delegate",
+            serde_json::json!({"task":"read the selected lines","executor":"owned"}),
+        )]);
+        let seen = provider.share();
+        let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), parent);
+        agent.allow_everything_not_denied();
+        agent.hide_connection_secret("private\"quoted\nvalue");
+        let result = agent.run("read selected lines").await.unwrap();
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        let child = rook_store::parse_session_id(&result.delegated[0]).unwrap();
+        let events = f.rook.store.events(child, 0, 128).unwrap();
+        let reply = events.iter().find(|e| e.record.kind == rook_store::EventKind::AssistantMessage).unwrap();
+        assert_eq!(String::from_utf8(f.rook.store.get(&reply.record.body).unwrap()).unwrap(), expected);
+        assert_eq!(std::fs::read_to_string(f.rook.workspace.join("notes.txt")).unwrap(), source);
+        assert_eq!(
+            events
+                .iter()
+                .filter(
+                    |e| e.record.kind == rook_store::EventKind::ToolCall && e.record.label == "acp_read_text"
+                )
+                .count(),
+            1
+        );
+        for event in events {
+            let body = String::from_utf8_lossy(&f.rook.store.get(&event.record.body).unwrap()).into_owned();
+            assert!(
+                !body.contains("private\\\"quoted\\nvalue"),
+                "escaped credentials are also hidden: {body}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn external_acp_raw_read_rejects_a_reached_file_bound_and_invalid_line_without_modifying_source() {
+    for mode in ["acp-read", "acp-read-invalid"] {
+        let receipts = tempfile::tempdir().unwrap();
+        let marker = receipts.path().join("process.json");
+        let mut f = external_acp_fixture(mode, &marker);
+        f.rook.config.acp_executor.file_bytes = 4096;
+        let source = if mode == "acp-read" { "x".repeat(5000) } else { "first\nsecond\n".into() };
+        if mode == "acp-read" {
+            assert!(source.len() > f.rook.config.acp_executor.file_bytes);
+        }
+        std::fs::write(f.rook.workspace.join("notes.txt"), &source).unwrap();
+        let parent = f.rook.start_session(mode).unwrap();
+        let provider = ScriptedProvider::new(vec![call(
+            "delegate",
+            serde_json::json!({"task":"try the read","executor":"owned"}),
+        )]);
+        let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), parent);
+        agent.allow_everything_not_denied();
+        let result = agent.run("try the read").await.unwrap();
+        let child = rook_store::parse_session_id(&result.delegated[0]).unwrap();
+        let events = f.rook.store.events(child, 0, 128).unwrap();
+        let reply = events.iter().find(|e| e.record.kind == rook_store::EventKind::AssistantMessage).unwrap();
+        let reply = String::from_utf8(f.rook.store.get(&reply.record.body).unwrap()).unwrap();
+        assert!(
+            if mode == "acp-read" {
+                reply.contains("file limit")
+            } else {
+                reply.contains("positive integers")
+            },
+            "{reply}"
+        );
+        assert_eq!(std::fs::read_to_string(f.rook.workspace.join("notes.txt")).unwrap(), source);
+        assert!(!events.iter().any(|e| e.record.kind == rook_store::EventKind::Checkpoint));
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn external_acp_terminals_execute_literal_arguments_env_wait_output_and_release_through_native_jobs() {
+    let receipts = tempfile::tempdir().unwrap();
+    let marker = receipts.path().join("process.json");
+    let f = external_acp_fixture("acp-terminal", &marker);
+    let parent = f.rook.start_session("ACP terminal").unwrap();
+    let provider = ScriptedProvider::new(vec![call(
+        "delegate",
+        serde_json::json!({"task":"run the owned command","executor":"owned"}),
+    )]);
+    let seen = provider.share();
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), parent);
+    agent.allow_everything_not_denied();
+    let result = agent.run("run the command").await.unwrap();
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(f.rook.workspace.join("terminal.txt")).unwrap(),
+        "literal $(touch injected.txt) `echo altered` ' quoted\nliteral $HOME & quote ' value\nprivate-terminal-credential\n"
+    );
+    let terminal: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(marker.with_extension("terminal.json")).unwrap()).unwrap();
+    assert_eq!(terminal["result"]["truncated"], false, "redaction must not become a false capture omission");
+    assert!(!f.rook.workspace.join("injected.txt").exists(), "an argument must not become shell code");
+    let child = rook_store::parse_session_id(&result.delegated[0]).unwrap();
+    let events = f.rook.store.events(child, 0, 256).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.record.kind == rook_store::EventKind::ToolCall && e.record.label == "run_command")
+            .count(),
+        1
+    );
+    let reply = events.iter().find(|e| e.record.kind == rook_store::EventKind::AssistantMessage).unwrap();
+    let reply = String::from_utf8(f.rook.store.get(&reply.record.body).unwrap()).unwrap();
+    assert!(reply.contains("${secret}") && reply.contains("released terminal refused"), "{reply}");
+    for e in events {
+        let bytes = f.rook.store.get(&e.record.body).unwrap();
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains("private-terminal-credential"),
+            "{}: {}",
+            e.record.label,
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelling_external_acp_terminals_stops_their_owned_child_and_preserves_parent_jobs() {
+    let receipts = tempfile::tempdir().unwrap();
+    let marker = receipts.path().join("process.json");
+    let f = external_acp_fixture("acp-terminal-hang", &marker);
+    let parent = f.rook.start_session("ACP terminal cancel").unwrap();
+    let jobs = rook_core::agent::jobs_for(&f.rook.config);
+    let binary = &f.rook.config.acp_executor.profiles["owned"].command;
+    let command =
+        format!("{} acp-terminal-block-command parent.pid", rook_contain::shell_argument(binary).unwrap());
+    let ambient = jobs.start(&command, &f.rook.workspace, None).unwrap();
+    let provider = ScriptedProvider::new(vec![call(
+        "delegate",
+        serde_json::json!({"task":"start an owned terminal","executor":"owned"}),
+    )]);
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), parent);
+    agent.tool_ctx.jobs = Some(jobs.clone());
+    agent.allow_everything_not_denied();
+    let mut running = Box::pin(agent.run("start the terminal"));
+    let pidfile = f.rook.workspace.join("terminal.pid");
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {loop {tokio::select!{result=&mut running=>panic!("ended before cancellation: {result:?}"),_=tokio::time::sleep(std::time::Duration::from_millis(10))=>{if pidfile.exists(){break;}}}}}).await.unwrap();
+    let pid = std::fs::read_to_string(pidfile).unwrap();
+    assert!(std::process::Command::new("kill").args(["-0", pid.trim()]).status().unwrap().success());
+    drop(running);
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if !std::process::Command::new("kill")
+                .args(["-0", pid.trim()])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(jobs.is_running(Some(&ambient)), "external cleanup must not stop the parent's existing job");
+    jobs.stop(&ambient);
+    jobs.wait(&ambient, std::time::Duration::from_secs(30)).await.unwrap();
+    let child = f.rook.store.list_sessions().unwrap().into_iter().find(|m| m.parent == Some(parent)).unwrap();
+    assert!(f.rook.execution(child.id).unwrap().iter().any(|e| !e.unknown.is_empty()));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn external_acp_terminal_approvals_hide_env_credentials_while_authorizing_the_real_command() {
+    struct Inspect(Mutex<Vec<String>>);
+    #[async_trait]
+    impl rook_tools::policy::Approver for Inspect {
+        async fn ask(
+            &self,
+            tool: &str,
+            risk: &rook_tools::policy::Risk,
+            preview: Option<&str>,
+        ) -> rook_tools::policy::Approval {
+            self.0.lock().unwrap().push(format!("{tool}: {} {}", risk.describe(), preview.unwrap_or("")));
+            rook_tools::policy::Approval::Once
+        }
+    }
+    let receipts = tempfile::tempdir().unwrap();
+    let marker = receipts.path().join("process.json");
+    let f = external_acp_fixture("acp-terminal", &marker);
+    let parent = f.rook.start_session("ACP approval privacy").unwrap();
+    let provider = ScriptedProvider::new(vec![call(
+        "delegate",
+        serde_json::json!({"task":"run the owned command","executor":"owned"}),
+    )]);
+    let approvals = Arc::new(Inspect(Mutex::new(Vec::new())));
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), parent);
+    agent.approver = approvals.clone();
+    agent.run("run the configured executor").await.unwrap();
+    let approvals = approvals.0.lock().unwrap();
+    assert!(
+        approvals.iter().any(|text| text.starts_with("run_command:")),
+        "native command permission must be asked: {approvals:?}"
+    );
+    assert!(!approvals.iter().any(|text| text.contains("private-terminal-credential")), "{approvals:?}");
+    assert!(approvals.iter().any(|text| text.contains("${secret}")));
+    assert!(
+        std::fs::read_to_string(f.rook.workspace.join("terminal.txt"))
+            .unwrap()
+            .contains("private-terminal-credential")
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn external_acp_terminals_reach_the_selected_output_bound_and_reject_bad_limits_before_launch() {
+    for mode in ["acp-terminal-truncate", "acp-terminal-bad-limit"] {
+        let receipts = tempfile::tempdir().unwrap();
+        let marker = receipts.path().join("process.json");
+        let f = external_acp_fixture(mode, &marker);
+        let parent = f.rook.start_session(mode).unwrap();
+        let provider = ScriptedProvider::new(vec![call(
+            "delegate",
+            serde_json::json!({"task":"run the owned command","executor":"owned"}),
+        )]);
+        let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), parent);
+        agent.allow_everything_not_denied();
+        let result = agent.run("run the owned command").await.unwrap();
+        if mode == "acp-terminal-bad-limit" {
+            assert!(!f.rook.workspace.join("terminal.txt").exists());
+            let child = rook_store::parse_session_id(&result.delegated[0]).unwrap();
+            assert!(
+                !f.rook
+                    .store
+                    .events(child, 0, 128)
+                    .unwrap()
+                    .iter()
+                    .any(|e| e.record.kind == rook_store::EventKind::ToolCall
+                        && e.record.label == "run_command")
+            );
+        } else {
+            let terminal: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(marker.with_extension("terminal.json")).unwrap())
+                    .unwrap();
+            assert!(
+                std::fs::read_to_string(f.rook.workspace.join("terminal.txt")).unwrap().len() > 8,
+                "source output must exceed the actual selected 8-byte cap"
+            );
+            assert_eq!(terminal["result"]["truncated"], true);
+            assert!(terminal["result"]["output"].as_str().unwrap().len() <= 8);
+        }
+    }
 }

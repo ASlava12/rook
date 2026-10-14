@@ -815,6 +815,7 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer 0.10.4",
  "crypto-common 0.1.7",
+ "subtle",
 ]
 
 [[package]]
@@ -1261,6 +1262,15 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest 0.10.7",
+]
 
 [[package]]
 name = "http"
@@ -2740,8 +2750,10 @@ version = "0.11.2"
 dependencies = [
  "async-trait",
  "base64",
+ "rook-contain",
  "rook-core",
  "rook-llm",
+ "rook-mcp",
  "rook-proto",
  "rook-skills",
  "rook-store",
@@ -2763,6 +2775,8 @@ dependencies = [
  "clap",
  "crossterm",
  "futures-util",
+ "hex",
+ "hmac",
  "libc",
  "ratatui",
  "reqwest",
@@ -2779,6 +2793,7 @@ dependencies = [
  "rustyline",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "shlex",
  "tempfile",
  "tokio",
@@ -2811,6 +2826,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "hex",
+ "hmac",
  "ignore",
  "image",
  "jsonschema",
@@ -2939,6 +2955,7 @@ name = "rook-tools"
 version = "0.11.2"
 dependencies = [
  "async-trait",
+ "base64",
  "globset",
  "ignore",
  "landlock",
@@ -3408,6 +3425,9 @@ name = "similar"
 version = "3.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4f66ca1f7aca2474dc10c942eb22feffc897735f54cd1db90138c2fddb490987"
+dependencies = [
+ "bstr",
+]
 
 [[package]]
 name = "siphasher"

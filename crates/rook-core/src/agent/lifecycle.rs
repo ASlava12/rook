@@ -120,11 +120,16 @@ impl AgentLoop<'_> {
 
     pub(super) fn prepare_recipe(&mut self, prompt: &str) -> Result<Option<String>> {
         self.effective_options = None;
-        let prepared = crate::recipes::prepare(self.rook, prompt, &self.options)?;
+        let prepared = match self.prepared_recipe.take() {
+            Some(recipe) => Some(recipe),
+            None => crate::recipes::prepare(self.rook, prompt, &self.options)?,
+        };
+        self.selected_recipe = None;
         let mut prepared_prompt = None;
         self.recipe_skill = None;
         self.recipe_output = false;
         if let Some(recipe) = prepared {
+            self.selected_recipe = Some((recipe.definition, recipe.values));
             self.effective_options = Some(recipe.options);
             self.recipe_skill = recipe.skill;
             self.recipe_output = recipe.output_needs_approval;
@@ -147,6 +152,14 @@ impl AgentLoop<'_> {
             if let Some(seconds) = recipe.limits.seconds {
                 self.max_turn_secs =
                     if self.max_turn_secs == 0 { seconds } else { self.max_turn_secs.min(seconds) };
+            }
+            if self.depth > 0 && self.max_turn_secs > 0 {
+                let by = std::time::Instant::now()
+                    .checked_add(std::time::Duration::from_secs(self.max_turn_secs))
+                    .ok_or_else(|| {
+                        CoreError::Other("Subrecipe deadline exceeds the supported clock".into())
+                    })?;
+                self.by = Some(self.by.map_or(by, |old| old.min(by)));
             }
             prepared_prompt = Some(recipe.prompt);
         }

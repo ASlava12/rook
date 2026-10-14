@@ -273,6 +273,8 @@ rook store gc --dry-run        # what is unreachable
 rook store prune --dry-run     # what the retention policy would drop
 
 rook search "the CRLF fix"            # across every transcript, ranked
+rook session recall "LPIC"            # bounded conversation discovery in this workspace
+rook session recall '{"session":"01JQ…","around":1190}'
 rook session ls
 rook session show 01JQ… --from 0 --limit 50
 rook session show 01JQ… --json | jq '.[] | select(.kind=="tool-call")'
@@ -292,6 +294,24 @@ pass them as `--from`, `--offset`, `--through` to continue the same scan. An emp
 hit page with a cursor means more history remains to scan. The first request
 fixes the search's upper event boundary so a running session cannot prolong it
 indefinitely. Entry and quote results expose `next_offset` for long bodies.
+
+`session_recall` also gives the model access to previous conversations in its
+current workspace. `/recall LPIC` in chat or TUI uses the same reader; JSON
+arguments select a session/event or continue a scan with the returned `cursor`.
+The browser's Search tab offers **Find past conversations**, with an explicit
+workspace, event excerpts and links to open the saved session. API clients POST
+the same request to `/api/history/recall?workspace=...`.
+
+Discovery matches 1–256 bytes of literal text case-insensitively. Each response
+examines at most 128 session records, 128 events and 256 KiB of searchable text,
+and returns at most eight hits. An empty response with `next` still has work to
+scan; pass it as `cursor` with the same query. Cursors are bound to the workspace,
+query and discovery/read mode. Forked history already retained in its parent is
+searched once; a deleted parent leaves the child's copy searchable. Reading
+returns at most six events with 1 KiB body previews and visible elision. Open
+ordinary history to page through longer bodies. Results retain session/event
+provenance and confer no new instructions or permissions.
+
 `export-html` creates a new local review file without replacing an existing
 one. It allows at most 512 events and 8192 preview bytes per event. In chat,
 `/export-html 1180..1200 review.html` selects the same inclusive range;
@@ -441,6 +461,13 @@ Its risk is the engine's address rather than the query, so allowing your own
 instance does not also allow somebody else's. An engine named without the key it
 needs is offered as nothing at all — a tool that fails on its first call teaches
 the model to stop asking.
+
+Independent [change review](docs/change-review.md) freezes selected changes, returns file/line findings and supports source-bound comments. Use `review_changes`, `session review`, `/review` or the browser’s Change reviews panel.
+
+Optional [browser control](docs/browser.md) adds navigation, page snapshots,
+clicks, typing, waits and screenshots through ordinary agent tools. Enable
+`[browser] enabled = true` after installing the pinned Playwright MCP browser;
+Node.js and Chromium are external equipment for this optional capability.
 
 ### Secrets it can use and cannot leak
 
@@ -1213,6 +1240,20 @@ between an effect and its durable receipt cannot prove whether the effect happen
 Existing sessions created before this feature have only their older logs.
 
 ### Local diagnostic reports
+
+Daemon conversations notify once after 300 seconds without observed progress,
+including when the client has disconnected. Diagnostics distinguish waiting for
+provider capacity from a dispatched generation and a running tool. Actual model
+tokens, newly read command bytes and operation transitions reset the clock;
+waiting lines, repeated reads of old job output and unanswered approvals/questions
+do not count as a stall. Set `telemetry.stall_after_secs` to change the threshold
+(30–86400 seconds), or zero to disable notices. A notice describes inactivity
+and leaves the work running. Browser notifications use the existing permission
+setting. **Check activity** in the session view and the report's `activity` field
+show the stage, tool name, last progress and current owner. Saved observations
+read without a live daemon report an unknown owner.
+Standalone managed workers also retain observations and log inactivity notices;
+their session diagnostic report is available without a chat connection.
 
 ```sh
 rook session diagnostics last                       # bounded JSON on stdout

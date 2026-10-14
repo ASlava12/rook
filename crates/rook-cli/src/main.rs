@@ -117,6 +117,14 @@ fn main() -> Result<()> {
             commands::store::cmd_checkpoint(&Source::open(cli.workspace)?, c, cli.json)
         }
         Some(Command::Mcp(c)) => commands::mcp::cmd_mcp(cli.workspace, c, cli.json),
+        Some(Command::Telegram { request }) => {
+            println!("{}", Source::open(cli.workspace)?.telegram_command(&request)?);
+            Ok(())
+        }
+        Some(Command::Events { request }) => {
+            println!("{}", Source::open(cli.workspace)?.events_command(&request)?);
+            Ok(())
+        }
         Some(Command::Memory(c)) => {
             let here = workspace_of(&cli.workspace);
             commands::knowledge::cmd_memory(&Source::open(cli.workspace)?, c, &here, cli.json)

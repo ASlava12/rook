@@ -88,6 +88,13 @@ const DOC_PASSAGE_BYTES: usize = 1_200;
 /// is a few thousand words, and the ones that are not are mostly navigation.
 const DOC_PAGE_BYTES: usize = 8_000;
 
+pub(super) struct Recorded {
+    pub(super) text: String,
+    pub(super) failed: bool,
+    pub(super) seq: Option<u64>,
+    pub(super) job: Option<String>,
+}
+
 impl<'a> AgentLoop<'a> {
     pub(super) async fn dispatch_recorded<'f>(
         &self,
@@ -97,6 +104,21 @@ impl<'a> AgentLoop<'a> {
         crew: &'f Crew<'a>,
         nursery: &mut Nursery<'f>,
     ) -> Result<(String, bool, Option<u64>)>
+    where
+        'a: 'f,
+    {
+        let recorded = Box::pin(self.dispatch_receipt(call, outcome, on_progress, crew, nursery)).await?;
+        Ok((recorded.text, recorded.failed, recorded.seq))
+    }
+
+    pub(super) async fn dispatch_receipt<'f>(
+        &self,
+        call: &rook_llm::ToolCall,
+        outcome: &mut TurnOutcome,
+        on_progress: &mut impl FnMut(Progress<'_>),
+        crew: &'f Crew<'a>,
+        nursery: &mut Nursery<'f>,
+    ) -> Result<Recorded>
     where
         'a: 'f,
     {
@@ -114,7 +136,7 @@ impl<'a> AgentLoop<'a> {
                 &self.vault.redact(&call.arguments.to_string()),
             )?;
             self.rook.log(self.session, EventKind::ToolResult, &call.name, &reason)?;
-            return Ok((reason, true, None));
+            return Ok(Recorded { text: reason, failed: true, seq: None, job: None });
         }
         let journal = self
             .execution
@@ -135,9 +157,13 @@ impl<'a> AgentLoop<'a> {
             background,
             self.tool_ctx.jobs.as_deref(),
         )?;
+        self.tool_execution_uncertain.store(false, std::sync::atomic::Ordering::Release);
         *self.launched_job.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.tool_cycle_outcome.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let result = self.dispatch(call, outcome, on_progress, crew, nursery).await;
+        if self.tool_execution_uncertain.load(std::sync::atomic::Ordering::Acquire) {
+            journal.retain_unknown()?;
+        }
         let job = self.launched_job.lock().unwrap_or_else(|e| e.into_inner()).take();
         let phase = self.routing.as_ref().filter(|_| {
             !result.1
@@ -153,7 +179,7 @@ impl<'a> AgentLoop<'a> {
             phase.map(|(selected, target)| (self.rook, selected.as_str(), target.as_str())),
             companion.as_ref().map(|(key, bytes)| (key.as_str(), bytes.as_slice())),
         )?;
-        Ok((result.0, result.1, Some(seq)))
+        Ok(Recorded { text: result.0, failed: result.1, seq: Some(seq), job })
     }
 
     /// The text the model sees, and whether the call failed — which the outcome
@@ -182,6 +208,11 @@ impl<'a> AgentLoop<'a> {
         // Before the gate, not after: a call whose arguments did not parse has
         // no risk worth weighing, and asking somebody to approve running the
         // empty string is a question with no answer.
+        if self.review_only && call.name != crate::review::READ_TOOL {
+            let refusal = "review context can only read retained review sources".to_string();
+            self.rook.log(self.session, EventKind::ToolResult, &call.name, &refusal).ok();
+            return (refusal, true);
+        }
         if let Some(unusable) = rook_tools::unusable_arguments(&call.name, &call.arguments) {
             let refusal = unusable.to_string();
             self.rook.log(self.session, EventKind::Error, &call.name, &refusal).ok();
@@ -189,6 +220,11 @@ impl<'a> AgentLoop<'a> {
         }
 
         outcome.tools_called.push(call.name.clone());
+        if call.name == crate::review::TOOL {
+            let result = self.review_changes(&call.arguments, outcome, on_progress).await;
+            self.rook.log(self.session, EventKind::ToolResult, &call.name, &result.0).ok();
+            return result;
+        }
 
         if call.name == crate::worktrees::TOOL {
             let action = call.arguments.get("action").and_then(|v| v.as_str());
@@ -254,12 +290,82 @@ impl<'a> AgentLoop<'a> {
             }
         }
 
+        if call.name == "inbound_read" {
+            let offset = call
+                .arguments
+                .as_object()
+                .filter(|fields| fields.keys().all(|key| key == "offset"))
+                .and_then(|fields| match fields.get("offset") {
+                    None => Some(0),
+                    Some(value) => value.as_u64(),
+                });
+            let Some(offset) = offset else {
+                return ("inbound_read expects only a nonnegative byte offset".into(), true);
+            };
+            let (text, failed) = match crate::inbound::read_session_source(self.rook, self.session, offset) {
+                Ok(value) => (self.vault.redact(&value.to_string()), false),
+                Err(e) => (e.to_string(), true),
+            };
+            self.rook.log(self.session, EventKind::ToolResult, &call.name, &text).ok();
+            return (text, failed);
+        }
+        if call.name == crate::session_recall::TOOL {
+            let result = serde_json::from_value::<crate::session_recall::Request>(call.arguments.clone())
+                .map_err(|error| CoreError::Other(error.to_string()))
+                .and_then(|request| self.rook.session_recall_excluding(&request, Some(self.session)))
+                .and_then(|response| {
+                    serde_json::to_string(&response).map_err(|error| CoreError::Other(error.to_string()))
+                });
+            let (text, failed) = match result {
+                Ok(text) => (self.vault.redact(&text), false),
+                Err(error) => (error.to_string(), true),
+            };
+            self.rook.log(self.session, EventKind::ToolResult, &call.name, &text).ok();
+            return (text, failed);
+        }
+
         if call.name == VERIFY {
             let text = self.verify(&call.arguments, outcome, on_progress).await;
             self.rook.log(self.session, EventKind::ToolResult, VERIFY, &text).ok();
             return (text, false);
         }
 
+        if call.name == "subrecipe_read" {
+            let result = (|| -> Result<String> {
+                let id = call.arguments["id"]
+                    .as_str()
+                    .ok_or_else(|| CoreError::Other("Subrecipe source needs a call id".into()))?;
+                let seq = call.arguments["seq"]
+                    .as_u64()
+                    .ok_or_else(|| CoreError::Other("Subrecipe source needs a source sequence".into()))?;
+                let offset = call.arguments["offset"].as_u64().unwrap_or(0);
+                let mut page = self.rook.composite_request(
+                    self.session,
+                    crate::composite_recipes::Request::Read { id: id.into(), seq, offset },
+                )?;
+                use base64::Engine;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(page["bytes_base64"].as_str().unwrap_or(""))
+                    .map_err(|e| CoreError::Other(e.to_string()))?;
+                page["text"] = serde_json::json!(String::from_utf8_lossy(&bytes));
+                let data = crate::persistence::encode_with_limit(&page, 32768)?;
+                String::from_utf8(data).map_err(|e| CoreError::Other(e.to_string()))
+            })();
+            let result = match result {
+                Ok(text) => (text, false),
+                Err(e) => (e.to_string(), true),
+            };
+            self.rook.log(self.session, EventKind::ToolResult, &call.name, &result.0).ok();
+            return result;
+        }
+        if call.name == crate::composite_recipes::TOOL {
+            let result = match self.compose(call, outcome, on_progress).await {
+                Ok(result) => result,
+                Err(e) => (e.to_string(), true),
+            };
+            self.rook.log(self.session, EventKind::ToolResult, &call.name, &result.0).ok();
+            return result;
+        }
         if call.name == DELEGATE {
             let text = self.delegate(&call.arguments, outcome, on_progress, crew, nursery).await;
             self.rook.log(self.session, EventKind::ToolResult, DELEGATE, &text).ok();
@@ -486,6 +592,25 @@ impl<'a> AgentLoop<'a> {
         // can be put back. What can be had is the list of what it wrote, and
         // without it a turn that ran `sed -i` reports no files changed at all.
         let watching = self.watching_a_command(call).then(std::time::SystemTime::now);
+        let shell_capture = if call.name == "run_command" {
+            if self.rook.config.shell_undo.enabled && self.tool_ctx.terminals.is_some() {
+                return (
+                    "shell undo cannot observe editor-owned terminals; use local command execution".into(),
+                    true,
+                );
+            }
+            match self.rook.shell_undo_begin(self.session).await {
+                Ok(capture) => capture,
+                Err(error) => {
+                    let text = self.vault.redact(&format!("command did not start: {error}"));
+                    self.rook.log(self.session, EventKind::ToolResult, &call.name, &text).ok();
+                    return (text, true);
+                }
+            }
+        } else {
+            None
+        };
+
         // What the files this call names are like before it writes them. The
         // answer is discarded: it is the baseline, and what it is worth is the
         // difference from it afterwards.
@@ -497,7 +622,23 @@ impl<'a> AgentLoop<'a> {
         // wedged one are the same await and the same unchanging line: the tool
         // knows which, and had nowhere to say it.
         let (say, mut said) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let ctx = rook_tools::ToolContext { watching: Some(say), ..self.tool_ctx.clone() };
+        let output_activity = std::sync::Arc::<std::sync::atomic::AtomicU64>::default();
+        let ctx = rook_tools::ToolContext {
+            require_command_cleanup: shell_capture.is_some(),
+            watching: Some(say),
+            output_activity: Some(output_activity.clone()),
+            ..self.tool_ctx.clone()
+        };
+        let job_output = || {
+            (call.name == "job")
+                .then(|| call.arguments.get("id").and_then(|id| id.as_str()))
+                .flatten()
+                .and_then(|id| self.tool_ctx.jobs.as_ref().and_then(|jobs| jobs.output_count(id)))
+                .unwrap_or(0)
+        };
+        let mut received = job_output();
+        let mut sampling = tokio::time::interval(std::time::Duration::from_millis(500));
+        sampling.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let calling = self.tools.call(&ctx, &call.name, &call.arguments);
         tokio::pin!(calling);
         let outcome = loop {
@@ -508,13 +649,53 @@ impl<'a> AgentLoop<'a> {
                 Some(word) = said.recv() => {
                     on_progress(Progress::Working { call: &call.name, said: &word });
                 }
+                _ = sampling.tick(), if self.observer.is_some() => {
+                    let current = output_activity.load(std::sync::atomic::Ordering::Relaxed)
+                        .saturating_add(job_output());
+                    if current > received {
+                        received = current;
+                        if let Some(observer) = &self.observer {
+                            observer.observe(super::observe::Event::ToolOutput { session: self.session });
+                        }
+                    }
+                }
                 done = &mut calling => break done,
             }
         };
         let outcome = match outcome {
             Ok(o) => o,
+            Err(rook_tools::ToolError::ExecutionUnknown(error)) => {
+                rook_tools::ToolOutcome::error(format!("tool error: {error}"))
+                    .with("execution_uncertain", true)
+            }
             Err(e) => rook_tools::ToolOutcome::error(format!("tool error: {e}")),
         };
+        let mut outcome = outcome;
+        if call.name == "run_command" {
+            *self.launched_job.lock().unwrap_or_else(|e| e.into_inner()) =
+                outcome.meta.get("job").and_then(serde_json::Value::as_str).map(str::to_owned);
+        }
+        if outcome.meta.get("execution_uncertain") == Some(&serde_json::json!(true)) {
+            self.tool_execution_uncertain.store(true, std::sync::atomic::Ordering::Release);
+        }
+        if let Some(capture) = shell_capture {
+            let job =
+                self.tool_ctx.jobs.as_ref().zip(outcome.meta.get("job").and_then(serde_json::Value::as_str));
+            let stopped =
+                outcome.meta.get("processes_stopped").and_then(serde_json::Value::as_bool).unwrap_or(false);
+            match capture.finish(job, stopped).await {
+                Ok(id) => {
+                    outcome
+                        .content
+                        .push_str(&format!("\n[shell undo receipt: {id}; inspect with session shell-undo]"));
+                }
+                Err(error) => {
+                    outcome.content.push_str(&format!(
+                        "\n[shell undo finalization failed: {error}; inspect its retained preimages]"
+                    ));
+                }
+            }
+        }
         // Hash the typed answer before hooks, elapsed-time prose and source
         // envelopes can make the same operation appear to have progressed.
         if let Err(why) = self.cycle_semantic_result(&call.name, &outcome) {
@@ -545,10 +726,6 @@ impl<'a> AgentLoop<'a> {
                 .filter_map(|p| self.tool_ctx.resolve(p).ok())
                 .collect();
             self.rook.touched(self.session, &seen);
-        }
-        if call.name == "run_command" {
-            *self.launched_job.lock().unwrap_or_else(|e| e.into_inner()) =
-                outcome.meta.get("job").and_then(serde_json::Value::as_str).map(str::to_owned);
         }
         let details = crate::tool_details::note(
             &call.name,

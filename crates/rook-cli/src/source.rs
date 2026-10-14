@@ -109,6 +109,142 @@ impl Source {
         }
     }
 
+    pub fn session_recall(
+        &self,
+        request: &rook_core::session_recall::Request,
+    ) -> Result<rook_core::session_recall::Response> {
+        match self {
+            Self::Local(rook) => Ok(rook.session_recall(request)?),
+            Self::Daemon(daemon) => daemon.request_bounded(
+                &format!("/api/history/recall?workspace={}", escaped(&daemon.workspace.to_string_lossy())),
+                Some(&serde_json::to_value(request)?),
+                128 * 1024,
+            ),
+        }
+    }
+
+    pub fn telegram_command(&self, text: &str) -> Result<String> {
+        let request = rook_core::telegram::arguments(text)?;
+        let result = match self {
+            Self::Local(rook) => rook.telegram_request(request)?,
+            Self::Daemon(daemon) => {
+                daemon.request_bounded("/api/telegram", Some(&serde_json::to_value(request)?), 1024 * 1024)?
+            }
+        };
+        Ok(serde_json::to_string_pretty(&result)?)
+    }
+    pub fn events_command(&self, text: &str) -> Result<String> {
+        let request = rook_core::inbound::arguments(text)?;
+        let result = match self {
+            Self::Local(rook) => rook.event_request(request)?,
+            Self::Daemon(daemon) => {
+                daemon.request_bounded("/api/events", Some(&serde_json::to_value(request)?), 1024 * 1024)?
+            }
+        };
+        Ok(serde_json::to_string_pretty(&result)?)
+    }
+
+    pub fn recipes_command(&self, session: u128, text: &str) -> Result<String> {
+        let request = rook_core::composite_recipes::arguments(text)?;
+        let reply = match self {
+            Self::Local(rook) => rook.composite_request(session, request)?,
+            Self::Daemon(daemon) => daemon.request_bounded(
+                &format!("/api/sessions/{}/recipes", rook_store::format_session_id(session)),
+                Some(&serde_json::to_value(request)?),
+                1024 * 1024,
+            )?,
+        };
+        Ok(serde_json::to_string_pretty(&reply)?)
+    }
+    pub fn environment_command(&self, session: u128, text: &str) -> Result<String> {
+        let request = rook_core::environments::arguments(text)?;
+        let result = match self {
+            Self::Local(rook) => {
+                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+                runtime.block_on(rook.environment_request(session, request))?
+            }
+            Self::Daemon(daemon) => daemon.request_bounded(
+                &format!("/api/sessions/{}/environment", rook_store::format_session_id(session)),
+                Some(&serde_json::to_value(request)?),
+                65536,
+            )?,
+        };
+        Ok(serde_json::to_string_pretty(&result)?)
+    }
+
+    pub fn learning_command(&self, session: u128, text: &str) -> Result<String> {
+        let request = rook_core::learning::arguments(text)?;
+        let result = match self {
+            Self::Local(rook) => {
+                let vault = std::sync::Arc::new(rook_core::Vault::load()?);
+                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+                runtime.block_on(rook.learning_request(session, request, vault))?
+            }
+            Self::Daemon(daemon) => daemon.request_bounded(
+                &format!("/api/sessions/{}/learning", rook_store::format_session_id(session)),
+                Some(&serde_json::to_value(request)?),
+                8 * 1024 * 1024,
+            )?,
+        };
+        Ok(serde_json::to_string_pretty(&result)?)
+    }
+
+    pub fn experiment_command(&self, session: u128, text: &str) -> Result<String> {
+        let request = rook_core::experiments::arguments(text)?;
+        let result = match self {
+            Self::Local(rook) => {
+                anyhow::ensure!(
+                    !matches!(request, rook_core::experiments::Request::Run { wait: false, .. }),
+                    "detached experiment runs require the daemon; use wait:true locally"
+                );
+                let vault = std::sync::Arc::new(rook_core::Vault::load()?);
+                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+                runtime.block_on(rook.experiment_request(session, request, vault))?
+            }
+            Self::Daemon(daemon) => daemon.request_bounded(
+                &format!("/api/sessions/{}/experiments", rook_store::format_session_id(session)),
+                Some(&serde_json::to_value(request)?),
+                8 * 1024 * 1024,
+            )?,
+        };
+        Ok(serde_json::to_string_pretty(&result)?)
+    }
+
+    pub fn shell_undo_command(&self, session: u128, text: &str) -> Result<String> {
+        let request = rook_core::shell_undo::arguments(text)?;
+        let result = match self {
+            Self::Local(rook) => rook.shell_undo_request(session, request)?,
+            Self::Daemon(daemon) => daemon.request_bounded(
+                &format!("/api/sessions/{}/shell-undo", rook_store::format_session_id(session)),
+                Some(&serde_json::to_value(request)?),
+                8 * 1024 * 1024,
+            )?,
+        };
+        Ok(serde_json::to_string_pretty(&result)?)
+    }
+
+    pub fn review_request(
+        &self,
+        session: u128,
+        request: rook_core::review::Request,
+    ) -> Result<serde_json::Value> {
+        match self {
+            Self::Local(rook) => {
+                let vault = rook_core::Vault::load()?;
+                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+                Ok(runtime.block_on(rook.review_request(session, request, &vault))?)
+            }
+            Self::Daemon(daemon) => daemon.request_bounded(
+                &format!("/api/sessions/{}/reviews", rook_store::format_session_id(session)),
+                Some(&serde_json::to_value(request)?),
+                8 * 1024 * 1024,
+            ),
+        }
+    }
+    pub fn review_command(&self, session: u128, text: &str) -> Result<String> {
+        Ok(serde_json::to_string_pretty(&self.review_request(session, rook_core::review::arguments(text)?)?)?)
+    }
+
     /// Where the daemon answers, when one is holding the store: the address a
     /// second window opens its chat socket to.
     pub fn daemon_base(&self) -> Option<&str> {

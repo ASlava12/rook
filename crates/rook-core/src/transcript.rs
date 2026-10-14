@@ -109,6 +109,8 @@ pub enum ToolResultDetails {
         exit_code: Option<i32>,
         timed_out: bool,
         running: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        environment: Option<EnvironmentDetails>,
     },
     Search {
         matches: u64,
@@ -123,6 +125,23 @@ pub enum ToolResultDetails {
         unsupported_blocks: Option<u64>,
         images: Vec<ToolImage>,
     },
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvironmentDetails {
+    pub profile: String,
+    pub kind: String,
+    pub resource: String,
+}
+impl EnvironmentDetails {
+    pub(crate) fn valid(&self) -> bool {
+        !self.profile.is_empty()
+            && self.profile.len() <= 64
+            && self.profile.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            && matches!(self.kind.as_str(), "container" | "ssh")
+            && !self.resource.is_empty()
+            && self.resource.len() <= 128
+            && self.resource.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolImage {
@@ -163,8 +182,8 @@ impl SavedToolImage {
 impl ToolDetails {
     pub fn text(&self) -> String {
         let summary = match &self.result {
-            ToolResultDetails::Command { exit_code, timed_out, running } => {
-                if *timed_out {
+            ToolResultDetails::Command { exit_code, timed_out, running, environment } => {
+                let mut text: String = if *timed_out {
                     "command timed out; no completed exit status".into()
                 } else if *running {
                     "background command started/running; no completed exit status".into()
@@ -172,7 +191,11 @@ impl ToolDetails {
                     exit_code
                         .map(|code| format!("command exit {code}"))
                         .unwrap_or_else(|| "command exit status unavailable".into())
+                };
+                if let Some(env) = environment {
+                    text.push_str(&format!(" · {} {} · resource {}", env.kind, env.profile, env.resource));
                 }
+                text
             }
             ToolResultDetails::Search { matches, files_scanned, complete } => format!(
                 "search {matches} matching lines in {files_scanned} scanned files{}",
@@ -364,11 +387,19 @@ fn size(value: &impl Serialize, limit: usize) -> Option<usize> {
 
 impl Rook {
     pub fn transcript_page(&self, session: u128, request: &PageRequest) -> Result<Page> {
+        self.transcript_page_bounded(session, request, self.config.transcript.bounded())
+    }
+
+    pub(crate) fn transcript_page_bounded(
+        &self,
+        session: u128,
+        request: &PageRequest,
+        settings: Settings,
+    ) -> Result<Page> {
         if request.from.is_some() && request.before.is_some() {
             return Err(CoreError::Other("choose from or before, not both".into()));
         }
         let through = end(self, session)?;
-        let settings = self.config.transcript.bounded();
         let count = request.limit.unwrap_or(settings.page_entries).clamp(1, settings.page_entries);
         let backwards = request.from.is_none();
         let mut events = match request.from {
@@ -470,11 +501,21 @@ impl Rook {
     }
 
     pub fn transcript_search(&self, session: u128, query: &str, cursor: Cursor) -> Result<Matches> {
+        self.transcript_search_bounded(session, query, cursor, self.config.transcript.bounded(), false)
+    }
+
+    pub(crate) fn transcript_search_bounded(
+        &self,
+        session: u128,
+        query: &str,
+        cursor: Cursor,
+        settings: Settings,
+        conversation_only: bool,
+    ) -> Result<Matches> {
         if query.trim().is_empty() || query.len() > 256 {
             return Err(CoreError::Other("history search needs 1–256 bytes of literal text".into()));
         }
         let through = cursor.through.unwrap_or(end(self, session)?).min(end(self, session)?);
-        let settings = self.config.transcript.bounded();
         let pattern = regex::bytes::RegexBuilder::new(&regex::escape(query))
             .case_insensitive(true)
             .build()
@@ -495,6 +536,19 @@ impl Rook {
                 break;
             }
             result.scanned_events += 1;
+            if conversation_only
+                && !matches!(
+                    event.record.kind,
+                    EventKind::UserMessage
+                        | EventKind::AssistantMessage
+                        | EventKind::ToolResult
+                        | EventKind::Error
+                )
+            {
+                position.seq = event.seq.saturating_add(1);
+                position.offset = 0;
+                continue;
+            }
             let offset = if event.seq == cursor.seq { cursor.offset } else { 0 };
             let formatted = display(self, &event)?;
             let total = match &formatted {

@@ -135,8 +135,16 @@ async fn a_delayed_display_reader_keeps_exact_child_operations_without_fragment_
         let crew = agent.crew(0);
         let (doing, mut steps) =
             super::super::delegation_progress::channel(rook.config.agent.delegation_progress_entries);
-        let bounds =
-            Bounds { isolated: false, steps: Some(3), by: None, tokens: 0, provider: None, effort: None };
+        let bounds = Bounds {
+            isolated: false,
+            steps: Some(3),
+            by: None,
+            tokens: 0,
+            provider: None,
+            effort: None,
+            recipe: None,
+            executor: None,
+        };
         crate::execution::RECEIPT_WRITE_MEASUREMENT.with(|measurement| measurement.set((0, 0, 0)));
         let (child, outcome) = crew
             .run_subtask("read notes and report", None, bounds, doing, 0, Default::default())

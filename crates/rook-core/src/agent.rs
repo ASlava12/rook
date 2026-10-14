@@ -23,9 +23,13 @@
 //!   An agent that discovers the limit by being rejected has already lost the
 //!   turn, and usually the task with it.
 
+mod acp;
+mod acp_tools;
 mod budget;
 mod checks;
+pub(crate) use checks::verdict_in as evidence_verdict;
 mod compaction;
+mod composite;
 mod delegation;
 mod delegation_progress;
 mod effects;
@@ -36,6 +40,7 @@ pub mod observe;
 mod output;
 mod prompt;
 mod repetition;
+mod review;
 mod routing;
 mod setup;
 mod stream;
@@ -138,6 +143,11 @@ pub fn tool_context(config: &Config, workspace: &Path, output_dir: &Path) -> Too
     ctx.spill_dir = Some(output_dir.to_path_buf());
     ctx.max_spill_bytes = sandbox.max_spill_bytes;
     ctx.max_files_searched = sandbox.max_files_searched;
+    ctx.execution = Some(std::sync::Arc::new(rook_tools::environments::Context {
+        settings: config.execution_environment.clone(),
+        pool: Default::default(),
+        state_root: output_dir.to_path_buf(),
+    }));
     ctx
 }
 
@@ -292,14 +302,26 @@ pub fn changed_note(files: &[String]) -> Option<String> {
 /// a checker. `delegate` is here because a checker that can start an agent with
 /// the writing tools has not been stopped from writing, only from doing it
 /// itself.
-const CHANGES_THINGS: &[&str] =
-    &[WRITE_SKILL, FIND_SKILL, REMEMBER, FORGET, DELEGATE, SUBAGENTS, STANCE, VERIFY, crate::worktrees::TOOL];
+const CHANGES_THINGS: &[&str] = &[
+    WRITE_SKILL,
+    FIND_SKILL,
+    REMEMBER,
+    FORGET,
+    DELEGATE,
+    crate::composite_recipes::TOOL,
+    SUBAGENTS,
+    STANCE,
+    VERIFY,
+    crate::worktrees::TOOL,
+    crate::review::TOOL,
+];
 
 /// What a turn reports as it goes.
 ///
 /// Stream deltas, and what only the loop knows: the provider's stream ends when
 /// the model stops asking for a tool, not when the tool has run. A front end
 /// with only the deltas shows every call as still working.
+#[derive(Clone, Copy)]
 pub enum Progress<'a> {
     /// Attributed saved display state; never a model delta or permission.
     ExtensionUi(&'a rook_proto::ChatEvent),
@@ -527,6 +549,7 @@ pub struct AgentLoop<'a> {
     /// Delivery must remain bounded and must not wait while an engine lock is held.
     pub observer: Option<std::sync::Arc<dyn observe::Observer>>,
     launched_job: std::sync::Mutex<Option<String>>,
+    tool_execution_uncertain: std::sync::atomic::AtomicBool,
     tool_cycles: std::sync::Mutex<Option<tool_cycles::Guard>>,
     tool_cycle_outcome: std::sync::Mutex<Option<[u8; 32]>>,
     pub(crate) managed_iteration: bool,
@@ -534,6 +557,12 @@ pub struct AgentLoop<'a> {
     pub options: rook_proto::TurnOptions,
     effective_options: Option<rook_proto::TurnOptions>,
     recipe_skill: Option<String>,
+    composite_cost_unknown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    prepared_recipe: Option<crate::recipes::Prepared>,
+    external_executor: Option<String>,
+    external_context: Option<String>,
+    selected_recipe:
+        Option<(std::sync::Arc<crate::recipes::Frozen>, std::collections::BTreeMap<String, String>)>,
     recipe_output: bool,
     pub rook: &'a Rook,
     /// Shared rather than owned so a delegated child can reuse the connection
@@ -638,6 +667,7 @@ pub struct AgentLoop<'a> {
     /// writing a skill, and delegating to an agent that can write — are ways
     /// round the very restriction.
     checking: bool,
+    review_only: bool,
 }
 
 impl<'a> AgentLoop<'a> {
@@ -645,7 +675,11 @@ impl<'a> AgentLoop<'a> {
         &self,
         purpose: crate::model_route::Purpose,
     ) -> std::sync::Arc<dyn rook_llm::AttemptObserver> {
-        crate::model_attempt::observer(self.rook, self.session, self.vault.clone(), purpose)
+        observe::model(
+            crate::model_attempt::observer(self.rook, self.session, self.vault.clone(), purpose),
+            self.observer.clone(),
+            self.session,
+        )
     }
 
     pub fn new(rook: &'a Rook, provider: std::sync::Arc<dyn Provider>, session: u128) -> Self {
@@ -658,6 +692,7 @@ impl<'a> AgentLoop<'a> {
         // Rust in it was offered rust-analyzer for exactly this reason.
         let servers = crate::lsp::Servers::new(Vec::new(), &rook.workspace);
         let mut tools = ToolBox::standard();
+        crate::browser::register(&mut tools, rook, session);
         // Registered rather than gated at the call: a tool the agent is never
         // shown is one it cannot decide to try, and off is the default because
         // this agent's point is that it runs here.
@@ -686,6 +721,11 @@ impl<'a> AgentLoop<'a> {
             crate::secrets::Vault::empty()
         }));
         tool_ctx.secrets = Some(vault.clone());
+        tool_ctx.execution = Some(std::sync::Arc::new(rook_tools::environments::Context {
+            settings: rook.config.execution_environment.clone(),
+            pool: rook.execution_environments.clone(),
+            state_root: rook.output_dir.clone(),
+        }));
 
         let (hooks, bad_hooks) = Hooks::compile(&rook.config.hooks);
         for error in bad_hooks {
@@ -701,6 +741,7 @@ impl<'a> AgentLoop<'a> {
             submission_key: None,
             observer: None,
             launched_job: Default::default(),
+            tool_execution_uncertain: Default::default(),
             tool_cycles: Default::default(),
             tool_cycle_outcome: Default::default(),
             managed_iteration: false,
@@ -708,6 +749,11 @@ impl<'a> AgentLoop<'a> {
             options: Default::default(),
             effective_options: None,
             recipe_skill: None,
+            composite_cost_unknown: Default::default(),
+            external_executor: None,
+            external_context: None,
+            prepared_recipe: None,
+            selected_recipe: None,
             recipe_output: false,
             rook,
             routing,
@@ -746,12 +792,19 @@ impl<'a> AgentLoop<'a> {
             budget,
             spawned: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             checking: false,
+            review_only: false,
         }
     }
 
     /// Give the model a way to put a question to the person, which registers
     /// the tool rather than storing a handle: a front end that cannot reach
     /// anyone never advertises it, and never pays for its schema.
+    /// Frontends may supply transient connection credentials without writing
+    /// the operator vault. Normal output/history redaction still owns them.
+    pub fn hide_connection_secret(&self, value: &str) {
+        self.vault.also_hide(value);
+    }
+
     pub fn ask_via(&mut self, asker: std::sync::Arc<dyn rook_tools::ask::Asker>) {
         self.tools.register(std::sync::Arc::new(rook_tools::ask::AskUser(asker.clone())));
         self.asker = Some(asker);
@@ -968,20 +1021,32 @@ impl<'a> AgentLoop<'a> {
         let _running = (self.depth == 0).then(|| crate::service::Running::marked(self.session));
         // The nested model/tool future is large in debug builds. Keep it off
         // the caller's future so a native delegated turn fits Windows' stack.
-        let mut outcome = match Box::pin(self.run_inner(prompt, &mut on_progress)).await {
+        let run = async {
+            if self.external_executor.is_some() {
+                Box::pin(self.run_acp(prompt, &mut on_progress)).await
+            } else {
+                Box::pin(self.run_inner(prompt, &mut on_progress)).await
+            }
+        };
+        let mut outcome = match Box::pin(run).await {
             Ok(outcome) => outcome,
             Err(error) => {
                 journal.finish("failed", self.tool_ctx.jobs.as_deref())?;
                 return Err(error);
             }
         };
-        let finalised = self.apply_output(&contract, &mut outcome, &mut on_progress).await;
+        let unpriced = self.composite_cost_unknown.load(std::sync::atomic::Ordering::Acquire);
+        let finalised = if unpriced {
+            Ok(())
+        } else {
+            self.apply_output(&contract, &mut outcome, &mut on_progress).await
+        };
         if let Err(error) = &finalised {
             outcome.stopped = "output_error".into();
             outcome.open_questions.push(error.to_string());
             self.rook.log(self.session, EventKind::Error, "output", &error.to_string()).ok();
         }
-        let closing = self.end_of_turn(&mut outcome).await;
+        let closing = if unpriced { Ok(()) } else { self.end_of_turn(&mut outcome).await };
         if finalised.is_ok() && closing.is_ok() {
             journal.record_outcome(&outcome)?;
         }
@@ -994,6 +1059,26 @@ impl<'a> AgentLoop<'a> {
         if needs_review || self.rook.recovery_block(self.session)?.is_some() {
             outcome.stopped = "recovery".into();
             outcome.open_questions.push("An interrupted operation has an unknown result. Inspect `/recovery` before acknowledging it; no side effects will be retried automatically.".into());
+        }
+        if self.depth == 0
+            && !self.checking
+            && self.managed_work.is_none()
+            && crate::agent::finished(&outcome.stopped)
+            && outcome.open_questions.is_empty()
+            && self.rook.config.learning.automatic
+            && let Err(error) = self
+                .rook
+                .learn_after_task(self.session, journal.turn(), self.vault.clone(), self.provider.as_ref())
+                .await
+        {
+            self.rook
+                .log(
+                    self.session,
+                    EventKind::Note,
+                    "learning deferred",
+                    &self.vault.redact(&error.to_string()),
+                )
+                .ok();
         }
         Ok(outcome)
     }
@@ -1054,6 +1139,18 @@ impl<'a> AgentLoop<'a> {
         // that covered. See `measured`.
         let mut anchor: Option<(usize, usize)> = None;
         'turn: while outcome.steps < self.max_steps {
+            if self.composite_cost_unknown.load(std::sync::atomic::Ordering::Acquire) {
+                let reason = "A delegated executor returned without a complete cost report; no further model allowance can be proven. Inspect its original child session before a new request.";
+                self.rook.log(self.session, EventKind::Note, "subrecipe cost", reason)?;
+                outcome.stopped = "subrecipe_cost_unknown".into();
+                let reports = messages.iter().rev().find(|m| m.role == rook_llm::Role::Tool).map(|m| {
+                    rook_tools::elide_middle(&m.content, self.rook.config.acp_executor.result_bytes)
+                });
+                outcome.reply =
+                    reports.map_or_else(|| reason.to_owned(), |reports| format!("{reason}\n\n{reports}"));
+                outcome.open_questions.push(reason.into());
+                break;
+            }
             self.refresh_managed_work()?;
             if self.managed_stopped()? {
                 outcome.stopped = "work_paused".into();
@@ -1750,7 +1847,6 @@ impl<'a> AgentLoop<'a> {
                          call, and it can be asked for again]"
                     ));
                 }
-                let mut images = Vec::new();
                 // The execution journal also retains answers from built-ins
                 // that log SkillLoaded/Error instead of their own ToolResult.
                 // Their live link is independent of the model's source envelope.
@@ -1772,11 +1868,8 @@ impl<'a> AgentLoop<'a> {
                 let shown = if call.name == LOAD_SKILL && !failed {
                     result
                 } else {
-                    match recorded {
-                        Some(event) => {
-                            images = crate::tool_images::load(self.rook, &event)?;
-                            crate::results::fresh(&event, &result)
-                        }
+                    match recorded.as_ref() {
+                        Some(event) => crate::results::fresh(event, &result),
                         None => crate::sources::tool_result(&call.name, &result),
                     }
                 };
@@ -1785,8 +1878,10 @@ impl<'a> AgentLoop<'a> {
                     source_manifest.add_loaded_skill(name, &shown);
                 }
                 let mut message = Message::tool_result(&call.id, shown);
-                let has_images = !images.is_empty();
-                message.images = images;
+                if let Some(event) = recorded.as_ref() {
+                    crate::tool_images::for_request(self.rook, event, &mut message)?;
+                }
+                let has_images = !message.images.is_empty();
                 messages.push(message);
                 if has_images && crate::tool_images::bound(&mut messages) > 0 {
                     anchor = None;
@@ -1843,7 +1938,7 @@ impl<'a> AgentLoop<'a> {
         // The two ceilings name themselves on the way out; the other two are
         // told apart here. All four leave through the same door below, which is
         // what asks the model for what it found rather than ending on a limit.
-        if !matches!(outcome.stopped.as_str(), "budget" | "time" | "work_paused") {
+        if !matches!(outcome.stopped.as_str(), "budget" | "time" | "work_paused" | "subrecipe_cost_unknown") {
             outcome.stopped = if stuck { "looping" } else { "max_steps" }.into();
         }
         // The limit is the model's, not the children's: what they were still
@@ -1857,7 +1952,8 @@ impl<'a> AgentLoop<'a> {
         // the sentence it kept repeating on the way into the loop — "I will
         // answer, first let me check" — which is an announcement and not an
         // answer, and it is what the person would otherwise be handed.
-        if outcome.stopped != "work_paused"
+        if !self.composite_cost_unknown.load(std::sync::atomic::Ordering::Acquire)
+            && outcome.stopped != "work_paused"
             && (stuck || outcome.reply.trim().is_empty())
             && !outcome.tools_called.is_empty()
         {

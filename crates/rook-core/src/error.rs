@@ -24,10 +24,14 @@ pub enum CoreError {
     NoSession(String),
     #[error("no transcript event #{0}")]
     NoTranscriptEvent(u64),
+    #[error("invalid conversation recall: {0}")]
+    InvalidConversationRecall(String),
     #[error("no attributed saved image {1} for transcript result #{0}")]
     NoToolImage(u64, usize),
     #[error(transparent)]
     Llm(#[from] rook_llm::LlmError),
+    #[error("inbound authentication: {0}")]
+    InboundAuthentication(String),
     #[error("{0}")]
     Other(String),
 }

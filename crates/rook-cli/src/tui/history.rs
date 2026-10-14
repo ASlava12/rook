@@ -35,6 +35,7 @@ pub(super) struct History {
     suggestion: Option<(u128, Result<rook_core::branches::SummaryDraft, String>)>,
     exported: Option<std::result::Result<(PathBuf, crate::commands::html_export::Report), String>>,
     worktree_result: Option<String>,
+    recall_result: Option<String>,
     send: Option<SyncSender<(u64, Command)>>,
     receive: Receiver<(u64, Result<Update>)>,
 }
@@ -44,7 +45,16 @@ struct SummaryReview {
     through: u64,
 }
 enum Command {
+    Recall(rook_core::session_recall::Request),
     Worktree(u128, String),
+    Review(u128, String),
+    ShellUndo(u128, String),
+    Experiment(u128, String),
+    Learning(u128, String),
+    Telegram(String),
+    Events(String),
+    Recipes(u128, String),
+    Environment(u128, String),
     Export(u128, u64, Option<u64>, PathBuf),
     Draft(u128, u128),
     Suggest(u128, u128),
@@ -61,7 +71,16 @@ enum Command {
     Quote(u128, u64, u64),
 }
 enum Update {
+    Recall(Result<rook_core::session_recall::Response, String>),
     Worktree(u128, Result<String, String>),
+    Review(u128, Result<String, String>),
+    ShellUndo(u128, Result<String, String>),
+    Experiment(u128, Result<String, String>),
+    Learning(u128, Result<String, String>),
+    Telegram(Result<String, String>),
+    Events(Result<String, String>),
+    Recipes(u128, Result<String, String>),
+    Environment(u128, Result<String, String>),
     Exported(std::result::Result<(PathBuf, crate::commands::html_export::Report), String>),
     Suggested(u128, Result<rook_core::branches::SummaryDraft, String>),
     Carried(SummaryReview, Result<u64, String>),
@@ -78,8 +97,34 @@ enum Update {
 impl Command {
     fn read(self, source: &crate::source::Source) -> Result<Update> {
         Ok(match self {
+            Self::Recall(request) => {
+                Update::Recall(source.session_recall(&request).map_err(|error| error.to_string()))
+            }
             Self::Worktree(parent, args) => {
                 Update::Worktree(parent, source.worktree_command(parent, &args).map_err(|e| e.to_string()))
+            }
+            Self::Telegram(args) => {
+                Update::Telegram(source.telegram_command(&args).map_err(|e| e.to_string()))
+            }
+            Self::Events(args) => Update::Events(source.events_command(&args).map_err(|e| e.to_string())),
+            Self::Recipes(owner, args) => {
+                Update::Recipes(owner, source.recipes_command(owner, &args).map_err(|e| e.to_string()))
+            }
+            Self::Environment(owner, args) => Update::Environment(
+                owner,
+                source.environment_command(owner, &args).map_err(|e| e.to_string()),
+            ),
+            Self::Learning(owner, args) => {
+                Update::Learning(owner, source.learning_command(owner, &args).map_err(|e| e.to_string()))
+            }
+            Self::Experiment(owner, args) => {
+                Update::Experiment(owner, source.experiment_command(owner, &args).map_err(|e| e.to_string()))
+            }
+            Self::ShellUndo(owner, args) => {
+                Update::ShellUndo(owner, source.shell_undo_command(owner, &args).map_err(|e| e.to_string()))
+            }
+            Self::Review(owner, args) => {
+                Update::Review(owner, source.review_command(owner, &args).map_err(|error| error.to_string()))
             }
             Self::Export(session, from, through, path) => Update::Exported(
                 crate::commands::html_export::save(source, session, from, through, &path)
@@ -174,6 +219,7 @@ impl History {
             suggestion: None,
             exported: None,
             worktree_result: None,
+            recall_result: None,
             send,
             receive,
         }
@@ -236,6 +282,16 @@ impl History {
             false
         }
     }
+    pub(super) fn recall(&mut self, request: rook_core::session_recall::Request) -> bool {
+        if self.pending {
+            return false;
+        }
+        self.epoch = self.epoch.wrapping_add(1);
+        self.ask(Command::Recall(request))
+    }
+    pub(super) fn take_recall(&mut self) -> Option<String> {
+        self.recall_result.take()
+    }
     pub(super) fn suggest(&mut self, source: u128, target: u128) -> bool {
         if self.pending {
             return false;
@@ -260,11 +316,105 @@ impl History {
     pub(super) fn take_worktree(&mut self) -> Option<String> {
         self.worktree_result.take()
     }
+    pub(super) fn telegram(&mut self, arguments: &str) -> bool {
+        if self.pending || arguments.len() > 8192 {
+            return false;
+        }
+        self.epoch = self.epoch.wrapping_add(1);
+        self.ask(Command::Telegram(arguments.into()))
+    }
+    pub(super) fn events(&mut self, arguments: &str) -> bool {
+        if self.pending || arguments.len() > 8192 {
+            return false;
+        }
+        self.epoch = self.epoch.wrapping_add(1);
+        self.ask(Command::Events(arguments.into()))
+    }
+    pub(super) fn recipes(&mut self, owner: u128, arguments: &str) -> bool {
+        if self.pending || arguments.len() > 8192 {
+            return false;
+        }
+        self.epoch = self.epoch.wrapping_add(1);
+        self.ask(Command::Recipes(owner, arguments.into()))
+    }
+    pub(super) fn environment(&mut self, owner: u128, arguments: &str) -> bool {
+        if self.pending || arguments.len() > 8192 {
+            return false;
+        }
+        self.epoch = self.epoch.wrapping_add(1);
+        self.ask(Command::Environment(owner, arguments.into()))
+    }
+    pub(super) fn learning(&mut self, owner: u128, arguments: &str) -> bool {
+        if self.pending || arguments.len() > 65536 {
+            return false;
+        }
+        self.epoch = self.epoch.wrapping_add(1);
+        self.ask(Command::Learning(owner, arguments.into()))
+    }
+    pub(super) fn experiment(&mut self, owner: u128, arguments: &str) -> bool {
+        if self.pending || arguments.len() > 65536 {
+            return false;
+        }
+        self.epoch = self.epoch.wrapping_add(1);
+        self.ask(Command::Experiment(owner, arguments.into()))
+    }
+    pub(super) fn shell_undo(&mut self, owner: u128, arguments: &str) -> bool {
+        if self.pending || arguments.len() > 65536 {
+            return false;
+        }
+        self.epoch = self.epoch.wrapping_add(1);
+        self.ask(Command::ShellUndo(owner, arguments.into()))
+    }
+    pub(super) fn review_changes(&mut self, owner: u128, arguments: &str) -> bool {
+        if self.pending || arguments.len() > 65536 {
+            return false;
+        }
+        self.epoch = self.epoch.wrapping_add(1);
+        self.ask(Command::Review(owner, arguments.into()))
+    }
     pub(super) fn poll(&mut self) {
         while let Ok((epoch, update)) = self.receive.try_recv() {
-            if let Ok(Update::Worktree(parent, result)) = update {
+            let operation = match &update {
+                Ok(Update::Review(_, _)) => "Review",
+                Ok(Update::ShellUndo(_, _)) => "Shell undo",
+                Ok(Update::Experiment(_, _)) => "Experiment",
+                Ok(Update::Learning(_, _)) => "Learning",
+                Ok(Update::Recipes(_, _)) => "Recipes",
+                Ok(Update::Environment(_, _)) => "Environment",
+                _ => "Worktree",
+            };
+            if let Ok(Update::Telegram(result)) = &update {
                 self.worktree_result = Some(format!(
-                    "Worktree operation for parent {}:\n{}",
+                    "Telegram:\n{}",
+                    result.as_ref().map(String::as_str).unwrap_or_else(|e| e.as_str())
+                ));
+                if epoch == self.epoch {
+                    self.pending = false;
+                }
+                continue;
+            }
+            if let Ok(Update::Events(result)) = &update {
+                self.worktree_result = Some(format!(
+                    "Inbound events:\n{}",
+                    result.as_ref().map(String::as_str).unwrap_or_else(|e| e.as_str())
+                ));
+                if epoch == self.epoch {
+                    self.pending = false;
+                }
+                continue;
+            }
+            if let Ok(
+                Update::Worktree(parent, result)
+                | Update::Review(parent, result)
+                | Update::ShellUndo(parent, result)
+                | Update::Experiment(parent, result)
+                | Update::Learning(parent, result)
+                | Update::Recipes(parent, result)
+                | Update::Environment(parent, result),
+            ) = update
+            {
+                self.worktree_result = Some(format!(
+                    "{operation} operation for parent {}:\n{}",
                     rook_store::format_session_id(parent),
                     result.unwrap_or_else(|e| e)
                 ));
@@ -329,7 +479,25 @@ impl History {
             self.pending = false;
             self.note.clear();
             match update {
-                Ok(Update::Worktree(_, _)) => {
+                Ok(Update::Telegram(_)) => {
+                    unreachable!("Telegram inspection handled before stale read filtering")
+                }
+                Ok(Update::Events(_)) => unreachable!("event inspection handled before stale read filtering"),
+                Ok(Update::Recall(response)) => {
+                    self.recall_result = Some(match response {
+                        Ok(response) => rook_core::session_recall::describe(&response),
+                        Err(error) => format!("Conversation recall failed: {error}"),
+                    });
+                }
+                Ok(
+                    Update::Worktree(_, _)
+                    | Update::Review(_, _)
+                    | Update::ShellUndo(_, _)
+                    | Update::Experiment(_, _)
+                    | Update::Learning(_, _)
+                    | Update::Recipes(_, _)
+                    | Update::Environment(_, _),
+                ) => {
                     unreachable!("worktree completion handled before stale read filtering")
                 }
                 Ok(Update::Fork(_)) => unreachable!("fork completion handled before stale read filtering"),

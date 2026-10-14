@@ -86,6 +86,18 @@ impl<'a> AgentLoop<'a> {
         risk: rook_tools::policy::Risk,
         shown: Shown<'_>,
     ) -> Option<String> {
+        if !matches!(risk, rook_tools::policy::Risk::ReadOnly) {
+            match crate::experiments::frozen(self.rook, self.session) {
+                Ok(true) => {
+                    return Some(
+                        "refused: measured or active experiment source is frozen; branch a new hypothesis"
+                            .into(),
+                    );
+                }
+                Err(error) => return Some(format!("refused: {error}")),
+                Ok(false) => {}
+            }
+        }
         // The policy runs first so a hook cannot unlock what the deny list
         // forbids; everything else, a hook may override.
         let mut decision = self.policy.decide(&risk);
@@ -122,14 +134,16 @@ impl<'a> AgentLoop<'a> {
                     None
                 }
                 rook_tools::policy::Approval::Deny(why) => {
-                    self.report(Reported::Decision(format!("{name}: {} — declined", risk.describe())));
+                    self.report(Reported::Decision(
+                        self.vault.redact(&format!("{name}: {} — declined", risk.describe())),
+                    ));
                     Some(format!("refused: {why}"))
                 }
                 rook_tools::policy::Approval::Unanswered(why) => {
-                    self.report(Reported::Open(format!(
+                    self.report(Reported::Open(self.vault.redact(&format!(
                         "{name} wanted to {}, and nobody was here to say",
                         risk.describe()
-                    )));
+                    ))));
                     Some(rook_tools::policy::no_one_answered(&why))
                 }
             },

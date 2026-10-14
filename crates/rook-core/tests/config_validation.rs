@@ -1,6 +1,32 @@
 use rook_core::{Config, Vault};
 
 #[test]
+fn browser_equipment_and_stdio_process_limits_validate_without_starting_equipment() {
+    for (field, value) in [
+        ("max_sessions", 17),
+        ("max_calls", 0),
+        ("idle_secs", 29),
+        ("startup_timeout_secs", 121),
+        ("call_timeout_secs", 0),
+    ] {
+        let config: Config = toml::from_str(&format!("[browser]\n{field}={value}\n")).unwrap();
+        assert!(config.validation_errors().iter().any(|e| e.contains(&format!("browser.{field}"))));
+    }
+    for value in [0, 1025] {
+        let config: Config = toml::from_str(&format!(
+            "[[mcp]]\nname='offline'\ncommand='rook-no-such-equipment'\nstdio_max_processes={value}\n"
+        ))
+        .unwrap();
+        assert!(config.validation_errors().iter().any(|e| e.contains("stdio_max_processes")));
+    }
+    let config: Config = toml::from_str("[browser]\nenabled=true\ncommand='rook-no-such-equipment'\nmax_sessions=1\nmax_calls=2\nidle_secs=30\nstartup_timeout_secs=1\ncall_timeout_secs=1\n[[mcp]]\nname='offline'\ncommand='rook-no-such-equipment'\nstdio_max_processes=1\n").unwrap();
+    assert!(config.validation_errors().is_empty());
+    let roundtrip: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+    assert_eq!(roundtrip.browser, config.browser);
+    assert_eq!(roundtrip.mcp[0].stdio_max_processes, 1);
+}
+
+#[test]
 fn prompt_key_overrides_validate_conflicts_and_history_limits_offline() {
     for source in [
         "[tui.keys]\n'prompt.undo'=['ctrl+p']",
@@ -317,4 +343,150 @@ fn pending_input_limits_are_validated_before_saving_or_connecting() {
         let config: rook_core::Config = toml::from_str(&format!("[user_input]\n{field}={value}\n")).unwrap();
         assert!(config.validation_errors().iter().any(|e| e.contains(&format!("user_input.{field}"))));
     }
+}
+
+#[test]
+fn telegram_requires_explicit_access_and_finite_trusted_transport_bounds() {
+    for source in [
+        "[telegram]\nenabled=true",
+        "[telegram]\nmax_turn_tokens=0",
+        "[telegram]\nmax_attempts=0",
+        "[telegram]\nmax_chats=0",
+        "[telegram]\napi_url='http://example.com'",
+        "[telegram]\napi_url='https://u:p@example.com'",
+        "[telegram]\npoll_secs=30\nrequest_secs=30",
+    ] {
+        let config: Config = toml::from_str(source).unwrap();
+        assert!(config.validation_errors().iter().any(|e| e.contains("telegram")), "{source}");
+    }
+    let config:Config=toml::from_str("[telegram]\nenabled=true\nsecret='bot'\nworkspace='/fixture'\nallowed_users=[1]\nallowed_chats=[-10]\n").unwrap();
+    assert!(config.validation_errors().is_empty());
+    let roundtrip: Config = toml::from_str(&config.as_written().unwrap()).unwrap();
+    assert_eq!(roundtrip.telegram, config.telegram);
+}
+
+#[test]
+fn composite_recipe_bounds_validate_and_roundtrip_without_starting_a_model() {
+    for (field, value) in [
+        ("max_depth", 9),
+        ("max_definitions", 0),
+        ("max_stages", 0),
+        ("max_calls", 129),
+        ("source_bytes", 4095),
+        ("result_bytes", 0),
+        ("state_bytes", 0),
+    ] {
+        let config: Config = toml::from_str(&format!("[composite_recipes]\n{field}={value}")).unwrap();
+        assert!(config.validation_errors().iter().any(|e| e.contains(&format!("composite_recipes.{field}"))));
+    }
+    let config:Config=toml::from_str("[composite_recipes]\nmax_depth=1\nmax_definitions=2\nmax_stages=2\nmax_calls=1\nsource_bytes=4096\nresult_bytes=1024\nstate_bytes=4096").unwrap();
+    assert!(config.validation_errors().is_empty());
+    let roundtrip: Config = toml::from_str(&config.as_written().unwrap()).unwrap();
+    assert_eq!(
+        serde_json::to_value(config.composite_recipes).unwrap(),
+        serde_json::to_value(roundtrip.composite_recipes).unwrap()
+    );
+}
+
+#[test]
+fn acp_session_equipment_limit_validates_and_roundtrips() {
+    for invalid in [0, 257] {
+        let config: Config = toml::from_str(&format!("[server]\nmax_acp_sessions={invalid}")).unwrap();
+        assert!(config.validation_errors().iter().any(|error| error.contains("server.max_acp_sessions")));
+    }
+    let config: Config = toml::from_str("[server]\nmax_acp_sessions=2").unwrap();
+    assert!(config.validation_errors().is_empty());
+    let read: Config = toml::from_str(&config.as_written().unwrap()).unwrap();
+    assert_eq!(read.server.max_acp_sessions, 2);
+}
+
+#[test]
+fn acp_history_body_budget_validates_and_roundtrips() {
+    for invalid in [65535, 67108865] {
+        let config: Config = toml::from_str(&format!("[server]\nacp_history_body_bytes={invalid}")).unwrap();
+        assert!(
+            config.validation_errors().iter().any(|error| error.contains("server.acp_history_body_bytes"))
+        );
+    }
+    let config: Config = toml::from_str("[server]\nacp_history_body_bytes=65536").unwrap();
+    assert!(config.validation_errors().is_empty());
+    let restored: Config = toml::from_str(&config.as_written().unwrap()).unwrap();
+    assert_eq!(restored.server.acp_history_body_bytes, 65536);
+}
+
+#[test]
+fn acp_setup_declaration_budget_validates_and_roundtrips() {
+    for invalid in [4095, 1048577] {
+        let config: Config = toml::from_str(&format!("[server]\nacp_setup_bytes={invalid}")).unwrap();
+        assert!(config.validation_errors().iter().any(|error| error.contains("server.acp_setup_bytes")));
+    }
+    let config: Config = toml::from_str("[server]\nacp_setup_bytes=4096").unwrap();
+    assert!(config.validation_errors().is_empty());
+    let restored: Config = toml::from_str(&config.as_written().unwrap()).unwrap();
+    assert_eq!(restored.server.acp_setup_bytes, 4096);
+}
+
+#[test]
+fn named_acp_executors_validate_bounds_and_report_profile_typos_without_launching() {
+    let source =
+        "[acp_executor.profiles.owned]\ncommand='rook-no-such-executable'\nargs=['acp']\ntrusted=true\n";
+    let config: Config = toml::from_str(source).unwrap();
+    assert!(config.validation_errors().is_empty());
+    let scratch = tempfile::tempdir().unwrap();
+    let file = scratch.path().join("config.toml");
+    std::fs::write(&file, source).unwrap();
+    assert!(Config::ignored_in(&file).is_empty());
+    std::fs::write(&file, format!("{source}trustedd=true\n")).unwrap();
+    assert_eq!(Config::ignored_in(&file), vec!["acp_executor.profiles.owned.trustedd"]);
+    let restored: Config = toml::from_str(&config.as_written().unwrap()).unwrap();
+    assert!(restored.acp_executor.profiles["owned"].trusted);
+    for (field, value) in [
+        ("frame_bytes", 4095),
+        ("result_bytes", 1023),
+        ("file_bytes", 4095),
+        ("max_messages", 15),
+        ("idle_secs", 0),
+    ] {
+        let config: Config = toml::from_str(&format!("[acp_executor]\n{field}={value}\n")).unwrap();
+        assert!(config.validation_errors().iter().any(|e| e.contains("acp_executor")), "{field}");
+    }
+    assert!(
+        toml::from_str::<Config>("[acp_executor.profiles.owned]\ncommand='x'\ntrustedd=true\n").is_err(),
+        "profile misspellings cannot silently imply trust"
+    );
+}
+
+#[test]
+fn acp_profile_environment_overrides_are_bounded_named_and_keep_secret_aliases_unresolved() {
+    let source = "[acp_executor.profiles.owned]\ncommand='not-installed'\ntrusted=true\n[acp_executor.profiles.owned.env]\nROOK_HOME='/scratch/foreign'\nAPI_TOKEN='secret:owned-token'\n";
+    let config: Config = toml::from_str(source).unwrap();
+    assert!(config.validation_errors().is_empty());
+    assert_eq!(config.acp_executor.profiles["owned"].env["API_TOKEN"], "secret:owned-token");
+    let scratch = tempfile::tempdir().unwrap();
+    let path = scratch.path().join("config.toml");
+    std::fs::write(&path, source).unwrap();
+    assert!(Config::ignored_in(&path).is_empty());
+    for kind in ["name", "value", "aggregate"] {
+        let mut broken = config.clone();
+        let env = &mut broken.acp_executor.profiles.get_mut("owned").unwrap().env;
+        match kind {
+            "name" => {
+                env.insert("bad=name".into(), "x".into());
+            }
+            "value" => {
+                env.insert("VALUE".into(), "x".repeat(16385));
+            }
+            _ => {
+                for i in 0..5 {
+                    env.insert(format!("VALUE_{i}"), "x".repeat(14000));
+                }
+            }
+        }
+        if kind == "aggregate" {
+            assert!(env.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>() > 65536);
+        }
+        assert!(broken.validation_errors().iter().any(|e| e.contains("acp_executor.profiles")), "{kind}");
+    }
+    let restored: Config = toml::from_str(&config.as_written().unwrap()).unwrap();
+    assert_eq!(restored.acp_executor.profiles["owned"].env, config.acp_executor.profiles["owned"].env);
 }

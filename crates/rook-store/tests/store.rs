@@ -1150,3 +1150,26 @@ fn failed_multi_event_admission_rolls_back_queue_goal_and_execution_values() {
     assert!(store.kv_get("execution").unwrap().is_none());
     assert_eq!(store.get_session(session).unwrap().unwrap().next_seq, 0);
 }
+
+#[test]
+fn grown_encoded_objects_refuse_whole_and_paged_reads_at_the_recorded_input_bound() {
+    let (_dir, store) = tmp_store();
+    let original = noise(2 * 1024 * 1024, 99);
+    let id = store.put(Kind::Other, &original).unwrap();
+    let meta = store.stat_object(&id).unwrap().unwrap();
+    assert!(meta.external);
+    let hex = id.to_hex();
+    let path = store.root().join("objects").join(&hex[..2]).join(&hex[2..4]).join(&hex);
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+    file.write_all(&vec![b'X'; 65536]).unwrap();
+    drop(file);
+    assert!(
+        std::fs::metadata(&path).unwrap().len() > meta.size_stored,
+        "actual encoded input must exceed its saved bound"
+    );
+    for result in [store.get(&id), store.get_range(&id, 0, 16)] {
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("encoded payload length differs"), "{message}");
+    }
+}

@@ -30,6 +30,16 @@ pub struct Config {
     pub telemetry: TelemetryConfig,
     pub memory: MemoryConfig,
     pub web: WebConfig,
+    pub browser: crate::browser::Settings,
+    pub review: crate::review::Settings,
+    pub shell_undo: crate::shell_undo::Settings,
+    pub experiments: crate::experiments::Settings,
+    pub learning: crate::learning::Settings,
+    pub execution_environment: rook_tools::environments::Settings,
+    pub inbound: crate::inbound::Settings,
+    pub telegram: crate::telegram::Settings,
+    pub composite_recipes: crate::composite_recipes::Settings,
+    pub acp_executor: crate::acp_executor::Settings,
     /// Bounds for endpoint model and capability discovery.
     pub model_catalog: crate::model_catalog::Settings,
     /// Public price references, fetched only by an explicit operator action.
@@ -315,6 +325,16 @@ impl Default for Config {
             telemetry: TelemetryConfig::default(),
             memory: MemoryConfig::default(),
             web: WebConfig::default(),
+            browser: Default::default(),
+            review: Default::default(),
+            shell_undo: Default::default(),
+            experiments: Default::default(),
+            learning: Default::default(),
+            execution_environment: Default::default(),
+            inbound: Default::default(),
+            telegram: Default::default(),
+            composite_recipes: Default::default(),
+            acp_executor: Default::default(),
             model_catalog: Default::default(),
             price_catalog: Default::default(),
             mcp_catalog: Default::default(),
@@ -373,6 +393,17 @@ fn unread(written: &serde_json::Value, known: &serde_json::Value, at: &str, out:
             }
             continue;
         }
+        if at == "acp_executor" && key == "profiles" {
+            if let Ok(shape) = serde_json::to_value(crate::acp_executor::Profile::default()) {
+                for (named, entry) in value.as_object().into_iter().flatten() {
+                    unread(entry, &shape, &format!("acp_executor.profiles.{named}"), out);
+                }
+            }
+            continue;
+        }
+        if at.starts_with("acp_executor.profiles.") && key == "env" {
+            continue; // Trusted process environment names are operator-chosen map keys.
+        }
         if at == "agent" && key == "trusted_sources" {
             continue; // Source paths are user-chosen map keys, not configuration fields.
         }
@@ -429,6 +460,15 @@ fn under_a_chosen_name(table: &str) -> Option<serde_json::Value> {
 
 /// The shape a setting has, by its dotted name, from the tree of every key.
 fn at_key(known: &serde_json::Value, key: &str) -> Option<serde_json::Value> {
+    if let Some(named) = key.strip_prefix("acp_executor.profiles.") {
+        let mut parts = named.split('.');
+        parts.next()?;
+        let mut shape = serde_json::to_value(crate::acp_executor::Profile::default()).ok()?;
+        for part in parts {
+            shape = shape.get(part)?.clone();
+        }
+        return Some(shape);
+    }
     let mut parts = key.split('.').peekable();
     let mut at = match parts.peek().copied().and_then(under_a_chosen_name) {
         // `models.home-llama.priority`: the table, then the name, then the
@@ -786,6 +826,12 @@ pub struct ServerConfig {
     pub chat_queue_events: usize,
     /// Maximum encoded bytes queued or in flight per chat connection.
     pub chat_queue_bytes: usize,
+    /// Session-owned ACP equipment retained between prompts on one connection.
+    pub max_acp_sessions: usize,
+    /// One verified history object held while ACP streams its content.
+    pub acp_history_body_bytes: usize,
+    /// Editor session setup declarations admitted before process startup.
+    pub acp_setup_bytes: usize,
     /// Explicit reverse-proxy authorities (host:port); never inferred from request headers.
     pub allowed_hosts: Vec<String>,
     pub bind: String,
@@ -931,6 +977,8 @@ pub struct TelemetryConfig {
     pub diagnostic_events: usize,
     /// Bytes per optional log tail, capped at 64 KiB. Zero omits log content.
     pub diagnostic_log_bytes: usize,
+    /// Inactivity notice threshold, 30..86400 seconds; zero disables notices.
+    pub stall_after_secs: u64,
 }
 
 impl Default for AgentConfig {
@@ -1011,6 +1059,9 @@ impl Default for ServerConfig {
             chat_replay_bytes: 8 * 1024 * 1024,
             chat_queue_events: 256,
             chat_queue_bytes: 4 * 1024 * 1024,
+            max_acp_sessions: 64,
+            acp_history_body_bytes: 16 * 1024 * 1024,
+            acp_setup_bytes: 65536,
             bind: "127.0.0.1".into(),
             port: 7717,
             max_projects: 16,
@@ -1202,6 +1253,7 @@ impl Default for TelemetryConfig {
             max_log_bytes: 64 << 20,
             diagnostic_events: 256,
             diagnostic_log_bytes: 64 * 1024,
+            stall_after_secs: 300,
         }
     }
 }

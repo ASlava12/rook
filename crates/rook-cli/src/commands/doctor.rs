@@ -125,10 +125,17 @@ pub(crate) fn cmd_doctor(workspace: &Path, json: bool) -> Result<()> {
     // Asked of the same context a turn runs with, so what doctor says is
     // what a command gets — and what its result would say it got.
     let ctx = rook_core::agent::tool_context(&config, workspace, &rook_core::paths::output_dir());
-    match rook_tools::isolate::choose(ctx.isolate, &ctx.isolation) {
-        Ok((Some(_), how)) => println!("  contained — {how}"),
-        Ok((None, how)) => println!("  not contained — {how}"),
-        Err(refused) => println!("  refused — {refused}"),
+    if !config.execution_environment.local() {
+        println!(
+            "  configured execution profile: {} (inspect with /environment)",
+            config.execution_environment.selected
+        );
+    } else {
+        match rook_tools::isolate::choose(ctx.isolate, &ctx.isolation) {
+            Ok((Some(_), how)) => println!("  contained — {how}"),
+            Ok((None, how)) => println!("  not contained — {how}"),
+            Err(refused) => println!("  refused — {refused}"),
+        }
     }
 
     println!();

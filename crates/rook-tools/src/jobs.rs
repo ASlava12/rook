@@ -43,9 +43,14 @@ pub struct Job {
     /// `tasklist` answer that in three different spellings, none of which
     /// belongs in here; the number to ask about does.
     pub group: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_environment: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub processes_stopped: Option<bool>,
 }
 
 struct Running {
+    pinned: bool,
     command: String,
     started_at: i64,
     /// Woken to stop it. The child lives in the task that reads it, so this is
@@ -62,11 +67,16 @@ struct Running {
     printed: Arc<Mutex<Printed>>,
     spill: Option<Arc<Mutex<crate::exec::Spill>>>,
     exit: Arc<Mutex<Option<i32>>>,
+    environment: Arc<Mutex<Option<Arc<crate::environments::Lease>>>>,
+    environment_stopped: Arc<Mutex<Option<bool>>>,
+    environment_description: Option<serde_json::Value>,
 }
 
 /// Every background command this front end started.
 pub struct Jobs {
     registry: u64,
+    scope: Option<u128>,
+    secrets: Option<Arc<dyn crate::Secrets>>,
     running: Mutex<BTreeMap<String, Running>>,
     started: std::sync::atomic::AtomicU64,
     most: usize,
@@ -79,11 +89,27 @@ impl Jobs {
         static NEXT_REGISTRY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
             registry: NEXT_REGISTRY.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            scope: None,
+            secrets: None,
             running: Mutex::new(BTreeMap::new()),
             started: std::sync::atomic::AtomicU64::new(0),
             most,
             max_output_bytes,
         }
+    }
+
+    /// A private delegated registry uses opaque IDs distinct from the parent's
+    /// commands, so a frontend cannot accidentally address an unrelated job.
+    pub fn scoped(
+        most: usize,
+        max_output_bytes: usize,
+        session: u128,
+        secrets: Arc<dyn crate::Secrets>,
+    ) -> Self {
+        let mut jobs = Self::new(most, max_output_bytes);
+        jobs.scope = Some(session);
+        jobs.secrets = Some(secrets);
+        jobs
     }
 
     /// Start one and return its id.
@@ -106,12 +132,22 @@ impl Jobs {
         isolation: Option<&crate::isolate::Isolation>,
         spill: Option<crate::exec::Spill>,
     ) -> Result<String> {
+        self.start_transport(command, cwd, isolation, spill, None)
+    }
+    pub(crate) fn start_transport(
+        &self,
+        command: &str,
+        cwd: &std::path::Path,
+        isolation: Option<&crate::isolate::Isolation>,
+        spill: Option<crate::exec::Spill>,
+        transport: Option<Arc<crate::environments::Transport>>,
+    ) -> Result<String> {
         let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
         // A finished job is kept so its output can still be read, and a turn
         // that starts a thousand short ones would otherwise keep all thousand.
         // Ids are zero-padded, so the map's own order is the order they started.
         let finished: Vec<String> =
-            running.iter().filter(|(_, r)| r.finished()).map(|(id, _)| id.clone()).collect();
+            running.iter().filter(|(_, r)| r.finished() && !r.pinned).map(|(id, _)| id.clone()).collect();
         for id in finished.iter().rev().skip(self.most) {
             running.remove(id);
         }
@@ -130,18 +166,33 @@ impl Jobs {
             });
         }
 
-        let mut child = crate::exec::spawn_shell(command, cwd, &[], isolation)?;
-        let id = format!("job{:03}", self.started.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1);
+        let (mut child, input) = crate::exec::spawn_shell_input(
+            command,
+            cwd,
+            &[],
+            isolation,
+            transport.as_ref().and_then(|t| t.input.clone()),
+        )?;
+        let index = self.started.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let id = match self.scope {
+            Some(session) => format!("job-{session:032x}-{index:020}"),
+            None => format!("job{index:03}"),
+        };
         let printed = Arc::new(Mutex::new(Printed::default()));
         let exit = Arc::new(Mutex::new(None));
         let stop = Arc::new(tokio::sync::Notify::new());
         let group = Arc::new(crate::exec::Group::holding(child.id()));
 
         let (into, code, cap, stopped) = (printed.clone(), exit.clone(), self.max_output_bytes, stop.clone());
+        let environment = Arc::new(Mutex::new(transport.as_ref().map(|t| t.lease.clone())));
+        let remote = environment.clone();
+        let environment_stopped = Arc::new(Mutex::new(transport.as_ref().map(|_| false)));
+        let remote_stopped = environment_stopped.clone();
         let held = group.clone();
         let spill = spill.map(|s| Arc::new(Mutex::new(s)));
         let capture = spill.clone();
         tokio::spawn(async move {
+            let _input = input;
             let mut out = child.stdout.take();
             let mut err = child.stderr.take();
             // Both together, for the reason `run_command` reads them together: a
@@ -156,10 +207,30 @@ impl Jobs {
             tokio::select! {
                 _ = async { reading.await; let _ = child.wait().await; } => {}
                 _ = stopped.notified() => {
+                    if let Some(lease)=remote.lock().unwrap_or_else(|e|e.into_inner()).take(){ *remote_stopped.lock().unwrap_or_else(|e|e.into_inner()) = Some(lease.stop()); }
                     crate::exec::kill_tree(&mut child, &held).await;
                 }
             }
-            let status = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(-1);
+            let mut status = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(-1);
+            let lease = remote.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if let Some(lease) = lease {
+                let completing = lease.clone();
+                let completed = tokio::task::spawn_blocking(move || completing.complete(status)).await;
+                let stopped = match completed {
+                    Ok(Ok(())) => true,
+                    error => {
+                        status = -1;
+                        let text = format!("\nremote completion failed; inspect the environment: {error:?}");
+                        into.lock().unwrap_or_else(|e| e.into_inner()).push(&text, cap);
+                        if let Some(spill) = &capture {
+                            spill.lock().unwrap_or_else(|e| e.into_inner()).write(text.as_bytes());
+                        }
+                        lease.stop() && !lease.uncertain_effects()
+                    }
+                };
+                *remote_stopped.lock().unwrap_or_else(|e| e.into_inner()) = Some(stopped);
+                remote.lock().unwrap_or_else(|e| e.into_inner()).take();
+            }
             if let Some(spill) = &capture {
                 spill.lock().unwrap_or_else(|e| e.into_inner()).flush_redacted(true);
             }
@@ -168,7 +239,19 @@ impl Jobs {
 
         running.insert(
             id.clone(),
-            Running { command: command.to_string(), started_at: now(), stop, group, printed, exit, spill },
+            Running {
+                pinned: self.scope.is_some(),
+                command: transport.as_ref().map(|t| t.display.clone()).unwrap_or_else(|| command.to_owned()),
+                started_at: now(),
+                stop,
+                group,
+                printed,
+                exit,
+                spill,
+                environment,
+                environment_stopped,
+                environment_description: transport.map(|t| t.description.clone()),
+            },
         );
         Ok(id)
     }
@@ -180,12 +263,47 @@ impl Jobs {
 
     pub fn list(&self) -> Vec<Job> {
         let running = self.running.lock().unwrap_or_else(|e| e.into_inner());
-        running.iter().map(|(id, r)| r.seen_as(id)).collect()
+        running.iter().map(|(id, r)| self.redacted(r.seen_as(id))).collect()
     }
 
     pub fn get(&self, id: &str) -> Option<Job> {
         let running = self.running.lock().unwrap_or_else(|e| e.into_inner());
-        running.get(id).map(|r| r.seen_as(id))
+        running.get(id).map(|r| self.redacted(r.seen_as(id)))
+    }
+
+    fn redacted(&self, mut job: Job) -> Job {
+        if let Some(secrets) = &self.secrets {
+            for value in secrets.redactions().into_iter().filter(|value| value.len() >= 6) {
+                job.output = job.output.replace(&value, "${secret}");
+                job.command = job.command.replace(&value, "${secret}");
+            }
+        }
+        job
+    }
+
+    /// Capture omission is independent of credential redaction changing text length.
+    pub fn output_truncated(&self, id: &str) -> Option<bool> {
+        self.running
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .map(|job| job.printed.lock().unwrap_or_else(|e| e.into_inner()).elided > 0)
+    }
+
+    /// Release an explicitly owned terminal's output lease. It may be pruned
+    /// only after release, even when newer short commands have finished.
+    pub fn release(&self, id: &str) -> bool {
+        let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(job) = running.get_mut(id) else { return false };
+        job.pinned = false;
+        true
+    }
+
+    /// Actual bytes received, including data omitted from the bounded output.
+    /// Reading the same retained output again does not advance this counter.
+    pub fn output_count(&self, id: &str) -> Option<u64> {
+        let running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+        running.get(id).map(|job| job.printed.lock().unwrap_or_else(|e| e.into_inner()).received)
     }
 
     /// Test actual liveness without cloning captured output for a guard.
@@ -213,6 +331,40 @@ impl Jobs {
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
+    }
+
+    /// Certify cleanup of the originally owned group before observing file
+    /// effects. A shell's exit alone says nothing about its descendants.
+    pub async fn quiesce(&self, id: &str) -> Result<()> {
+        let group = {
+            let running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+            let job = running.get(id).ok_or_else(|| ToolError::Invalid {
+                tool: "job".into(),
+                message: "job receipt is no longer retained; inspect execution recovery".into(),
+            })?;
+            if !job.finished() {
+                return Err(ToolError::Invalid {
+                    tool: "job".into(),
+                    message: "job is still running".into(),
+                });
+            }
+            if *job.environment_stopped.lock().unwrap_or_else(|e| e.into_inner()) == Some(false) {
+                return Err(ToolError::Invalid {
+                    tool: "job".into(),
+                    message: "remote job cleanup could not be certified; inspect its execution environment"
+                        .into(),
+                });
+            }
+            job.group.clone()
+        };
+        if !crate::exec::quiesce_group(&group).await {
+            return Err(ToolError::Invalid {
+                tool: "job".into(),
+                message: "owned process group cleanup could not be certified; inspect remaining processes"
+                    .into(),
+            });
+        }
+        Ok(())
     }
 
     /// Ask one to stop and keep what it printed: the output is why anyone asked.
@@ -260,6 +412,8 @@ impl Running {
             exit_code,
             quiet_for_secs: quiet.map(|d| d.as_secs()),
             group: self.group.pid(),
+            execution_environment: self.environment_description.clone(),
+            processes_stopped: *self.environment_stopped.lock().unwrap_or_else(|e| e.into_inner()),
         }
     }
 }
@@ -275,6 +429,9 @@ impl Drop for Jobs {
             // would answer the signal may never be scheduled again. Killing the
             // group needs nobody's cooperation; where there is no group to kill,
             // the signal is all there is.
+            if let Some(lease) = job.environment.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                lease.stop();
+            }
             job.group.end();
             job.stop.notify_one();
         }
@@ -287,6 +444,7 @@ impl Drop for Jobs {
 /// hours, so the head is kept as it goes and the tail slides.
 #[derive(Default)]
 pub struct Printed {
+    received: u64,
     head: String,
     tail: String,
     elided: usize,
@@ -307,6 +465,9 @@ impl Printed {
     }
 
     pub fn push(&mut self, text: &str, cap: usize) {
+        if text.is_empty() {
+            return;
+        }
         self.heard = Some(std::time::Instant::now());
         let head_room = cap / 3;
         match head_room.checked_sub(self.head.len()) {
@@ -352,7 +513,9 @@ async fn drain(
         // command is read for hours and what it printed is asked for while it
         // runs. `printed` forgives a character split across the boundary rather
         // than reading the chunk as the wrong encoding because of it.
-        into.lock().unwrap_or_else(|e| e.into_inner()).push(&rook_contain::printed(&chunk[..n]), cap);
+        let mut printed = into.lock().unwrap_or_else(|e| e.into_inner());
+        printed.received = printed.received.saturating_add(n as u64);
+        printed.push(&rook_contain::printed(&chunk[..n]), cap);
     }
 }
 
@@ -426,6 +589,9 @@ impl crate::Tool for JobTool {
                     .with("running", job.exit_code.is_none());
                 if let Some(code) = job.exit_code {
                     outcome = outcome.with("exit_code", code);
+                }
+                if let Some(environment) = job.execution_environment {
+                    outcome = outcome.with("execution_environment", environment);
                 }
                 if let Some(path) = job.output_file {
                     outcome

@@ -190,6 +190,17 @@ fn replay_inner(
         {
             return Err(crate::CoreError::Other("branch summary record exceeds its byte limit".into()));
         }
+        if event.record.kind == EventKind::Note
+            && event.record.label == crate::inbound::SOURCE
+            && rook
+                .store
+                .stat_object(&event.record.body)?
+                .is_none_or(|m| m.size_raw > crate::inbound::SOURCE_BYTES as u64)
+        {
+            return Err(crate::CoreError::Other(
+                "inbound source note exceeds its byte limit or is missing".into(),
+            ));
+        }
         let (body, body_readable) = match rook.store.get(&event.record.body) {
             Ok(bytes) => (String::from_utf8_lossy(&bytes).into_owned(), true),
             // Preserve a visible gap: dropping an unreadable instruction
@@ -226,6 +237,10 @@ fn replay_inner(
         last_at = event.record.ts;
 
         match event.record.kind {
+            EventKind::Note if event.record.label == crate::inbound::SOURCE => {
+                close_open_call(&mut messages, &mut open_call);
+                messages.push(Message::user(crate::inbound::replay_source(&body)));
+            }
             EventKind::Note if event.record.label == crate::branches::SUMMARY_LABEL => {
                 close_open_call(&mut messages, &mut open_call);
                 messages.push(Message::user(crate::branches::replay_summary(&body)?));
@@ -295,7 +310,7 @@ fn replay_inner(
                     let mut message =
                         Message::tool_result(id, crate::results::render(rook, &event, &body, pruned));
                     if !pruned.is_some_and(|seq| event.seq <= seq) {
-                        message.images = crate::tool_images::load(rook, &event)?;
+                        crate::tool_images::for_request(rook, &event, &mut message)?;
                     }
                     batch.result(message);
                     continue;
@@ -307,7 +322,7 @@ fn replay_inner(
                     let mut message =
                         Message::tool_result(id, crate::results::render(rook, &event, &body, pruned));
                     if !pruned.is_some_and(|seq| event.seq <= seq) {
-                        message.images = crate::tool_images::load(rook, &event)?;
+                        crate::tool_images::for_request(rook, &event, &mut message)?;
                     }
                     let has_images = !message.images.is_empty();
                     messages.push(message);

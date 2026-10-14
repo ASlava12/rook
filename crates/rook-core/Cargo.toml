@@ -22,6 +22,7 @@ ignore = "0.4.33"
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "charset", "http2", "gzip", "socks"] }
 flate2 = "1.1.9"
 sha2 = "0.10.9"
+hmac = "0.12.1"
 # The release archives: a gzipped tar everywhere but Windows.
 tar = { version = "0.4.44", default-features = false }
 hex = "0.4.3"
@@ -35,7 +36,7 @@ rook-tools.workspace = true
 semver = "1.0.28"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["raw_value"] }
-similar = { version = "3.2.0", default-features = false, features = ["text"] }
+similar = { version = "3.2.0", default-features = false, features = ["text", "std"] }
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "process", "io-std"] }
 toml = "1.1.4"

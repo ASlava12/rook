@@ -1,0 +1,21 @@
+{
+  "facts": [
+    "The harbor gateway accepts incoming connections on port 8642.",
+    "Translated certification chapters belong in the chapter-archive directory.",
+    "Undo of shell changes restores pre-command file contents and removes newly created files.",
+    "The auxiliary reviewer must never execute shell commands or edit the workspace.",
+    "Audit records expire after thirty days.",
+    "The recovery ticket is quiet-marlin-9274.",
+    "The nightly backup begins at 02:45 UTC.",
+    "The dashboard uses a dark violet accent."
+  ],
+  "cases": [
+    {"id":"ru-port","group":"cross_language","question":"На каком порту шлюз принимает входящие соединения?","expected":0},
+    {"id":"ru-directory","group":"cross_language","question":"В какую папку складывают переведённые главы учебника для сертификации?","expected":1},
+    {"id":"ru-undo","group":"cross_language","question":"Что должна восстановить отмена изменений, сделанных командной оболочкой?","expected":2},
+    {"id":"en-review","group":"paraphrase","question":"Which operations are forbidden to the second pair of eyes?","expected":3},
+    {"id":"en-retention","group":"paraphrase","question":"How long are historical compliance entries kept?","expected":4},
+    {"id":"exact-ticket","group":"exact_identifier","question":"Что сохранено про quiet-marlin-9274?","expected":5},
+    {"id":"unknown","group":"irrelevant","question":"Какую пиццу любит руководитель проекта?","expected":null}
+  ]
+}

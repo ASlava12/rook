@@ -2,8 +2,102 @@
 
 Rook speaks stable ACP v1 over stdio (`rook acp`). An editor's file and terminal
 capabilities are the same limits for parent and delegated work. MCP/LSP pools,
-jobs and approval policy are kept for the connection, rather than rebuilt for
-each prompt. The installed daemon is not involved in this transport.
+jobs and run grants are owned by each active session and reused across its
+prompts. MCP initialization runs inside the cancellable turn, so a server that
+holds its handshake cannot block the connection's close/cancel reader. The
+installed daemon is not involved in this transport.
+
+Session capabilities advertise `list`, `resume` and `close`. `session/list` accepts an
+optional absolute `cwd` filter and a returned `cursor`. Each page returns at
+most 64 sessions and scans at most 512 metadata records, so a filtered empty
+page can still have `nextCursor`. Cursors use stable session IDs. `session/resume`
+validates the stored session and returns its configuration without replaying
+historical content. `session/load` streams the fixed saved root prefix before its
+successful response: user/assistant messages, narrative thoughts, tool arguments,
+results and retained user/tool images. Stable IDs contain the source session and
+event; each content chunk retains its event/object/byte offset. Loading never
+executes a saved command, sends a permission request or exposes opaque provider
+companions. Historical admissions do not establish a current live command, and
+a terminal tool status requires its saved measured outcome.
+
+History uses bounded metadata pages, one verified object and small UTF-8 text
+frames. It awaits the shared output leases rather than filling a second queue.
+`server.acp_history_body_bytes` defaults to 16 MiB and validates 64 KiB–64 MiB;
+it bounds one retained decoded object, with encoded input admitted separately.
+Each object is verified once before its text is streamed, avoiding repeated
+whole-object decompression per fragment. An oversized object/image or unreadable
+source returns a failed load rather than successful elision. Increase the named
+body/queue limit when the original source needs more space. A history producer
+runs separately from the incoming reader; closing its session still cancels it
+while output is blocked. The response's `_meta.rook.history` reports its fixed
+`through` boundary and `rootComplete`. Optional child recovery retains its
+separate best-effort limits below.
+
+`session/close` validates the session before cancelling its owned turn and awaits
+future destruction before acknowledging closure. A cancelled prompt receives one
+`cancelled` response. Pending editor requests are released; known editor terminals
+receive `terminal/kill` and `terminal/release` requests. Local process groups and
+remote command leases are released with that session's jobs; its MCP/LSP pools
+shut down and run grants disappear. Closing a different session leaves the current
+turn running. Agent-created children remain restricted: close is a parent control.
+Stored history remains listed and resumable; subsequent prompts use fresh equipment.
+
+`server.max_acp_sessions` defaults to 64 and validates 1–256. It bounds session
+runtime equipment per editor connection, admitted by requested MCP setup or the
+first valid prompt.
+Reaching the limit refuses another session before cancelling existing work; close
+an active session to make room. Metadata-only new/load/resume operations with no requested client servers do
+not start tools or count against the equipment limit. Explicit MCP setup owns
+equipment under that same limit.
+
+The standard `session/set_mode` and `session/set_config_option` target only the
+named session. Mode and effort selections use bounded versioned JSON companions,
+survive close/resume and leave other sessions unchanged. A mode update reaches
+that session's current policy; effort is selected for its next prompt. Corrupt
+or oversized preferences fail rather than silently selecting a more permissive
+mode. The legacy `session/set_stance` remains a connection-wide default for
+sessions without an explicit mode selection. Temporary run grants stay scoped
+to the active session and disappear when its equipment closes.
+
+Editor cleanup requests carry IDs but keep no pending waiter after cancellation.
+They request remote cleanup without certifying that an editor process stopped.
+A lost terminal-creation reply can leave no usable terminal ID; original execution
+uncertainty remains in ordinary recovery. Neither close nor resume replays an
+uncertain command or acknowledges its effects.
+
+## Session setup and MCP
+
+`session/new` selects the requested existing absolute `cwd` and saves its
+canonical identity. The legacy `.` spelling selects the server's launch project.
+Load/resume use the saved project when legacy callers omit cwd, and reject a
+supplied different or unavailable directory. Files, commands, editor bridges,
+LSP and MCP therefore use that session's actual project. No moved workspace is
+silently replaced by the launch directory.
+
+`mcpServers` accepts bounded stdio declarations (`name`, `command`, `args`,
+`env` name/value pairs) and streamable HTTP declarations (`type: "http"`, `name`,
+`url`, header name/value pairs). HTTP support is advertised; legacy SSE and
+additional workspace roots are not. Invalid/oversized declarations and name
+collisions with configured/plugin servers fail before starting a process.
+`server.acp_setup_bytes` defaults to 64 KiB and validates 4 KiB–1 MiB. Names,
+commands, arguments and environment/headers also have individual admission bounds;
+the combined catalog remains under `mcp_connections` limits.
+
+Successful setup waits for every explicitly requested server's initialization and
+catalog. A failed server returns a failed request with its retained session ID,
+without credentials or a false ready result. Startup and history run independently
+of the incoming reader: cancel without an ID reaches an unacknowledged new session,
+and close reaches a setup whose session is known. One pending setup is retained
+per connection; a second must wait/cancel rather than spawn an unbounded queue.
+
+A session reuses its unchanged MCP connection across ordinary prompts and resume.
+An idle load/resume replaces the complete requested list; an empty list releases
+old client connections. An executing session must finish/cancel before its list
+can change. Close shuts down owned connections; subsequent setup reconnects only
+the list sent again by the client. Declarations and credentials remain in memory,
+not operator configuration or a persisted secret vault. Credential-shaped
+headers/environment values are hidden by ordinary result/history redaction,
+including delegated child contexts, without modifying source files.
 
 ## Optional previews
 
@@ -71,7 +165,7 @@ Recovery uses saved IDs; records predating IDs get a deterministic source ID.
 
 ## Recovery and limits
 
-Load/resume sends historical associations and completed compactions before its
+Load sends historical associations and completed compactions before its
 response. Historical running states do not establish current activity. A child
 without a durable completed outcome is `unknown`. On an existing live connection,
 observed current states are confirmed after a successful response. Replay never
@@ -105,9 +199,93 @@ cancellation, child versus root errors, capability fallbacks, recovery bounds an
 actual compaction followed by store/connection reopening. Core fixtures verify
 output admission, opaque-state exclusion, durable IDs, actual append failure
 after generation and cancellation/error
-observations. Adapter and shared delivery fixtures reach their request, child,
+observations. Actual editor-terminal and background-command fixtures verify
+physical process death, closing another session without stopping its work,
+run-grant isolation, fresh equipment after close and history retention. Nested
+close retains unknown child outcomes and refuses independent child controls.
+Socket fixtures reach the configured equipment limit before testing refusal and
+release. A held owned HTTP MCP initialization request verifies that close cancels
+startup before its unanswered handshake deadline. Adapter and shared delivery fixtures reach their request, child,
 event and escaped-byte limits and check explicit failure.
 
 The upstream contract is pinned in
 [the reference review](research/reference-review-20261003.md); completion evidence
 and remaining work are in [the adoption tracker](research/reference-adoption-20261003.md).
+
+
+## Remaining interoperability work
+
+Configured executors are available through the shared engine. The current full
+regression result and any remaining verification are recorded in
+[the functional adoption tracker](reference-functional-adoption.md).
+
+## Configured external executors
+
+A trusted operator profile can be selected explicitly through the ordinary
+`delegate` tool. The model cannot supply an executable, arguments or credentials:
+
+```toml
+[acp_executor.profiles.helper]
+command = "/absolute/path/to/an-acp-agent"
+args = ["--acp"]
+trusted = true
+
+[acp_executor.profiles.helper.env]
+# Optional trusted overrides, for example a separate home for another Rook.
+ROOK_HOME = "/absolute/path/to/foreign-agent-state"
+API_TOKEN = "secret:existing-alias"
+```
+
+Call `delegate` with `tasks` and `executor: "helper"`; do not combine `executor`
+with `model` or `care`. Profiles without explicit trust are unavailable. Project
+configuration cannot introduce trusted executable profiles. Launch admission uses
+the inherited external-tool policy and approver. An ACP executable can run its
+own tools independently: this opt-in is trust in that executable, not a sandbox.
+
+Environment overrides are operator configuration, never model arguments. Names
+are portable identifiers; at most 128 entries, 16 KiB per value and 64 KiB total.
+`secret:alias` resolves from `rook secrets` only after launch permission, checks
+the resolved bounds, and registers the value for output/history redaction. A
+missing alias fails without starting a subprocess.
+
+Each errand has an ordinary linked child session, selected workspace, journal,
+progress and deadline. Explicit delegated context and hook context are sent as
+bounded reference data alongside the task; the parent conversation is not sent
+implicitly. Client callbacks support raw file reads, writes, native terminal
+create/output/wait/kill/release and one-operation permission requests. Writes use ordinary dispatch, policy,
+checkpoints and parent rewind. Raw reads preserve original line endings and optional one-based line windows.
+`acp_executor.file_bytes` bounds source reads (default 1 MiB, 4 KiB–16 MiB);
+encoded windows still obey the frame limit. Editor buffers stay authoritative,
+and oversized editor text is refused before an owned text copy.
+
+Native terminals use ordinary background commands and job receipts. Literal
+arguments/environment values are shell-quoted; unsupported literal shapes on
+Windows fail rather than executing a different argument. Output has its own
+selected byte limit, and capture omission is distinct from secret redaction.
+Terminal IDs are scoped to the external child, reject foreign/released IDs, and
+retain completed output until release. Owned cancellation cannot stop parent
+jobs. If this frontend owns an editor terminal bridge, native terminal capability
+is not advertised; external requests cannot override that authority.
+Foreign tool updates are observations of external work, never instructions to
+execute the operation again. Duplicate callback IDs and wrong-session messages
+fail without repeating an effect.
+
+The client bounds frame bytes while receiving, serialized requests before
+writing, cumulative response text, message/callback counts and stream silence.
+Diagnostic stderr is drained into a tail bounded by the smaller of the frame
+limit and 16 KiB, redacted and retained after cleanup. Cancel ends its owned
+subprocess group. A missing completion response retains
+unknown execution for inspection, including already completed native callbacks;
+no external prompt is retried automatically. Output fragments are retained as
+notes before the final external reply. Context-size updates are not billing:
+external usage/cost remains explicitly unverified and stops further family model
+requests, including completion checking/repair, rather than assigning native
+model prices or creating another allowance. Inspect the saved child report and
+actual workspace changes before a new request.
+
+Actual Rook-to-Rook stdio, local CLI, daemon WebSocket, restart/source inspection,
+both live TUI modes and browser outcome/source checks are covered by owned
+fixtures. These prove transport and engine behavior, not model-quality gains or
+external pricing. Local and daemon-backed TUI also display engine-produced final
+reports when no model text delta carried them, without repeating ordinary streamed
+answers. See the adoption tracker for the final combined regression gate.

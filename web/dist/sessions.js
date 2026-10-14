@@ -5,6 +5,12 @@ import { continueIn, quoteIntoDraft, branchFromEvent } from './chat.js';
 import { historyPanel } from './history.js';
 import { branchPanel } from './branches.js';
 import { worktreePanel } from './worktrees.js';
+import { reviewPanel } from './reviews.js';
+import { shellUndoPanel } from './shell-undo.js';
+import { experimentPanel } from './experiments.js';
+import { learningPanel } from './learning.js';
+import { environmentPanel } from './environments.js';
+import { recipesPanel } from './recipes.js';
 
 let follow = 0;
 
@@ -47,6 +53,17 @@ export async function renderSessions() {
         await api(`/api/sessions/${state.session}/goal`, { goal: $('#goal').value });
         renderSessions();
       } }, 'Set')));
+
+    const activity = el('pre', { 'aria-live': 'polite' });
+    right.append(el('div', { class: 'row' }, el('button', { onclick: async () => {
+      const session = state.session;
+      try {
+        const report = await api(`/api/sessions/${session}/diagnostics?logs=false`);
+        if (!activity.isConnected || state.session !== session) return;
+        const a = report.activity;
+        activity.textContent = a ? `${a.session}: ${a.owner_live === null ? 'saved observation; owner unknown' : a.owner_live ? 'running' : 'owner stopped'}; ${a.stage}${a.operation ? ` · ${a.operation}` : ''}; no observed progress for ${a.idle_secs}s; last progress ${new Date(a.last_progress_at * 1000).toISOString()}${a.stalled ? '; inactivity threshold reached' : ''}` : 'No activity observation has been recorded for this session.';
+      } catch (error) { if (activity.isConnected) activity.textContent = String(error.error || error); }
+    } }, 'Check activity')), activity);
 
     const includeLogs = el('input', { type: 'checkbox', 'aria-label': 'Include redacted log tails' });
     right.append(el('div', { class: 'row' },
@@ -103,11 +120,11 @@ export async function renderSessions() {
           el('td', {}, `+${f.lines_added}`),
           el('td', {}, `−${f.lines_removed}`)))));
     }
-    // A command declares no paths, so nothing holds what these were before:
-    // they can be named and neither diffed nor put back.
+    // Legacy shell observations only name paths; optional retained shell
+    // receipts below provide their own source and restoration contract.
     const byCommand = changed.written_by_commands || [];
     if (byCommand.length) {
-      right.append(el('p', { class: 'sub' }, 'written by commands — nothing kept to diff or restore:'));
+      right.append(el('p', { class: 'sub' }, 'written by commands — check shell receipts below for retained preimages:'));
       right.append(el('ul', {}, byCommand.map(p => el('li', { class: 'sub' }, p))));
     }
     if (changed.watched === false) {
@@ -123,6 +140,24 @@ export async function renderSessions() {
     });
     right.append(branches);
     right.append(historyPanel(session, text => quoteIntoDraft(session, text), rewindTo, seq => branchFromEvent(session, seq)));
+    const reviews=el('details',{},el('summary',{},'Change reviews'));
+    reviews.ontoggle=()=>{if(reviews.open && reviews.children.length===1) reviews.append(reviewPanel(session,quoteIntoDraft));};
+    right.append(reviews);
+    const shell=el('details',{},el('summary',{},'Shell changes and undo'));
+    shell.ontoggle=()=>{if(shell.open && shell.children.length===1) shell.append(shellUndoPanel(session));};
+    right.append(shell);
+    const experiments=el('details',{},el('summary',{},'Experiments'));
+    experiments.ontoggle=()=>{if(experiments.open && experiments.children.length===1) experiments.append(experimentPanel(session));};
+    right.append(experiments);
+    const environment=el('details',{},el('summary',{},'Execution environment'));
+    environment.ontoggle=()=>{if(environment.open && environment.children.length===1) environment.append(environmentPanel(session));};
+    right.append(environment);
+    const learning=el('details',{},el('summary',{},'Knowledge proposals'));
+    learning.ontoggle=()=>{if(learning.open && learning.children.length===1) learning.append(learningPanel(session));};
+    right.append(learning);
+    const recipes=el('details',{},el('summary',{},'Composite recipes'));
+    recipes.ontoggle=()=>{if(recipes.open&&recipes.children.length===1)recipes.append(recipesPanel(session));};
+    right.append(recipes);
   } else {
     right.append(el('p', { class: 'empty' }, 'no sessions yet — run `rook run "…"`'));
   }

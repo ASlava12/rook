@@ -17,7 +17,29 @@ use tokio::sync::Mutex;
 use crate::AppState;
 
 #[derive(Default)]
-pub struct Tasks(pub(crate) Mutex<HashMap<String, tokio::task::JoinHandle<()>>>);
+pub struct Tasks(pub(crate) Mutex<HashMap<String, Running>>);
+
+type Observed = Arc<std::sync::Mutex<Option<Arc<crate::chat::activity::Observation>>>>;
+
+pub(crate) struct Running {
+    task: tokio::task::JoinHandle<()>,
+    observation: Observed,
+}
+
+impl Running {
+    fn is_finished(&self) -> bool {
+        self.task.is_finished()
+    }
+}
+
+impl Tasks {
+    pub(crate) async fn activity(&self, session: u128) -> Option<rook_proto::activity::Snapshot> {
+        self.0.lock().await.values().find_map(|running| {
+            let observation = running.observation.lock().unwrap_or_else(|e| e.into_inner());
+            observation.as_ref().filter(|o| o.session == session).map(|o| o.snapshot(!running.is_finished()))
+        })
+    }
+}
 
 /// Starting and recovery use the same lock: a scheduler tick must not launch a
 /// second writer while the socket that submitted the goal is attaching to it.
@@ -270,6 +292,7 @@ pub async fn supervise(state: Arc<AppState>) {
         tick.tick().await;
         state.config_if_changed().await;
         schedule_tick(&state).await;
+        crate::inbound::tick(&state).await;
         // Session goals use the existing chat registry, streaming, approvals
         // and switching. A disconnected window is only a missing observer.
         let conversations = managed::list(&*state.rook.read().await);
@@ -291,7 +314,7 @@ pub async fn supervise(state: Arc<AppState>) {
             tasks.iter().filter(|(_, h)| h.is_finished()).map(|(id, _)| id.clone()).collect();
         for id in finished {
             if let Some(handle) = tasks.remove(&id)
-                && let Err(error) = handle.await
+                && let Err(error) = handle.task.await
             {
                 block(&state, &id, &format!("worker stopped unexpectedly: {error}")).await;
             }
@@ -340,13 +363,18 @@ pub async fn supervise(state: Arc<AppState>) {
             }
             let shared = state.clone();
             let id = run.id.clone();
+            let observation: Observed = Default::default();
+            let observed = observation.clone();
             tasks.insert(
                 id,
-                tokio::spawn(async move {
-                    if let Err(error) = iteration(&shared, &run).await {
-                        block(&shared, &run.id, &error).await;
-                    }
-                }),
+                Running {
+                    task: tokio::spawn(async move {
+                        if let Err(error) = iteration(&shared, &run, observed).await {
+                            block(&shared, &run.id, &error).await;
+                        }
+                    }),
+                    observation,
+                },
             );
         }
     }
@@ -365,18 +393,23 @@ async fn block(state: &AppState, id: &str, why: &str) {
     }
 }
 
-async fn iteration(state: &Arc<AppState>, run: &Run) -> Result<(), String> {
+async fn iteration(state: &Arc<AppState>, run: &Run, observed: Observed) -> Result<(), String> {
     let engine = state.engine_for(Some(std::path::Path::new(&run.workspace))).await?;
     let equipment = state.equipment_for(&engine).await;
     let rook = engine.read().await;
     let shared = equipment.get_or_init(|| crate::chat::Shared::for_project(&rook)).await;
     let _counted = state.turn_started();
+    let watch = std::sync::Mutex::new(None);
     managed::advance(
         &rook,
         &run.id,
         |session| {
             let provider = rook_core::models::configured(&rook.config)?;
             let mut agent = rook_core::agent::AgentLoop::new(&rook, provider.into(), session);
+            let observation = crate::chat::activity::Observation::new(&rook, session);
+            *watch.lock().unwrap_or_else(|e| e.into_inner()) = Some(observation.unattended());
+            *observed.lock().unwrap_or_else(|e| e.into_inner()) = Some(observation.clone());
+            agent.observer = Some(observation);
             rook_core::agent::equip(&mut agent, shared.servers.clone(), &shared.mcp, shared.jobs.clone());
             Ok(agent)
         },
@@ -384,6 +417,7 @@ async fn iteration(state: &Arc<AppState>, run: &Run) -> Result<(), String> {
     )
     .await
     .map_err(|e| e.to_string())?;
+    drop(watch);
     Ok(())
 }
 
@@ -392,10 +426,10 @@ async fn iteration(state: &Arc<AppState>, run: &Run) -> Result<(), String> {
 pub async fn stop(state: &AppState) {
     let tasks: Vec<_> = state.work.0.lock().await.drain().map(|(_, task)| task).collect();
     for task in &tasks {
-        task.abort();
+        task.task.abort();
     }
     for task in tasks {
-        let _ = task.await;
+        let _ = task.task.await;
     }
     let conversations: Vec<_> = state.live.write().await.drain().map(|(_, live)| live).collect();
     for live in conversations {

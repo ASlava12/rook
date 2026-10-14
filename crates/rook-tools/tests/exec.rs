@@ -45,6 +45,31 @@ async fn a_command_reports_its_exit_code_and_output() {
     assert!(out.content.contains("hello"));
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn pipe_activity_counts_real_bytes_from_both_streams_even_when_output_is_elided() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
+    let (_d, mut ctx) = ctx();
+    ctx.max_output_bytes = 512;
+    let received = Arc::<AtomicU64>::default();
+    ctx.output_activity = Some(received.clone());
+    let out =
+        run(&ctx, serde_json::json!({"command":"head -c 131072 /dev/zero; head -c 131072 /dev/zero >&2"}))
+            .await;
+    assert!(!out.is_error, "{}", out.content);
+    assert_eq!(received.load(Ordering::Relaxed), 262144);
+    assert!(262144 > ctx.max_output_bytes, "the output cap was reached");
+    assert!(out.content.contains("elided"), "{}", out.content);
+    assert!(out.content.len() < 4096);
+    received.store(0, Ordering::Relaxed);
+    let silent = run(&ctx, serde_json::json!({"command":"true"})).await;
+    assert!(!silent.is_error);
+    assert_eq!(received.load(Ordering::Relaxed), 0, "status and exit are not pipe bytes");
+}
+
 /// `#[cfg(unix)]` for the command, not for the claim: `;` does not separate
 /// commands in `cmd.exe` and `>&2` is spelled differently. What is asserted —
 /// that stderr is kept and labelled — is platform-independent Rust.
@@ -296,6 +321,8 @@ async fn a_timed_out_command_still_says_where_the_whole_of_its_output_is() {
     .await;
 
     assert_eq!(out.meta.get("timed_out"), Some(&serde_json::json!(true)), "{}", out.content);
+    assert!(out.truncated, "timeout must retain the reached output omission");
+    assert!(out.full_bytes >= 100000, "timeout must retain the actual observed byte count");
     let path = out.meta.get("output_file").and_then(|p| p.as_str()).expect("it names the file");
     assert!(std::fs::read_to_string(path).unwrap().contains("NEEDLE"), "which holds what it printed");
 }

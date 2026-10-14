@@ -729,6 +729,17 @@ impl Journal {
         })
     }
 
+    pub(crate) fn retain_unknown(&self) -> Result<()> {
+        self.update(|state| {
+            let pending = state
+                .pending
+                .clone()
+                .ok_or_else(|| CoreError::Other("uncertain operation has no retained admission".into()))?;
+            uncertain(state, pending);
+            Ok(())
+        })
+    }
+
     pub(crate) fn complete(
         &self,
         result: &str,
@@ -960,6 +971,8 @@ fn refresh(
             {
                 if job.exit_code.is_none() {
                     state.background.push(operation);
+                } else if job.processes_stopped == Some(false) {
+                    uncertain(state, operation);
                 } else {
                     let body = serde_json::json!({"job":job.id,"exit_code":job.exit_code,"output":job.output,
                         "output_file":job.output_file,"output_complete":job.output_complete});
