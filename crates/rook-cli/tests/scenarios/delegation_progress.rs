@@ -7,22 +7,29 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+type Counts = ([usize; 2], [usize; 4], [usize; 2]);
+
 struct Model {
     url: String,
     stop: Arc<AtomicBool>,
-    thread: Option<std::thread::JoinHandle<([usize; 2], [usize; 4])>>,
+    thread: Option<std::thread::JoinHandle<Counts>>,
 }
 
 impl Drop for Model {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         let joined = self.thread.take().unwrap().join();
-        eprintln!("native delegation fixture requests: {joined:?}");
+        eprintln!("native delegation fixture stages and child requests: {joined:?}");
         if !std::thread::panicking() {
+            let (stages, children, requests) = joined.unwrap();
             assert_eq!(
-                joined.unwrap(),
+                (stages, children),
                 ([4, 4], [2, 2, 2, 2]),
-                "both parent paths and all four children actually ran"
+                "both parents reached their terminal stage and all four children actually ran"
+            );
+            assert!(
+                requests.iter().all(|n| (5..=8).contains(n)),
+                "both parents actually retried an unfinished wait: {requests:?}"
             );
         }
     }
@@ -37,7 +44,10 @@ impl Model {
         let halt = stop.clone();
         let thread = std::thread::spawn(move || {
             let mut parents = [0; 2];
+            let mut parent_requests = [0; 2];
             let mut children = [0; 4];
+            let nursery_release = [0; 2].map(|_| Arc::new(AtomicBool::new(false)));
+            let mut held = Vec::new();
             while !halt.load(Ordering::SeqCst) {
                 let Ok((mut socket, _)) = listener.accept() else {
                     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -72,6 +82,7 @@ impl Model {
                         };
                     }
                 };
+                let mut defer = None;
                 let (mime, body) = if request["stream"] == true {
                     // OpenAI accepts string/structured content and can fold
                     // consecutive user messages. Match the task line, not a
@@ -117,14 +128,41 @@ impl Model {
                             let calls: Vec<_> = (0..256).map(|i| json!({"index":i,"id":format!("read-{i}"),"type":"function","function":{"name":"read_file","arguments":r#"{"path":"notes.txt"}"#}})).collect();
                             (json!({"tool_calls":calls}), "tool_calls")
                         } else {
+                            if task.contains("nursery") {
+                                // This child cannot finish before its parent's
+                                // first zero-wait poll returned still-running.
+                                defer = Some(nursery_release[group].clone());
+                            }
                             (json!({"content":"child report"}), "stop")
                         }
                     } else {
                         let group =
                             usize::from(request["messages"].to_string().contains("audit-native-daemon"));
                         let step = parents[group];
-                        parents[group] += 1;
+                        parent_requests[group] += 1;
+                        assert!(
+                            parent_requests[group] <= 8,
+                            "parent never collected its children: {request}"
+                        );
                         let scope = if group == 0 { "local" } else { "daemon" };
+                        let latest_tool = request["messages"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .rev()
+                            .find(|m| m["role"] == "tool")
+                            .map(|m| m["content"].to_string())
+                            .unwrap_or_default();
+                        // A bounded wait may return while the child is running
+                        // on a loaded host. Only its actual report closes this
+                        // stage; another poll must not claim the work finished.
+                        let waiting = step == 3 && latest_tool.contains("still running");
+                        if waiting {
+                            nursery_release[group].store(true, Ordering::SeqCst);
+                        }
+                        if !waiting {
+                            parents[group] += 1;
+                        }
                         let (tool, args) = match step {
                             0 => (
                                 "delegate",
@@ -134,15 +172,22 @@ impl Model {
                                 "delegate",
                                 json!({"task":format!("AUDIT CHILD: {scope} nursery"),"wait":false}),
                             ),
-                            2 => ("subagents", json!({"wait_secs":60})),
-                            3 => ("", Value::Null),
+                            2 => ("subagents", json!({"wait_secs":0})),
+                            3 if waiting => ("subagents", json!({"wait_secs":60})),
+                            3 => {
+                                assert!(
+                                    latest_tool.contains("child report"),
+                                    "no completed child source: {latest_tool}"
+                                );
+                                ("", Value::Null)
+                            }
                             _ => panic!("unexpected parent attempt {step}"),
                         };
                         if tool.is_empty() {
                             (json!({"content":"Collected both reports."}), "stop")
                         } else {
                             (
-                                json!({"tool_calls":[{"index":0,"id":format!("parent-{step}"),"type":"function","function":{"name":tool,"arguments":args.to_string()}}]}),
+                                json!({"tool_calls":[{"index":0,"id":format!("parent-{step}-{}",parent_requests[group]),"type":"function","function":{"name":tool,"arguments":args.to_string()}}]}),
                                 "tool_calls",
                             )
                         }
@@ -154,13 +199,30 @@ impl Model {
                 } else {
                     ("application/json", r#"{"data":[]}"#.into())
                 };
-                let _ = write!(
-                    socket,
-                    "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
+                let mut send = move || {
+                    let _ = write!(
+                        socket,
+                        "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                };
+                if let Some(released) = defer {
+                    assert!(held.len() < 2, "only one held nursery reply per parent");
+                    let halt = halt.clone();
+                    held.push(std::thread::spawn(move || {
+                        while !released.load(Ordering::SeqCst) && !halt.load(Ordering::SeqCst) {
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                        send();
+                    }));
+                } else {
+                    send();
+                }
             }
-            (parents, children)
+            for thread in held {
+                assert!(thread.join().is_ok());
+            }
+            (parents, children, parent_requests)
         });
         Self { url, stop, thread: Some(thread) }
     }
@@ -171,6 +233,7 @@ fn coalesced_delegation_keeps_blocking_and_nursery_receipts_locally_and_through_
     rook_llm::init_tls();
     let model = Model::new();
     for shared in [false, true] {
+        let _one = (!shared).then(one_at_a_time);
         let rook = Rook::new();
         std::fs::write(rook.workspace.path().join("notes.txt"), "native actual file\n").unwrap();
         rook.write_config(&format!("[agent]\nmodel='local'\ninstall_servers=false\none_script=false\nplan_first=false\ntool_cycle_guard=false\ndelegation_progress_entries=1\n[models.local]\nmodel='test'\napi='openai'\nurl='{}'\ncontext_window=200000\n", model.url));
