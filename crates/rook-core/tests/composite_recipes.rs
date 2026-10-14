@@ -9,7 +9,8 @@ use std::{
     },
 };
 struct Fixture {
-    root: tempfile::TempDir,
+    // Own the workspace until every engine and receipt user has finished.
+    _root: tempfile::TempDir,
     rook: Rook,
     session: u128,
 }
@@ -38,7 +39,7 @@ impl Fixture {
             root.path().into(),
         );
         let session = rook.start_session("recipe parent").unwrap();
-        Self { root, rook, session }
+        Self { _root: root, rook, session }
     }
     fn call(&self) -> Value {
         self.rook.composite_request(self.session, Inspect::List { after: None }).unwrap()["calls"][0].clone()
@@ -293,10 +294,12 @@ async fn fixed_parameters_cannot_be_replaced_and_parallel_dependencies_create_no
     }
 }
 
+#[cfg(unix)]
 struct CancelModel {
     root: std::path::PathBuf,
     called: AtomicBool,
 }
+#[cfg(unix)]
 #[async_trait::async_trait]
 impl Provider for CancelModel {
     fn id(&self) -> &str {
@@ -375,7 +378,7 @@ async fn canceling_a_real_child_command_retains_interruption_and_reopens_without
     let session = f.session;
     drop(f.rook);
     let rook = Rook::from_parts(
-        rook_store::Store::open(f.root.path().join("store")).unwrap(),
+        rook_store::Store::open(f._root.path().join("store")).unwrap(),
         config,
         rook_skills::Environment::bare("test", "test", "0.11.2"),
         rook_skills::SkillIndex::default(),
