@@ -1445,31 +1445,74 @@ async fn a_turn_goes_on_while_the_sub_agents_it_started_are_still_running() {
 /// the finished wrong answer.
 #[tokio::test]
 async fn a_parent_can_redirect_a_sub_agent_that_is_still_running() {
+    struct Redirectable {
+        script: ByPrompt,
+        read: tokio::sync::Notify,
+        redirected: tokio::sync::Notify,
+    }
+    #[async_trait]
+    impl Provider for Redirectable {
+        fn id(&self) -> &str {
+            self.script.id()
+        }
+        fn context_window(&self) -> usize {
+            self.script.context_window()
+        }
+        async fn complete(&self, request: Request) -> rook_llm::Result<Response> {
+            if completion_answer(&request).is_none()
+                && !request
+                    .messages
+                    .iter()
+                    .any(|m| m.content.contains("You are checking a claim somebody else made."))
+            {
+                let last = request.messages.last().map(|m| m.content.as_str()).unwrap_or("");
+                if last.contains("started: task01") {
+                    // Prove that the child read the file before redirecting it.
+                    self.read.notified().await;
+                } else if last.contains("sees it at its next step") {
+                    // This result follows the actual delivery of the remark.
+                    self.redirected.notify_one();
+                } else if last.contains("contents of a") {
+                    // An immediately ready mock can exhaust the cycle guard
+                    // before its parent is polled. Hold this real child request
+                    // until the parent has delivered the redirect instead.
+                    self.read.notify_one();
+                    self.redirected.notified().await;
+                }
+            }
+            self.script.complete(request).await
+        }
+    }
     let f = fixture();
     std::fs::write(f.workspace.path().join("a.txt"), "contents of a").unwrap();
     let session = f.rook.start_session("s").unwrap();
 
-    // The child reads the same file until it is told otherwise, so the remark
-    // arriving is what ends it rather than a guess about scheduling.
-    let provider = Arc::new(ByPrompt(vec![
-        ("stop, tally instead", reply("switched to tallying")),
-        (
-            "started: task01",
-            call("subagents", serde_json::json!({ "id": "task01", "say": "stop, tally instead" })),
-        ),
-        (
-            "sees it at its next step",
-            call("subagents", serde_json::json!({ "id": "task01", "wait_secs": 20 })),
-        ),
-        ("switched to tallying", reply("it switched")),
-        ("redirect it", call("delegate", serde_json::json!({ "tasks": ["walk"], "wait": false }))),
-        ("walk", call("read_file", serde_json::json!({ "path": "a.txt" }))),
-        ("contents of a", call("read_file", serde_json::json!({ "path": "a.txt" }))),
-    ]));
+    let provider = Arc::new(Redirectable {
+        script: ByPrompt(vec![
+            ("stop, tally instead", reply("switched to tallying")),
+            (
+                "started: task01",
+                call("subagents", serde_json::json!({ "id": "task01", "say": "stop, tally instead" })),
+            ),
+            (
+                "sees it at its next step",
+                call("subagents", serde_json::json!({ "id": "task01", "wait_secs": 20 })),
+            ),
+            ("switched to tallying", reply("it switched")),
+            ("redirect it", call("delegate", serde_json::json!({ "tasks": ["walk"], "wait": false }))),
+            ("walk", call("read_file", serde_json::json!({ "path": "a.txt" }))),
+            ("contents of a", call("read_file", serde_json::json!({ "path": "a.txt" }))),
+        ]),
+        read: tokio::sync::Notify::new(),
+        redirected: tokio::sync::Notify::new(),
+    });
 
     let mut agent = AgentLoop::new(&f.rook, provider, session);
     agent.allow_everything_not_denied();
-    let outcome = agent.run("redirect it").await.unwrap();
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(60), agent.run("redirect it"))
+        .await
+        .expect("parent and child did not complete the observed redirect")
+        .unwrap();
 
     assert_eq!(outcome.reply, "it switched", "the parent saw what the child did after being told");
     let child = rook_store::parse_session_id(&outcome.delegated[0]).unwrap();
@@ -1479,6 +1522,9 @@ async fn a_parent_can_redirect_a_sub_agent_that_is_still_running() {
         heard.iter().any(|body| body.contains("stop, tally instead")),
         "the remark reached the child while it was running: {heard:?}"
     );
+    let read = heard.iter().position(|body| body.contains("contents of a")).unwrap();
+    let redirect = heard.iter().position(|body| body.contains("stop, tally instead")).unwrap();
+    assert!(read < redirect, "the child actually read before the redirect arrived: {heard:?}");
 }
 
 /// Reversibility is a property of the system, not of one session: a turn that
