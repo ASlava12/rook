@@ -25,7 +25,10 @@ pub(super) fn run(
 ) -> Result<Output> {
     let deadline = Instant::now() + Duration::from_secs(timeout);
     loop {
-        if ACTIVE.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < 4).then_some(n + 1)).is_ok() {
+        // try_update is newer than the supported Rust 1.90 toolchain.
+        #[allow(deprecated)]
+        let reserved = ACTIVE.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < 4).then_some(n + 1));
+        if reserved.is_ok() {
             break;
         }
         if Instant::now() >= deadline {

@@ -11,6 +11,8 @@ const MAX_PENDING: usize = 1024;
 struct Budget(AtomicUsize);
 impl Budget {
     fn reserve(&self, maximum: usize) -> std::io::Result<Lease<'_>> {
+        // try_update is newer than the supported Rust 1.90 toolchain.
+        #[allow(deprecated)]
         self.0.fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
             (used < maximum.clamp(1, MAX_PENDING)).then_some(used + 1)
         }).map_err(|_| std::io::Error::new(std::io::ErrorKind::WouldBlock,

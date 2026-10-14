@@ -922,7 +922,7 @@ pub fn shell_argument(argument: &str) -> std::io::Result<String> {
             ));
         }
         let trailing = argument.chars().rev().take_while(|c| *c == '\\').count();
-        return Ok(format!("\"{argument}{}\"", "\\".repeat(trailing)));
+        Ok(format!("\"{argument}{}\"", "\\".repeat(trailing)))
     }
     #[cfg(not(windows))]
     Ok(format!("'{}'", argument.replace('\'', "'\"'\"'")))
@@ -943,7 +943,7 @@ pub fn shell_assignment(name: &str, value: &str) -> std::io::Result<String> {
         let _ = shell_argument(value)?;
         // cmd does not have POSIX assignment prefixes. SET's quoted form keeps
         // its metacharacters literal, and the name is validated above.
-        return Ok(format!("set \"{name}={value}\" &&"));
+        Ok(format!("set \"{name}={value}\" &&"))
     }
     #[cfg(not(windows))]
     Ok(format!("{name}={}", shell_argument(value)?))

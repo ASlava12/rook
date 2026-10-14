@@ -1142,6 +1142,8 @@ impl Ends {
             }
             self.seen += n;
             if let Some(activity) = &self.activity {
+                // try_update is newer than the supported Rust 1.90 toolchain.
+                #[allow(deprecated)]
                 let _ = activity.fetch_update(
                     std::sync::atomic::Ordering::Relaxed,
                     std::sync::atomic::Ordering::Relaxed,
