@@ -77,7 +77,8 @@ jobs:
           # `git` because the worktree delegation tests drive a real repository,
           # and without it they fail as `No such file or directory` from a
           # process that never started — which reads as a broken feature.
-          prepare: pkg install -y rust git
+          # Python runs the browser MCP protocol fixtures on Unix.
+          prepare: pkg install -y rust git python3
           run: |
             # As the gate does: one run names every failure rather than the
             # first, which on a VM that takes ten minutes to come up is the
