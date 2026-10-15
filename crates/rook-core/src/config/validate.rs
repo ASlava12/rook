@@ -7,6 +7,9 @@ impl Config {
     /// so a broken file can still be inspected and repaired.
     pub fn validation_errors(&self) -> Vec<String> {
         let mut errors = Vec::new();
+        if let Err(error) = self.documents.validate() {
+            errors.push(error.to_string());
+        }
         for (name, value, low, high) in [
             ("delegation_progress_entries", self.agent.delegation_progress_entries, 1, 128),
             ("worktree_recovery_max_files", self.agent.worktree_recovery_max_files, 1, 65536),

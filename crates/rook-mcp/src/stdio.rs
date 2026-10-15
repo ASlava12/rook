@@ -15,15 +15,28 @@ use crate::protocol::{Incoming, Notification, Request};
 use crate::transport::Transport;
 use crate::{McpError, Result, ServerConfig};
 
-type Pending = Arc<std::sync::Mutex<HashMap<u64, oneshot::Sender<Incoming>>>>;
+struct Waiting {
+    reply: oneshot::Sender<Incoming>,
+    owner: Option<Arc<crate::elicitation::Invocation>>,
+}
+type Pending = Arc<std::sync::Mutex<HashMap<u64, Waiting>>>;
 
 struct Registered<'a> {
     pending: &'a Pending,
     id: u64,
+    owner: Option<Arc<crate::elicitation::Invocation>>,
+    finished: &'a AtomicBool,
+    completed: bool,
 }
 impl Drop for Registered<'_> {
     fn drop(&mut self) {
         self.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.id);
+        if let Some(owner) = &self.owner {
+            owner.close();
+            if !self.completed {
+                self.finished.store(true, Ordering::Release);
+            }
+        }
     }
 }
 
@@ -66,7 +79,7 @@ const MAX_LINE_BYTES: u64 = 8 << 20;
 pub(crate) struct Stdio {
     name: String,
     heard: LastWords,
-    stdin: Mutex<ChildStdin>,
+    stdin: Arc<Mutex<ChildStdin>>,
     pending: Pending,
     /// Set once the server's stdout ends, which is the last thing that can
     /// release a waiter. A request registered after that would wait out the
@@ -74,6 +87,7 @@ pub(crate) struct Stdio {
     /// seconds of a turn, per call, for a server that is already gone.
     finished: Arc<AtomicBool>,
     next_id: AtomicU64,
+    connection: u64,
     child: Mutex<Option<Child>>,
     group: std::sync::Mutex<Option<rook_contain::Group>>,
     lease: std::sync::Mutex<Option<crate::reap::Lease<'static>>>,
@@ -190,6 +204,7 @@ impl Stdio {
             command.spawn().map_err(|e| McpError::Spawn { command: config.command.clone(), source: e })?;
         let group = rook_contain::Group::holding(child.id());
         let stdin = child.stdin.take().expect("stdin was piped");
+        let stdin = Arc::new(Mutex::new(stdin));
         let stdout = child.stdout.take().expect("stdout was piped");
         let stderr = child.stderr.take().expect("stderr was piped");
 
@@ -212,20 +227,70 @@ impl Stdio {
         let reader_pending = pending.clone();
         let finished = Arc::new(AtomicBool::new(false));
         let reader_finished = finished.clone();
+        let answering = stdin.clone();
+        let requests = crate::elicitation::Seen::default();
+        let slots = Arc::new(tokio::sync::Semaphore::new(4));
         let name = config.name.clone();
         tokio::spawn(async move {
             let mut reader = BufReader::new(stdout);
             let mut line = Vec::new();
             while read_bounded(&mut reader, &mut line).await == Line::Read {
                 let Ok(message) = serde_json::from_slice::<Incoming>(&line) else {
-                    tracing::debug!(server = %name, "unparsable line: {}", String::from_utf8_lossy(&line));
+                    tracing::debug!(server = %name, "unparsable JSON-RPC frame");
                     continue;
                 };
-                match message.id {
+                if message.method.is_some() && message.id.is_some() {
+                    if !message.id.as_ref().is_some_and(|id| requests.admit(id)) {
+                        reader_finished.store(true, Ordering::Release);
+                        break;
+                    }
+                    let Ok(permit) = slots.clone().try_acquire_owned() else {
+                        reader_finished.store(true, Ordering::Release);
+                        break;
+                    };
+                    let owner = {
+                        let waiting = reader_pending.lock().unwrap_or_else(|e| e.into_inner());
+                        if waiting.len() == 1 {
+                            waiting
+                                .values()
+                                .next()
+                                .filter(|w| !w.reply.is_closed())
+                                .and_then(|w| w.owner.clone())
+                        } else {
+                            None
+                        }
+                    };
+                    let running = owner.clone();
+                    let writer = answering.clone();
+                    let closed = reader_finished.clone();
+                    let task = tokio::spawn(async move {
+                        let _permit = permit;
+                        let response = crate::elicitation::answer(running.clone(), message).await;
+                        let Ok(mut line) = serde_json::to_vec(&response) else { return };
+                        line.push(b'\n');
+                        let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                            let mut writer = writer.lock().await;
+                            if closed.load(Ordering::Acquire)
+                                || running.as_ref().is_some_and(|o| !o.alive.load(Ordering::Acquire))
+                            {
+                                return;
+                            }
+                            if writer.write_all(&line).await.is_err() || writer.flush().await.is_err() {
+                                closed.store(true, Ordering::Release);
+                            }
+                        })
+                        .await;
+                    });
+                    if let Some(owner) = owner {
+                        owner.track(task.abort_handle());
+                    }
+                    continue;
+                }
+                match message.id.as_ref().and_then(|id| id.as_u64()) {
                     Some(id) => {
                         if let Some(tx) = reader_pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&id)
                         {
-                            let _ = tx.send(message);
+                            let _ = tx.reply.send(message);
                         }
                     }
                     None => tracing::debug!(server = %name, method = ?message.method, "notification"),
@@ -248,14 +313,58 @@ impl Stdio {
         Ok(Self {
             name: config.name.clone(),
             heard,
-            stdin: Mutex::new(stdin),
+            stdin,
             pending,
             finished,
             next_id: AtomicU64::new(1),
+            connection: crate::elicitation::connection(),
             child: Mutex::new(Some(child)),
             group: std::sync::Mutex::new(Some(group)),
             lease: std::sync::Mutex::new(Some(lease)),
         })
+    }
+
+    async fn request_inner(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+        timeout: Duration,
+        handler: Option<Arc<dyn crate::elicitation::Elicitor>>,
+    ) -> Result<Incoming> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+        let owner = handler.map(|handler| {
+            crate::elicitation::Invocation::new(&self.name, self.connection, id, method, handler)
+        });
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, Waiting { reply: tx, owner: owner.clone() });
+        let mut registered =
+            Registered { pending: &self.pending, id, owner, finished: &self.finished, completed: false };
+        // After registering, so the two orders are both covered: an insert
+        // before the reader's sweep is released by it, and one after sees this.
+        if self.finished.load(Ordering::Relaxed) {
+            self.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+            return Err(McpError::Closed { server: self.name.clone(), said: self.heard.said() });
+        }
+
+        let line = serde_json::to_string(&Request { jsonrpc: "2.0", id, method, params }).map_err(|e| {
+            McpError::Decode { server: self.name.clone(), method: method.into(), message: e.to_string() }
+        })?;
+        let result = tokio::time::timeout(timeout, async {
+            self.write_line(&line).await?;
+            rx.await.map_err(|_| McpError::Closed { server: self.name.clone(), said: self.heard.said() })
+        })
+        .await
+        .map_err(|_| McpError::Timeout {
+            server: self.name.clone(),
+            method: method.into(),
+            timeout,
+            said: self.heard.said(),
+        })?;
+        registered.completed = result.is_ok();
+        result
     }
 
     async fn write_line(&self, line: &str) -> Result<()> {
@@ -279,31 +388,19 @@ impl Transport for Stdio {
         params: Option<serde_json::Value>,
         timeout: Duration,
     ) -> Result<Incoming> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().unwrap_or_else(|e| e.into_inner()).insert(id, tx);
-        let _registered = Registered { pending: &self.pending, id };
-        // After registering, so the two orders are both covered: an insert
-        // before the reader's sweep is released by it, and one after sees this.
-        if self.finished.load(Ordering::Relaxed) {
-            self.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
-            return Err(McpError::Closed { server: self.name.clone(), said: self.heard.said() });
-        }
-
-        let line = serde_json::to_string(&Request { jsonrpc: "2.0", id, method, params }).map_err(|e| {
-            McpError::Decode { server: self.name.clone(), method: method.into(), message: e.to_string() }
-        })?;
-        tokio::time::timeout(timeout, async {
-            self.write_line(&line).await?;
-            rx.await.map_err(|_| McpError::Closed { server: self.name.clone(), said: self.heard.said() })
-        })
-        .await
-        .map_err(|_| McpError::Timeout {
-            server: self.name.clone(),
-            method: method.into(),
-            timeout,
-            said: self.heard.said(),
-        })?
+        self.request_inner(method, params, timeout, None).await
+    }
+    async fn request_interactive(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+        timeout: Duration,
+        handler: Arc<dyn crate::elicitation::Elicitor>,
+    ) -> Result<Incoming> {
+        self.request_inner(method, params, timeout, Some(handler)).await
+    }
+    fn reusable(&self) -> bool {
+        !self.finished.load(Ordering::Acquire)
     }
 
     async fn notify(&self, method: &str, params: Option<serde_json::Value>) -> Result<()> {

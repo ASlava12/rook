@@ -87,6 +87,10 @@ impl Question {
 #[async_trait]
 pub trait Asker: Send + Sync {
     async fn ask(&self, questions: &[Question]) -> Vec<Answer>;
+    /// Invocation-scoped forms must stop reading when their owner is dropped.
+    async fn ask_ephemeral(&self, questions: &[Question]) -> Vec<Answer> {
+        self.ask(questions).await
+    }
     fn supports_private_input(&self) -> bool {
         false
     }

@@ -37,6 +37,13 @@ impl Approver for Terminal {
 
 #[async_trait]
 impl rook_tools::ask::Asker for Terminal {
+    async fn ask_ephemeral(&self, questions: &[Question]) -> Vec<Answer> {
+        let mut answers = Vec::new();
+        for question in questions {
+            answers.push(crate::private_input::read_question(question.clone()).await);
+        }
+        answers
+    }
     fn supports_private_input(&self) -> bool {
         crate::private_input::available()
     }

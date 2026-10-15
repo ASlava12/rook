@@ -16,6 +16,13 @@ fn died_marker() -> String {
 
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or_else(|| "ok".into());
+    if mode.starts_with("elicitation") {
+        if let Err(error) = elicitation_fixture(&mode) {
+            eprintln!("elicitation fixture: {error}");
+            std::process::exit(2);
+        }
+        return;
+    }
     if mode.starts_with("acp-") {
         acp_fixture(&mode);
         return;
@@ -148,6 +155,75 @@ fn main() {
         let _ = writeln!(out, "{}", serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result }));
         let _ = out.flush();
     }
+}
+
+fn elicitation_fixture(mode: &str) -> std::io::Result<()> {
+    use serde_json::{Value, json};
+    let mut out = std::io::stdout();
+    let mut pending: Option<(Value, Value)> = None;
+    for line in std::io::stdin().lock().lines() {
+        let message: Value = serde_json::from_str(&line?).map_err(std::io::Error::other)?;
+        let id = message["id"].clone();
+        let result = match message["method"].as_str() {
+            Some("initialize") => {
+                json!({"protocolVersion":"2025-11-25","serverInfo":{"name":"forms","version":"1"},"capabilities":{"tools":{}}})
+            }
+            Some("notifications/initialized") => continue,
+            Some("tools/list") => json!({"tools":[{"name":"collect","inputSchema":{"type":"object"}}]}),
+            Some("tools/call") => {
+                let request =
+                    if mode.ends_with("string") { json!(format!("server-{id}")) } else { id.clone() };
+                let count = if mode.contains("flood") {
+                    5
+                } else if mode.contains("duplicate") {
+                    2
+                } else {
+                    1
+                };
+                for n in 0..count {
+                    let nested = if mode.contains("flood") {
+                        json!(format!("nested-{n}-{id}"))
+                    } else {
+                        request.clone()
+                    };
+                    let params = if mode.contains("url") {
+                        json!({"mode":"url","message":"Authorize the requested action","url":"https://example.org/authorize?state=owned","elicitationId":"flow-1"})
+                    } else {
+                        json!({"message":"Which display name?","requestedSchema":{"type":"object","properties":{"name":{"type":"string","maxLength":64}},"required":["name"]}})
+                    };
+                    writeln!(
+                        out,
+                        "{}",
+                        json!({"jsonrpc":"2.0","id":nested,"method":"elicitation/create","params":params})
+                    )?;
+                }
+                out.flush()?;
+                pending = Some((id, request));
+                continue;
+            }
+            None => {
+                let Some((original, expected)) = pending.take() else { continue };
+                if id != expected {
+                    return Err(std::io::Error::other("response belongs to another elicitation"));
+                }
+                if let Ok(path) = std::env::var("MCP_MOCK_RECEIPT") {
+                    std::fs::write(path, serde_json::to_vec(&message).map_err(std::io::Error::other)?)?;
+                }
+                let action = message["result"]["action"].as_str().unwrap_or("error");
+                writeln!(
+                    out,
+                    "{}",
+                    json!({"jsonrpc":"2.0","id":original,"result":{"content":[{"type":"text","text":action}]}})
+                )?;
+                out.flush()?;
+                continue;
+            }
+            _ => return Err(std::io::Error::other("unsupported elicitation fixture request")),
+        };
+        writeln!(out, "{}", json!({"jsonrpc":"2.0","id":id,"result":result}))?;
+        out.flush()?;
+    }
+    Ok(())
 }
 
 fn resource_fixture(mode: &str, request: &serde_json::Value) -> std::io::Result<serde_json::Value> {

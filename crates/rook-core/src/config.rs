@@ -52,6 +52,7 @@ pub struct Config {
     pub extension_ui: crate::extension_ui::Settings,
     pub tui: crate::keybindings::Settings,
     pub user_input: rook_tools::pending::Limits,
+    pub documents: rook_tools::pdf::Settings,
     /// Language servers, as `[[lsp]]` tables. When empty, known servers found
     /// on `PATH` are used.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -344,6 +345,7 @@ impl Default for Config {
             extension_ui: Default::default(),
             tui: Default::default(),
             user_input: Default::default(),
+            documents: Default::default(),
             server: Default::default(),
             lsp: Vec::new(),
             mcp: Vec::new(),

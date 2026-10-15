@@ -52,7 +52,7 @@ impl Server {
 
     /// One native page. The caller owns pagination; opaque cursors are not URLs.
     pub async fn resource_page(&self, templates: bool, cursor: Option<&str>) -> Result<ResourcePage> {
-        self.resource_page_inner(templates, cursor, None).await
+        self.resource_page_inner(templates, cursor, None, None).await
     }
 
     pub async fn resource_page_traced(
@@ -61,7 +61,16 @@ impl Server {
         cursor: Option<&str>,
         trace: &rook_llm::TraceContext,
     ) -> Result<ResourcePage> {
-        self.resource_page_inner(templates, cursor, Some(trace)).await
+        self.resource_page_inner(templates, cursor, Some(trace), None).await
+    }
+
+    pub async fn resource_page_interactive(
+        &self,
+        templates: bool,
+        cursor: Option<&str>,
+        context: &crate::elicitation::Interaction,
+    ) -> Result<ResourcePage> {
+        self.resource_page_inner(templates, cursor, None, Some(context)).await
     }
 
     async fn resource_page_inner(
@@ -69,6 +78,7 @@ impl Server {
         templates: bool,
         cursor: Option<&str>,
         trace: Option<&rook_llm::TraceContext>,
+        interaction: Option<&crate::elicitation::Interaction>,
     ) -> Result<ResourcePage> {
         let method = if templates { "resources/templates/list" } else { "resources/list" };
         self.resource_support(method)?;
@@ -82,7 +92,10 @@ impl Server {
         if let Some(trace) = trace {
             params = crate::trace_params(params, trace);
         }
-        let mut value: Value = self.request(method, Some(params)).await?;
+        let mut value: Value = match interaction {
+            Some(context) => self.request_interactive(method, params, context).await?,
+            None => self.request(method, Some(params)).await?,
+        };
         self.resource_budget(method, &value, self.config.catalog_max_bytes)?;
         let field = if templates { "resourceTemplates" } else { "resources" };
         let Some(Value::Array(entries)) = value.get_mut(field).map(Value::take) else {
@@ -120,7 +133,7 @@ impl Server {
     /// Read only through the selected server. A resource URI is never fetched by
     /// Rook's web/file transports and cannot change the connection's authority.
     pub async fn read_resource(&self, uri: &str) -> Result<ResourceRead> {
-        self.read_resource_inner(uri, None).await
+        self.read_resource_inner(uri, None, None).await
     }
 
     pub async fn read_resource_traced(
@@ -128,13 +141,22 @@ impl Server {
         uri: &str,
         trace: &rook_llm::TraceContext,
     ) -> Result<ResourceRead> {
-        self.read_resource_inner(uri, Some(trace)).await
+        self.read_resource_inner(uri, Some(trace), None).await
+    }
+
+    pub async fn read_resource_interactive(
+        &self,
+        uri: &str,
+        context: &crate::elicitation::Interaction,
+    ) -> Result<ResourceRead> {
+        self.read_resource_inner(uri, None, Some(context)).await
     }
 
     async fn read_resource_inner(
         &self,
         uri: &str,
         trace: Option<&rook_llm::TraceContext>,
+        interaction: Option<&crate::elicitation::Interaction>,
     ) -> Result<ResourceRead> {
         self.resource_support("resources/read")?;
         if uri.is_empty() || uri.len() > 8192 || uri.chars().any(char::is_control) {
@@ -146,7 +168,10 @@ impl Server {
             Some(trace) => crate::trace_params(json!({"uri":uri}), trace),
             None => json!({"uri":uri}),
         };
-        let value: Value = self.request("resources/read", Some(params)).await?;
+        let value: Value = match interaction {
+            Some(context) => self.request_interactive("resources/read", params, context).await?,
+            None => self.request("resources/read", Some(params)).await?,
+        };
         self.resource_budget("resources/read", &value, MAX_READ_BYTES)?;
         let Some(contents) = value.get("contents").and_then(Value::as_array) else {
             return Err(self.resource_error("resources/read", "missing contents array"));

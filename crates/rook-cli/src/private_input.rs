@@ -58,6 +58,8 @@ pub(crate) fn available() -> bool {
 }
 
 struct Cancel(Arc<AtomicBool>);
+static TERMINAL: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(1)));
 impl Drop for Cancel {
     fn drop(&mut self) {
         self.0.store(true, Ordering::Release);
@@ -70,8 +72,6 @@ pub(crate) async fn read(prompt: SecretPrompt) -> (Draft, SecretStatus) {
     if !available() {
         return (Draft::new(prompt), SecretStatus::Unavailable);
     }
-    static TERMINAL: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
-        std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(1)));
     let Ok(permit) = TERMINAL.clone().acquire_owned().await else {
         return (Draft::new(prompt), SecretStatus::Unavailable);
     };
@@ -81,13 +81,10 @@ pub(crate) async fn read(prompt: SecretPrompt) -> (Draft, SecretStatus) {
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let mut draft = Draft::new(prompt);
+        if cancelled.load(Ordering::Acquire) {
+            return (draft, SecretStatus::Cancelled);
+        }
         let mut out = std::io::stdout();
-        let _ = writeln!(
-            out,
-            "\nPrivate credential: {}\n{}\nValue is hidden. Enter saves; Esc declines; Ctrl-D skips.",
-            draft.prompt.name, draft.prompt.reason
-        );
-        let _ = out.flush();
         let was_raw = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
         if crossterm::terminal::enable_raw_mode().is_err() {
             return (draft, SecretStatus::Unavailable);
@@ -101,6 +98,13 @@ pub(crate) async fn read(prompt: SecretPrompt) -> (Draft, SecretStatus) {
             }
         }
         let _restore = Restore(was_raw);
+        let _ = writeln!(
+            out,
+            "\r\nPrivate credential: {}\r\n{}\r\nValue is hidden. Enter saves; Esc declines; Ctrl-D skips.\r",
+            draft.prompt.name,
+            draft.prompt.reason.replace('\n', "\r\n")
+        );
+        let _ = out.flush();
         let began = Instant::now();
         let status = loop {
             if cancelled.load(Ordering::Acquire) {
@@ -130,6 +134,96 @@ pub(crate) async fn read(prompt: SecretPrompt) -> (Draft, SecretStatus) {
     })
     .await
     .unwrap_or_else(|_| (Draft::new(fallback), SecretStatus::Failed))
+}
+
+/// Forms use an owner-cancellable reader, never a detached blocking stdin read.
+pub(crate) async fn read_question(question: rook_tools::ask::Question) -> rook_tools::ask::Answer {
+    if !available() {
+        return question.unanswered();
+    }
+    let Ok(permit) = TERMINAL.clone().acquire_owned().await else { return question.unanswered() };
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let _cancel = Cancel(cancelled.clone());
+    let fallback = question.clone();
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        if cancelled.load(Ordering::Acquire) {
+            return question.unanswered();
+        }
+        let mut out = std::io::stdout();
+        let was_raw = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
+        if crossterm::terminal::enable_raw_mode().is_err() {
+            return question.unanswered();
+        }
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                if !self.0 {
+                    let _ = crossterm::terminal::disable_raw_mode();
+                }
+            }
+        }
+        let _restore = Restore(was_raw);
+        let _ = writeln!(out, "\r\n{}\r", question.question.replace('\n', "\r\n"));
+        for (i, choice) in question.choices.iter().enumerate() {
+            let _ = writeln!(out, "  {}. {choice}\r", i + 1);
+        }
+        let _ = write!(out, "Answer (Esc / Ctrl-D / empty Enter skips): ");
+        let _ = out.flush();
+        let began = Instant::now();
+        let mut line = String::new();
+        let result = loop {
+            if cancelled.load(Ordering::Acquire) || began.elapsed() >= Duration::from_secs(300) {
+                break question.unanswered();
+            }
+            match crossterm::event::poll(Duration::from_millis(100)) {
+                Ok(false) => continue,
+                Err(_) => break question.unanswered(),
+                Ok(true) => {}
+            }
+            match crossterm::event::read() {
+                Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => match key.code {
+                    KeyCode::Esc => break question.unanswered(),
+                    KeyCode::Char('c' | 'd') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        break question.unanswered();
+                    }
+                    KeyCode::Enter => {
+                        break if line.trim().is_empty() {
+                            question.unanswered()
+                        } else {
+                            question.interpret(&line)
+                        };
+                    }
+                    KeyCode::Backspace => {
+                        if line.pop().is_some() {
+                            let _ = write!(out, "\x08 \x08");
+                        }
+                    }
+                    KeyCode::Char(c)
+                        if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                            && line.len() + c.len_utf8() <= 8192 =>
+                    {
+                        line.push(c);
+                        let _ = write!(out, "{c}");
+                    }
+                    _ => {}
+                },
+                Ok(Event::Paste(text))
+                    if line.len() + text.len() <= 8192 && !text.chars().any(char::is_control) =>
+                {
+                    line.push_str(&text);
+                    let _ = write!(out, "{text}");
+                }
+                Ok(_) => {}
+                Err(_) => break question.unanswered(),
+            }
+            let _ = out.flush();
+        };
+        let _ = writeln!(out, "\r");
+        result
+    })
+    .await
+    .unwrap_or_else(|_| fallback.unanswered())
 }
 
 pub(crate) async fn remote(base: &str, prompt: SecretPrompt, interactive: bool) {

@@ -123,7 +123,7 @@ fn the_client_and_the_server_understand_each_other() {
     // The client opens the store; the server it spawns must not need it.
     let listed = rook(&["mcp", "ls"]);
     assert!(listed.contains("self"), "the server has to have answered its handshake: {listed}");
-    assert!(listed.contains("2025-06-18"), "{listed}");
+    assert!(listed.contains(rook_mcp::PROTOCOL_VERSION), "{listed}");
 
     let tools = rook(&["mcp", "tools", "self"]);
     assert!(tools.contains("read_file"), "{tools}");

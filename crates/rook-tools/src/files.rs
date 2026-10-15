@@ -80,7 +80,7 @@ impl Tool for ReadFile {
                 Some(window) => window,
                 None => {
                     return Ok(ToolOutcome::error(format!(
-                        "{} looks binary; read_file only handles text",
+                        "{} looks binary; read_file only handles text. For PDF documents use read_pdf with selected pages",
                         path.display()
                     ))
                     .with("binary", true));

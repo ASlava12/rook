@@ -19,6 +19,7 @@ pub mod files;
 pub mod isolate;
 pub mod jobs;
 pub mod mcp;
+pub mod pdf;
 pub mod pending;
 pub mod policy;
 pub mod private_input;
@@ -205,9 +206,11 @@ pub struct Ran {
 /// explicitly widens it.
 #[derive(Clone)]
 pub struct ToolContext {
+    pub documents: pdf::Settings,
     pub workspace: PathBuf,
     pub trace: Option<rook_llm::TraceContext>,
     pub propagate_trace: bool,
+    pub elicitor: Option<Arc<dyn rook_mcp::elicitation::Elicitor>>,
     /// True in a sub-agent. Branch-changing commands remain forbidden even
     /// in an isolated worktree; changes are reviewed and transferred by its parent.
     pub delegated: bool,
@@ -371,12 +374,14 @@ impl ToolContext {
 impl ToolContext {
     pub fn new(workspace: PathBuf) -> Self {
         Self {
+            documents: Default::default(),
             isolation: isolate::Isolation::for_workspace(&workspace),
             isolate: isolate::Mode::Off,
             workspace,
             delegated: false,
             trace: None,
             propagate_trace: false,
+            elicitor: None,
             max_output_bytes: 256 * 1024,
             command_timeout: std::time::Duration::from_secs(120),
             require_command_cleanup: false,
@@ -635,6 +640,7 @@ impl ToolBox {
     pub fn standard() -> Self {
         let mut tb = Self::default();
         tb.register(Arc::new(files::ReadFile));
+        tb.register(Arc::new(pdf::ReadPdf));
         tb.register(Arc::new(files::WriteFile));
         tb.register(Arc::new(files::EditFile));
         tb.register(Arc::new(files::DeleteFile));

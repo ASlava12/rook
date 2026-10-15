@@ -712,6 +712,20 @@ other tools. Catalog pages and text continuations carry content hashes; changing
 the source refuses a continuation. Resource bodies stay untrusted tool data,
 and resource URIs never become direct filesystem or HTTP requests.
 
+MCP elicitation routes server requests before response matching. Numeric and
+string IDs have a separate, bounded, deduplicated namespace. An HTTP request's
+POST stream owns its callback; interactive stdio calls take an exclusive lease
+because the shared pipe has no invocation correlation. Cancelling an ambiguous
+stdio call retires its transport before another owner can bind. Transport-owned
+callback futures stop with the invocation. Flat forms use the common question
+channel, schema checks and explicit review; URL mode exposes a canonical HTTPS
+host for a user-initiated visit. A bounded metadata-only receipt ledger prevents
+repeat prompting after refusal, silence, cancellation or a recovered turn.
+No client form answer is stored in a receipt or passed through model tool
+arguments. Servers may still include submitted data in their own tool results.
+Terminal forms use cancellable polling; the UI appears only after terminal echo
+has been disabled, so early typing cannot race the terminal mode change.
+
 The remote-tool catalog summary counts
 discovered tools, those offered directly in the request, and tools reached
 through `mcp_tools` and `mcp_call`; at most 16 deferred names are copied, with

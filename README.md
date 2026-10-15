@@ -1724,6 +1724,18 @@ Follow `next_offset` with the same native `cursor` and `page_sha256`, then follo
 shortened for display; URI identity is retained. A changed source refuses a
 continuation instead of mixing versions.
 
+MCP servers may request a flat form or an HTTPS authorization link during a
+call. Rook identifies the server and invocation, validates form answers, and
+requires review before sending them directly to that server. Passwords, API
+keys and payment credentials require URL mode. Opening a link remains your
+action and does not certify that external authorization finished. Decline,
+skip, timeout and cancellation send no values and suppress the same request for
+the current turn, including after reopening it. TUI, browser and a local
+interactive CLI support forms; a streamed CLI command skips questions it cannot
+edit, including under `--yes`. A dropped call cancels its pending questions;
+late replies cannot authorize a newer call. Rook never replays a tool call
+because an elicitation failed.
+
 Resource reads return one selected `content` block (default zero), with its
 server, requested/returned URI and SHA256. Text is paged by UTF-8 byte `offset`;
 copy `sha256` when following `next_offset`. `next_content` selects another block.
@@ -2034,3 +2046,9 @@ In `rook tui`, `/goal <text>` starts lasting work in the current session.
 Send corrections in the same chat; Ctrl-C pauses and `/continue` resumes.
 For limits, restart recovery and session switching, see
 [Durable work](docs/durable-work.md) ([Русский](docs/ru/durable-work.md)).
+
+Workspace PDFs can be read with `read_pdf` using local Poppler, including on
+text-only models. Select pages, continue bounded text with source/page hashes,
+and optionally request a page image or approximate local English OCR. Scans and
+missing text are reported explicitly. See [PDF documents](docs/pdf-documents.md)
+for dependencies, limits and continuation examples.

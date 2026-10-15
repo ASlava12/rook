@@ -92,3 +92,13 @@ test('widget replacement ignores older or foreign prefixes and survives transcri
  socket.receive(display(13,'current'));
  socket.receive({type:'started',session:'other'});assert.equal(widget.hidden,true);
 });
+
+test('server question links require an HTTPS user action and never interpret markup',()=>{
+ const socket=connect();socket.receive(snapshot([]));
+ socket.receive(question('url-flow','MCP server example\nhttps://example.org/authorize?state=one\n<script>ignore</script> javascript:alert(1) https://user:password@example.org/'));
+ const links=form().all().filter(n=>n.tag==='a');
+ assert.equal(links.length,1);assert.equal(links[0].href,'https://example.org/authorize?state=one');
+ assert.equal(links[0].rel,'noopener noreferrer');assert.equal(links[0].referrerpolicy,'no-referrer');
+ assert(!form().all().some(n=>n.tag==='script'));assert(form().textContent.includes('<script>ignore</script>'));
+ socket.receive({type:'cancelled'});
+});

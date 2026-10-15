@@ -36,6 +36,7 @@ mod effects;
 mod followups;
 pub(crate) mod history;
 mod lifecycle;
+mod mcp_input;
 pub mod observe;
 mod output;
 mod private_input;
@@ -127,6 +128,7 @@ pub fn tool_context(config: &Config, workspace: &Path, output_dir: &Path) -> Too
     let sandbox = &config.sandbox;
     let mut ctx = ToolContext::new(workspace.to_path_buf());
     ctx.max_output_bytes = sandbox.max_output_bytes;
+    ctx.documents = config.documents.clone();
     ctx.command_timeout = std::time::Duration::from_secs(sandbox.command_timeout_secs);
     ctx.allow_outside_workspace = sandbox.allow_outside_workspace;
     ctx.isolate = sandbox.isolate;
@@ -2141,7 +2143,9 @@ mod checker_tests {
         allowed.sort_unstable();
         assert_eq!(
             allowed,
-            ["crate_api", "list_dir", "read_file", "run_command", "search"],
+            // PDF helpers receive a snapshot and fixed arguments, so they can
+            // inspect source evidence without editing the checked workspace.
+            ["crate_api", "list_dir", "read_file", "read_pdf", "run_command", "search"],
             "a new toolbox tool reaches a checker unweighed; add it here or to CHANGES_FILES"
         );
     }

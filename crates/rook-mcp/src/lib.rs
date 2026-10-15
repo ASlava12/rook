@@ -21,6 +21,7 @@
 // either uses an index the code just found, and says so, or it is a crash
 // waiting for somebody who does not write in English.
 mod catalog;
+pub mod elicitation;
 pub mod http;
 pub mod oauth;
 pub mod protocol;
@@ -163,6 +164,7 @@ impl Default for ServerConfig {
 }
 
 pub struct Server {
+    calls: tokio::sync::RwLock<()>,
     name: String,
     info: ServerInfo,
     /// Replaceable, because a subprocess that dies would otherwise take its
@@ -206,6 +208,7 @@ impl Server {
         let transport = Self::transport_for(config, proxy, token.clone())?;
         let info = Self::handshake(transport.as_ref(), config).await?;
         Ok(Self {
+            calls: tokio::sync::RwLock::new(()),
             name: config.name.clone(),
             info,
             transport: tokio::sync::RwLock::new(transport),
@@ -251,7 +254,7 @@ impl Server {
                     "initialize",
                     Some(serde_json::json!({
                         "protocolVersion": protocol::PROTOCOL_VERSION,
-                        "capabilities": { "tools": {} },
+                        "capabilities": { "tools": {}, "elicitation":{"form":{},"url":{}} },
                         "clientInfo": { "name": "rook", "version": env!("CARGO_PKG_VERSION") },
                     })),
                     Duration::from_secs(config.startup_timeout_secs),
@@ -318,6 +321,65 @@ impl Server {
         self.request("tools/call", Some(serde_json::json!({ "name": tool, "arguments": arguments }))).await
     }
 
+    pub async fn call_tool_interactive(
+        &self,
+        tool: &str,
+        arguments: &serde_json::Value,
+        context: &elicitation::Interaction,
+    ) -> Result<ToolResult> {
+        self.request_interactive(
+            "tools/call",
+            serde_json::json!({"name":tool,"arguments":arguments}),
+            context,
+        )
+        .await
+    }
+
+    async fn request_interactive<T: for<'de> Deserialize<'de>>(
+        &self,
+        method: &str,
+        mut params: serde_json::Value,
+        context: &elicitation::Interaction,
+    ) -> Result<T> {
+        let lease_error = |_| McpError::Timeout {
+            server: self.name.clone(),
+            method: method.into(),
+            timeout: self.call_timeout,
+            said: String::new(),
+        };
+        // HTTP callbacks arrive on their own POST stream. Stdio has a shared
+        // pipe, so only one invocation may own its uncorrelated callbacks.
+        let (_shared, _exclusive) = if self.config.url.is_some() {
+            (
+                Some(tokio::time::timeout(self.call_timeout, self.calls.read()).await.map_err(lease_error)?),
+                None,
+            )
+        } else {
+            (
+                None,
+                Some(tokio::time::timeout(self.call_timeout, self.calls.write()).await.map_err(lease_error)?),
+            )
+        };
+        if let Some(trace) = &context.trace {
+            params = trace_params(params, trace);
+        }
+        let reusable = { self.transport.read().await.reusable() };
+        if !reusable && !self.restart().await {
+            return Err(McpError::Closed { server: self.name.clone(), said: String::new() });
+        }
+        self.active.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _active = ActiveRequest(&self.active);
+        let result = self
+            .transport
+            .read()
+            .await
+            .request_interactive(method, Some(params), self.call_timeout, context.elicitor.clone())
+            .await
+            .and_then(|message| self.decode(method, message));
+        self.record_status(method, &result);
+        result
+    }
+
     pub async fn call_tool_traced(
         &self,
         tool: &str,
@@ -368,10 +430,22 @@ impl Server {
         params: Option<serde_json::Value>,
         timeout: Duration,
     ) -> Result<T> {
+        let _lease =
+            tokio::time::timeout(timeout, self.calls.read()).await.map_err(|_| McpError::Timeout {
+                server: self.name.clone(),
+                method: method.into(),
+                timeout,
+                said: String::new(),
+            })?;
         self.active.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let _active = ActiveRequest(&self.active);
         let result = self.request_inner(method, params, timeout).await;
-        let code = match &result {
+        self.record_status(method, &result);
+        result
+    }
+
+    fn record_status<T>(&self, method: &str, result: &Result<T>) {
+        let code = match result {
             Ok(_) => 0,
             Err(McpError::Unauthorized { .. }) => 1,
             Err(error)
@@ -386,7 +460,6 @@ impl Server {
             Err(_) => 6,
         };
         self.last_error.store(code, std::sync::atomic::Ordering::Relaxed);
-        result
     }
 
     async fn request_inner<T: for<'de> Deserialize<'de>>(
@@ -395,6 +468,10 @@ impl Server {
         params: Option<serde_json::Value>,
         timeout: Duration,
     ) -> Result<T> {
+        let reusable = { self.transport.read().await.reusable() };
+        if !reusable && !self.restart().await {
+            return Err(McpError::Closed { server: self.name.clone(), said: String::new() });
+        }
         // Bound, so the read guard is dropped before the arms below run: a
         // guard in the scrutinee lives to the end of the match, and `restart`
         // wants the write side of the same lock.
@@ -424,6 +501,10 @@ impl Server {
             }
             Err(e) => return Err(e),
         };
+        self.decode(method, message)
+    }
+
+    fn decode<T: for<'de> Deserialize<'de>>(&self, method: &str, message: protocol::Incoming) -> Result<T> {
         if let Some(error) = message.error {
             return Err(McpError::Rpc { server: self.name.clone(), method: method.into(), error });
         }

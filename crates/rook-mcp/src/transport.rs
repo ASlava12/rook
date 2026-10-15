@@ -15,6 +15,13 @@ use crate::protocol::Incoming;
 
 #[async_trait]
 pub(crate) trait Transport: Send + Sync {
+    async fn request_interactive(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+        timeout: Duration,
+        elicitor: std::sync::Arc<dyn crate::elicitation::Elicitor>,
+    ) -> Result<Incoming>;
     async fn request(
         &self,
         method: &str,
@@ -36,5 +43,8 @@ pub(crate) trait Transport: Send + Sync {
     /// server does not outlive the session it belongs to.
     fn child_pid(&self) -> Option<u32> {
         None
+    }
+    fn reusable(&self) -> bool {
+        true
     }
 }

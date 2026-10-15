@@ -377,6 +377,17 @@ impl Watching {
                 };
                 let _ = to_daemon.send(ClientMessage::Approval { id, decision });
             }
+            ChatEvent::Ask { id, questions } => {
+                // This streamed command has no ordinary question editor. Do
+                // not leave the server waiting or treat --yes as an answer.
+                if !self.json {
+                    eprintln!("question skipped: use the TUI or web view to answer interactive forms");
+                }
+                let _ = to_daemon.send(ClientMessage::Answers {
+                    id,
+                    answers: questions.iter().map(|_| Vec::new()).collect(),
+                });
+            }
             ChatEvent::Agent { text, receipt: Some(receipt), .. }
             | ChatEvent::Interjected { text, receipt: Some(receipt) } => {
                 if !self.json {
@@ -419,6 +430,25 @@ impl Watching {
 #[cfg(test)]
 mod audit_tests {
     use super::*;
+    #[test]
+    fn a_streamed_question_without_an_editor_is_skipped_even_under_yes() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut watching = Watching::new(true, true, 4096);
+        watching.saw(
+            ChatEvent::Ask {
+                id: "owned-request".into(),
+                questions: vec![rook_proto::AskQuestion {
+                    question: "Authorize server?".into(),
+                    choices: vec!["Accept".into()],
+                    multi: false,
+                }],
+            },
+            &tx,
+        );
+        assert!(
+            matches!(rx.try_recv().unwrap(),ClientMessage::Answers {id,answers} if id=="owned-request" && answers==vec![Vec::<String>::new()])
+        );
+    }
     fn prompt() -> ClientMessage {
         ClientMessage::Prompt {
             session: None,

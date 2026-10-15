@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 /// The protocol revision Rook speaks. A server that answers with a different one
 /// still works — the subset used here has been stable across revisions — but the
 /// mismatch is worth reporting.
-pub const PROTOCOL_VERSION: &str = "2025-06-18";
+pub const PROTOCOL_VERSION: &str = "2025-11-25";
 
 #[derive(Serialize)]
 pub struct Request<'a> {
@@ -27,7 +27,7 @@ pub struct Notification<'a> {
 #[derive(Deserialize)]
 pub struct Incoming {
     #[serde(default)]
-    pub id: Option<u64>,
+    pub id: Option<serde_json::Value>,
     #[serde(default)]
     pub method: Option<String>,
     /// A request's arguments. Empty on everything a client reads, and the whole

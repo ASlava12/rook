@@ -4380,3 +4380,6 @@ mod fixture_model;
 
 #[path = "scenarios/mcp_resources.rs"]
 mod resource_scenarios;
+
+#[path = "scenarios/pdf.rs"]
+mod pdf;

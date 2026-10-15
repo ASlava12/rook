@@ -15,10 +15,10 @@ baseline were saved in local commit `65b4f40`. Their snapshot table is in
 | Correlated diagnostics | Provider request IDs and root/child/ACP/MCP trace identity; local bounded reports; no credential/transcript export by default; real transport/reopen checks | Verified |
 | MCP resources/templates | Bounded paged discovery and source-addressed reads, resource-only servers, common policy/engine/frontends, cancellation and transport/reconnect checks | Verified |
 | Private secret requests | Private conversation-bound collection, only name/status returned; decline, dismissal, no answer, timeout, disconnect and replay are ordinary states; no value in model/history/compaction | Verified |
-| MCP elicitation | Server-initiated form/URL requests, exact connection/call identity and common user interfaces; explicit refusal, timeout, cancellation and concurrent ID collisions | Pending |
-| PDF documents | Bounded local extraction with selected pages and page provenance; ordinary text-only local model; optional scan rendering/OCR with explicit partial notices; actual document/frontend checks | Pending |
-| Remote workspace files | Explicit SSH-native read/edit/search/list and execution, remote path identity, bounded transfers, checkpoint/undo and disconnect ownership; preserve existing replica mode | Pending |
-| Prompt cache experiment | Supported dialect identity and effort changes; compare cache hits, first-token latency and cost on equal tasks; adopt only measured improvement | Pending |
+| MCP elicitation | Server-initiated form/URL requests, exact connection/call identity and common user interfaces; explicit refusal, timeout, cancellation and concurrent ID collisions | Verified |
+| PDF documents | Bounded local extraction with selected pages and page provenance; ordinary text-only local model; optional scan rendering/OCR with explicit partial notices; actual document/frontend checks | Verified |
+| Remote workspace files | Explicit SSH-native read/edit/search/list and execution, remote path identity, bounded transfers, checkpoint/undo and disconnect ownership; preserve existing replica mode | In progress |
+| Prompt cache experiment | Supported dialect identity and effort changes; compare cache hits, first-token latency and cost on equal tasks; adopt only measured improvement | Verified; no change adopted |
 | Domain network policy | Opt-in domain rules and attributable decisions, enforced with OS containment on supported platforms; direct-bypass and allowed LAN/registry checks; explicit unsupported behavior | Pending |
 
 User clarification: a person may choose not to answer a question or provide a
@@ -30,12 +30,32 @@ the concrete missing prerequisite. Tests must exercise these real control paths.
 This section is the current work tracker. The older evidence below describes
 the previous fourteen-item scope; it cannot prove these additions complete.
 
-Current verification snapshot: resources, private input and correlation pass
-`cargo xtask ci` in `agent-input` (`/tmp/rook-adoption-batch-one-ci-limited.log`,
-exit 0, `RUST_TEST_THREADS=4`). The preceding full run had one native CLI
-queue/start timeout under load; that exact test passed individually too.
-Elicitation and PDF remain separate, unfinished parts of the adoption scope.
-No installed daemon has been restarted.
+Current verification snapshot: the complete resources/private-input/correlation/
+elicitation/PDF tree passes `cargo xtask ci` in the main checkout
+(`/tmp/rook-adoption-mcp-pdf-ci-final.log`, exit 0, `RUST_TEST_THREADS=4`). The
+first integrated gate found the explicit checker admission list missing PDF;
+that list now admits the bounded read-only decoder, and the full rerun is green.
+Native CLI/local TUI/daemon TUI form acceptance and refusal pass; stdio/HTTP
+ownership, colliding IDs, duplicate/flood refusal and cancellation pass. PDF
+source/page hashing, continuation, scan/render/local OCR and native CLI/daemon
+text-only model checks pass (`/tmp/rook-pdf-native-final.log`,
+`/tmp/rook-pdf-cli-native-final.log`). The optional Poppler/tesseract tests were
+run explicitly with installed local tools. The deployed Qwen cache experiment
+found no useful improvement, so no caching or effort parameter is adopted; see
+[the observations and limits](research/prompt-cache-20261015.md). SSH-native and
+domain containment work remain unfinished. No installed daemon was restarted.
+
+Elicitation implementation constraints: route server requests before responses
+so a server request ID cannot consume a client response waiter; support integer
+and string IDs with separate namespaces and bounded per-connection deduplication.
+Bind handlers to the originating invocation and connection generation. HTTP
+callbacks belong to the POST stream that carried them; shared stdio needs an
+exclusive invocation lease while interaction is possible, with retirement after
+ambiguous cancellation. Late human answers must never bind to a new invocation.
+Use bounded flat forms with validation and explicit review/submit, decline and
+cancel. URL mode displays the canonical host and URL for a user-initiated visit;
+opening it is distinct from completion of third-party authorization. A skipped
+or absent answer cannot accept defaults or cause automatic re-prompting.
 
 ### October 15 implementation evidence
 

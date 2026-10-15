@@ -644,6 +644,24 @@ function askSecret(prompt) {
   if (out) { out.append(form); out.scrollTop = out.scrollHeight; }
 }
 
+function questionText(text) {
+  const paragraph = el('p', {});
+  // A link is still a user action. Server-authored markup is always plain text.
+  let start = 0;
+  for (const match of text.matchAll(/https:\/\/[^\s<>"']+/g)) {
+    paragraph.append(document.createTextNode(text.slice(start, match.index)));
+    try {
+      const url = new URL(match[0]);
+      paragraph.append(url.protocol === 'https:' && !url.username && !url.password
+        ? el('a', { href: url.href, target: '_blank', rel: 'noopener noreferrer', referrerpolicy: 'no-referrer' }, match[0])
+        : document.createTextNode(match[0]));
+    } catch { paragraph.append(document.createTextNode(match[0])); }
+    start = match.index + match[0].length;
+  }
+  paragraph.append(document.createTextNode(text.slice(start)));
+  return paragraph;
+}
+
 function askUser(request) {
   finishModel();
   const shape = inputShape(request.questions);
@@ -656,7 +674,7 @@ function askUser(request) {
     // Always a free-text row: the answer worth having is often not on the list.
     const other = el('input', { type: 'text', name: `${name}_other`,
       placeholder: q.choices.length ? 'or type your own answer' : 'your answer' });
-    return el('fieldset', {}, el('p', {}, q.question), ...rows, other);
+    return el('fieldset', {}, questionText(q.question), ...rows, other);
   });
   const submit = (answers) => {
     send({ type: 'answers', id: request.id, answers });

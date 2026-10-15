@@ -333,8 +333,11 @@ fn the_whole_advertised_tool_list_stays_within_a_budget() {
     // being able to is worth. Raised from 1,000 for `docs`: four argument names
     // and a sentence saying it looks locally first, which is the part that has
     // to reach a model deciding whether to answer from memory.
+    // PDF selection/render/OCR is a new local capability. Its first sentence
+    // was shortened and nine arguments merged into four (an opaque cursor
+    // binds page/offset/hashes/mode); the measured default list is ~1,287.
     assert!(
-        stubs < 1_250,
+        stubs < 1_300,
         "the stubs cost ~{stubs} tokens on every request, which is what is \
          actually paid: lazy loading is the default"
     );

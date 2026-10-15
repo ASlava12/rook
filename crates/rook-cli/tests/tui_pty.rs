@@ -916,8 +916,9 @@ fn a_model_that_calls(
                 let _ = sent.send(serde_json::from_slice(&body).unwrap());
             }
 
-            let private_finished = tool == "request_secret" && private_called;
-            if tool == "request_secret" && request.contains("chat/completions") {
+            let one_shot = tool == "request_secret" || tool == "forms__collect";
+            let private_finished = one_shot && private_called;
+            if one_shot && request.contains("chat/completions") {
                 private_called = true;
             }
             let body = if private_finished {
@@ -3830,5 +3831,108 @@ fn an_external_acp_executor_runs_through_both_tui_modes_and_keeps_its_linked_chi
         assert_eq!(events.iter().filter(|e|e.record.kind==rook_store::EventKind::ToolCall&&e.record.label=="write_file").count(),1);
         assert!(events.iter().any(|e| e.record.kind == rook_store::EventKind::AssistantMessage));
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+}
+
+#[test]
+fn mcp_forms_require_review_and_support_refusal_in_native_cli_and_both_tuis() {
+    let _one = one_at_a_time();
+    let built =
+        Command::new(env!("CARGO")).args(["build", "-p", "rook-mcp", "--bin", "mcp-mock"]).status().unwrap();
+    assert!(built.success());
+    let mock = std::path::Path::new(env!("CARGO_BIN_EXE_rook")).with_file_name("mcp-mock");
+    for mode in ["cli", "tui", "daemon"] {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let requests = a_model_that_calls(home.path(), "forms__collect", serde_json::json!({}));
+        let config = home.path().join("config.toml");
+        let mut text = std::fs::read_to_string(&config).unwrap().replace("mode = \"ask\"", "mode = \"auto\"");
+        let receipt = home.path().join("elicitation.json");
+        text.push_str(&format!(
+            "\n[[mcp]]\nname='forms'\ncommand='{}'\nargs=['elicitation']\n[mcp.env]\nMCP_MOCK_RECEIPT='{}'\n",
+            mock.display(),
+            receipt.display()
+        ));
+        std::fs::write(config, text).unwrap();
+        let _daemon = (mode == "daemon").then(|| Daemon::start(home.path(), workspace.path()));
+        let mut args = vec!["--workspace", workspace.path().to_str().unwrap()];
+        if mode == "cli" {
+            args.extend(["run", "Collect a display name"]);
+        } else {
+            args.push("tui");
+            if mode == "tui" {
+                args.push("--alone");
+            }
+        }
+        let mut pty = Pty::spawn(
+            std::path::Path::new(env!("CARGO_BIN_EXE_rook")),
+            &args,
+            &[
+                ("ROOK_HOME", home.path().to_str().unwrap()),
+                ("ROOK_LOG", "error"),
+                ("TERM", "xterm-256color"),
+            ],
+            100,
+            30,
+        );
+        if mode != "cli" {
+            pty.screen(100, 30);
+            pty.send("Collect a display name\r");
+        }
+        // The ordinary terminal is not a full-screen UI; inspect its raw output.
+        let wait = |pty: &mut Pty, needle: &str| {
+            let deadline = std::time::Instant::now() + PATIENCE;
+            while !pty.seen.contains(needle) {
+                assert!(std::time::Instant::now() < deadline, "missing {needle}: {}", pty.diagnosis());
+                assert!(pty.read_more(100), "terminal ended: {}", pty.diagnosis());
+            }
+        };
+        if mode == "cli" {
+            wait(&mut pty, "Fill in the form");
+        } else {
+            pty.screen_showing(100, 30, "Fill in the form");
+        }
+        if mode == "daemon" {
+            pty.send("2\r");
+        } else {
+            pty.send("1\r");
+            if mode == "cli" {
+                wait(&mut pty, "Enter or select a value");
+            } else {
+                pty.screen_showing(100, 30, "Enter or select a value");
+            }
+            pty.send("1\r");
+            // Wait for the new field prompt rather than typing into the old one.
+            if mode == "cli" {
+                wait(&mut pty, "Value for name");
+            } else {
+                pty.screen_showing(100, 30, "Value for name");
+            }
+            pty.send("NATIVE_FORM_VALUE\r");
+            if mode == "cli" {
+                wait(&mut pty, "Send this response");
+            } else {
+                pty.screen_showing(100, 30, "Send this response");
+            }
+            assert!(!receipt.exists(), "no response reaches the server before review");
+            pty.send("1\r");
+        }
+        let deadline = std::time::Instant::now() + PATIENCE;
+        while !receipt.exists() {
+            assert!(std::time::Instant::now() < deadline, "missing server receipt: {}", pty.diagnosis());
+            let _ = pty.read_more(100);
+        }
+        let response: serde_json::Value = serde_json::from_slice(&std::fs::read(receipt).unwrap()).unwrap();
+        assert_eq!(response["result"]["action"], if mode == "daemon" { "decline" } else { "accept" });
+        if mode == "daemon" {
+            assert!(response["result"].get("content").is_none());
+        } else {
+            assert_eq!(response["result"]["content"]["name"], "NATIVE_FORM_VALUE");
+        }
+        let first = requests.recv_timeout(PATIENCE).unwrap();
+        assert!(!first.to_string().contains("NATIVE_FORM_VALUE"));
+        for request in requests.try_iter() {
+            assert!(!request.to_string().contains("NATIVE_FORM_VALUE"));
+        }
     }
 }

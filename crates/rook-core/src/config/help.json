@@ -1,4 +1,9 @@
 {
+  "documents": {"kind":"table","help":"Bounded local PDF extraction through Poppler; optional local OCR through tesseract. No cloud service or API key."},
+  "documents.max_bytes": {"kind":"integer","help":"Maximum PDF input bytes, 1024..134217728, checked before and during snapshot reads."},
+  "documents.max_pages": {"kind":"integer","help":"Maximum selected PDF pages per call, 1..32. Render accepts one page."},
+  "documents.max_text_bytes": {"kind":"integer","help":"Maximum extracted UTF-8 text bytes per page, 1024..2097152, enforced as parser output arrives."},
+  "documents.timeout_secs": {"kind":"integer","help":"Whole PDF extraction deadline, 1..300 seconds; also bounded by sandbox.command_timeout_secs."},
   "acp_executor.file_bytes": {"kind":"integer","help":"Raw source file byte limit, 4096..16777216; metadata and bounded stream checks precede text decoding/copying."},
   "acp_executor": {"kind": "setting", "help": "Trusted named ACP subprocess delegation; see docs/acp.md."},
   "acp_executor.profiles": {"kind": "setting", "help": "Named trusted executables with command, args, bounded env overrides and explicit trusted flag. Environment secret values can use secret:alias. Model supplied commands are refused."},

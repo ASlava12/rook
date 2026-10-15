@@ -76,6 +76,8 @@ pub(crate) struct Http {
     version: Mutex<Option<reqwest::header::HeaderValue>>,
     next_id: AtomicU64,
     token: Option<std::sync::Arc<dyn crate::oauth::TokenSource>>,
+    connection: u64,
+    seen: crate::elicitation::Seen,
 }
 
 impl Http {
@@ -109,7 +111,84 @@ impl Http {
             version: Mutex::new(None),
             next_id: AtomicU64::new(1),
             token,
+            connection: crate::elicitation::connection(),
+            seen: Default::default(),
         })
+    }
+
+    async fn request_inner(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+        timeout: Duration,
+        handler: Option<std::sync::Arc<dyn crate::elicitation::Elicitor>>,
+    ) -> Result<Incoming> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let body = Request { jsonrpc: "2.0", id, method, params };
+        let owner = handler.map(|handler| {
+            crate::elicitation::Invocation::new(&self.name, self.connection, id, method, handler)
+        });
+        let _interaction = InteractionGuard(owner.clone());
+
+        tokio::time::timeout(timeout, async {
+            let (response, token) = self.post(&body).await?;
+            let status = response.status();
+            let event_stream = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|t| t.starts_with("text/event-stream"));
+
+            // Said as what it is rather than as a status: a 401 is the one
+            // failure here a person can act on, and the header is where the
+            // authorisation server is named.
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                let offered = challenges(&response, token.is_some());
+                return Err(McpError::Unauthorized { server: self.name.clone(), offered });
+            }
+            if !status.is_success() {
+                return Err(McpError::Transport {
+                    server: self.name.clone(),
+                    message: format!("{status}: {}", failure_text(response, token.is_some()).await),
+                });
+            }
+
+            let message = if event_stream {
+                read_event_stream(self, method, id, response, timeout, owner.clone(), token.as_deref()).await
+            } else {
+                let text = whole_text(response, &self.name).await?;
+                serde_json::from_str(&text).map_err(|e| McpError::Decode {
+                    server: self.name.clone(),
+                    method: method.into(),
+                    message: if token.is_some() {
+                        "invalid authenticated response; body withheld to protect credentials".into()
+                    } else {
+                        format!("{e}: {}", rook_llm::truncate(&text, 300))
+                    },
+                })
+            }?;
+            if token.as_deref().is_some_and(|token| reflects(&message, token)) {
+                return Err(McpError::Transport {
+                    server: self.name.clone(),
+                    message: "response withheld because it contains the request credential".into(),
+                });
+            }
+            if message.method.is_some() || message.id.as_ref().and_then(|id| id.as_u64()) != Some(id) {
+                return Err(McpError::Decode {
+                    server: self.name.clone(),
+                    method: method.into(),
+                    message: "response does not match the client request".into(),
+                });
+            }
+            Ok(message)
+        })
+        .await
+        .map_err(|_| McpError::Timeout {
+            server: self.name.clone(),
+            method: method.into(),
+            timeout,
+            said: String::new(),
+        })?
     }
 
     async fn post(&self, body: &impl serde::Serialize) -> Result<(reqwest::Response, Option<String>)> {
@@ -177,61 +256,16 @@ impl Transport for Http {
         params: Option<serde_json::Value>,
         timeout: Duration,
     ) -> Result<Incoming> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let body = Request { jsonrpc: "2.0", id, method, params };
-
-        tokio::time::timeout(timeout, async {
-            let (response, token) = self.post(&body).await?;
-            let status = response.status();
-            let event_stream = response
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|t| t.starts_with("text/event-stream"));
-
-            // Said as what it is rather than as a status: a 401 is the one
-            // failure here a person can act on, and the header is where the
-            // authorisation server is named.
-            if status == reqwest::StatusCode::UNAUTHORIZED {
-                let offered = challenges(&response, token.is_some());
-                return Err(McpError::Unauthorized { server: self.name.clone(), offered });
-            }
-            if !status.is_success() {
-                return Err(McpError::Transport {
-                    server: self.name.clone(),
-                    message: format!("{status}: {}", failure_text(response, token.is_some()).await),
-                });
-            }
-
-            let message = if event_stream {
-                read_event_stream(&self.name, method, id, response, timeout).await
-            } else {
-                let text = whole_text(response, &self.name).await?;
-                serde_json::from_str(&text).map_err(|e| McpError::Decode {
-                    server: self.name.clone(),
-                    method: method.into(),
-                    message: if token.is_some() {
-                        "invalid authenticated response; body withheld to protect credentials".into()
-                    } else {
-                        format!("{e}: {}", rook_llm::truncate(&text, 300))
-                    },
-                })
-            }?;
-            if token.as_deref().is_some_and(|token| reflects(&message, token)) {
-                return Err(McpError::Transport {
-                    server: self.name.clone(),
-                    message: "response withheld because it contains the request credential".into(),
-                });
-            }
-            Ok(message)
-        })
-        .await
-        .map_err(|_| McpError::Timeout {
-            server: self.name.clone(),
-            method: method.into(),
-            timeout,
-            said: String::new(),
-        })?
+        self.request_inner(method, params, timeout, None).await
+    }
+    async fn request_interactive(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+        timeout: Duration,
+        handler: std::sync::Arc<dyn crate::elicitation::Elicitor>,
+    ) -> Result<Incoming> {
+        self.request_inner(method, params, timeout, Some(handler)).await
     }
 
     async fn notify(&self, method: &str, params: Option<serde_json::Value>) -> Result<()> {
@@ -310,36 +344,56 @@ async fn failure_text(response: reqwest::Response, authenticated: bool) -> Strin
 /// The stream may carry notifications and server-initiated requests alongside
 /// the response; anything that is not the reply we are waiting for is skipped
 /// rather than treated as one.
+struct InteractionGuard(Option<std::sync::Arc<crate::elicitation::Invocation>>);
+impl Drop for InteractionGuard {
+    fn drop(&mut self) {
+        if let Some(owner) = &self.0 {
+            owner.close();
+        }
+    }
+}
+
 async fn read_event_stream(
-    server: &str,
+    http: &Http,
     method: &str,
     id: u64,
     response: reqwest::Response,
     timeout: Duration,
+    owner: Option<std::sync::Arc<crate::elicitation::Invocation>>,
+    credential: Option<&str>,
 ) -> Result<Incoming> {
-    let mut bytes = response.bytes_stream();
+    let mut stream = response.bytes_stream();
     let mut frames = EventReader::new(MAX_FRAME_BYTES);
-
+    let mut dialogs = futures_util::stream::FuturesUnordered::new();
+    let failure = |message: &str| McpError::Transport { server: http.name.clone(), message: message.into() };
     loop {
-        let chunk = match tokio::time::timeout(timeout, bytes.next()).await {
-            Err(_) => {
-                return Err(McpError::Timeout {
-                    server: server.into(),
-                    method: method.into(),
-                    timeout,
-                    said: String::new(),
-                });
+        tokio::select! {
+            Some(reply)=dialogs.next(),if !dialogs.is_empty()=>{
+                let (response,_)=http.post(&reply).await?;
+                if response.status()!=reqwest::StatusCode::ACCEPTED {return Err(failure("server did not acknowledge the elicitation response"));}
             }
-            Ok(None) => return Err(McpError::Closed { server: server.into(), said: String::new() }),
-            Ok(Some(chunk)) => {
-                chunk.map_err(|e| McpError::Transport { server: server.into(), message: e.to_string() })?
+            chunk=tokio::time::timeout(timeout,stream.next())=>{
+                let chunk=match chunk {
+                    Ok(Some(Ok(chunk)))=>chunk,
+                    Ok(Some(Err(_)))=>return Err(failure("MCP response stream disconnected")),
+                    Ok(None)=>return Err(McpError::Closed {server:http.name.clone(),said:String::new()}),
+                    Err(_)=>return Err(McpError::Timeout {server:http.name.clone(),method:method.into(),timeout,said:String::new()}),
+                };
+                let mut from=0;
+                while from<chunk.len() {
+                    let (used,message)=frames.next_frame(&chunk[from..]).map_err(|()|failure("an MCP event exceeded its byte limit"))?;
+                    from+=used;
+                    let Some(message)=message else {continue};
+                    if credential.is_some_and(|token|reflects(&message,token)) {return Err(failure("response withheld because it contains the request credential"));}
+                    if message.method.is_some() && message.id.is_some() {
+                        if !message.id.as_ref().is_some_and(|id|http.seen.admit(id)) {return Err(failure("invalid or reused MCP server request ID"));}
+                        if dialogs.len()>=4 {return Err(failure("too many concurrent MCP server requests"));}
+                        dialogs.push(crate::elicitation::answer(owner.clone(),message));
+                    } else if message.method.is_none() && message.id.as_ref().and_then(|id|id.as_u64())==Some(id) {
+                        return Ok(message);
+                    }
+                }
             }
-        };
-        if let Some(message) = frames.feed(&chunk, id).map_err(|()| McpError::Transport {
-            server: server.into(),
-            message: format!("an event exceeded {MAX_FRAME_BYTES} bytes"),
-        })? {
-            return Ok(message);
         }
     }
 }
@@ -356,8 +410,8 @@ impl EventReader {
     fn new(limit: usize) -> Self {
         Self { bytes: Vec::new(), after_cr: false, limit }
     }
-    fn feed(&mut self, chunk: &[u8], id: u64) -> std::result::Result<Option<Incoming>, ()> {
-        for &byte in chunk {
+    fn next_frame(&mut self, chunk: &[u8]) -> std::result::Result<(usize, Option<Incoming>), ()> {
+        for (index, &byte) in chunk.iter().enumerate() {
             if self.after_cr && byte == b'\n' {
                 self.after_cr = false;
                 continue;
@@ -380,29 +434,41 @@ impl EventReader {
                     }
                 }
                 self.bytes.clear();
-                if let Ok(message) = serde_json::from_slice::<Incoming>(&data)
-                    && message.id == Some(id)
-                {
-                    return Ok(Some(message));
+                if let Ok(message) = serde_json::from_slice::<Incoming>(&data) {
+                    return Ok((index + 1, Some(message)));
                 }
             }
         }
-        Ok(None)
+        Ok((chunk.len(), None))
     }
 }
 
 #[cfg(test)]
 mod frame_tests {
     use super::*;
+    fn feed(reader: &mut EventReader, chunk: &[u8], id: u64) -> std::result::Result<Option<Incoming>, ()> {
+        let mut from = 0;
+        while from < chunk.len() {
+            let (used, message) = reader.next_frame(&chunk[from..])?;
+            from += used;
+            if let Some(message) = message
+                && message.method.is_none()
+                && message.id.as_ref().and_then(|id| id.as_u64()) == Some(id)
+            {
+                return Ok(Some(message));
+            }
+        }
+        Ok(None)
+    }
     #[test]
     fn sse_limits_each_event_before_retaining_it_even_in_one_large_chunk() {
         let mut reader = EventReader::new(128);
         let many = b": ignored\r\n\r\n".repeat(1000);
         assert!(many.len() > 128);
-        assert!(reader.feed(&many, 1).unwrap().is_none());
+        assert!(feed(&mut reader, &many, 1).unwrap().is_none());
         assert!(reader.bytes.is_empty());
         let oversized = vec![b'x'; 1024];
-        assert!(reader.feed(&oversized, 1).is_err());
+        assert!(feed(&mut reader, &oversized, 1).is_err());
         assert_eq!(reader.bytes.len(), 128, "the cap is applied before the offending byte is copied");
     }
     #[test]
@@ -411,7 +477,7 @@ mod frame_tests {
         let mut reader = EventReader::new(1024);
         let mut found = None;
         for byte in wire.as_bytes() {
-            if let Some(message) = reader.feed(&[*byte], 7).unwrap() {
+            if let Some(message) = feed(&mut reader, &[*byte], 7).unwrap() {
                 assert!(found.is_none());
                 found = Some(message);
             }

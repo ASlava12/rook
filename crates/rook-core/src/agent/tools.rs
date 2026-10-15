@@ -635,6 +635,7 @@ impl<'a> AgentLoop<'a> {
         let (say, mut said) = tokio::sync::mpsc::unbounded_channel::<String>();
         let output_activity = std::sync::Arc::<std::sync::atomic::AtomicU64>::default();
         let ctx = rook_tools::ToolContext {
+            elicitor: self.mcp_elicitor(call),
             require_command_cleanup: shell_capture.is_some(),
             watching: Some(say),
             output_activity: Some(output_activity.clone()),
