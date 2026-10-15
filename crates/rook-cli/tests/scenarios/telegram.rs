@@ -20,7 +20,7 @@ impl Server {
         let stop = Arc::new(AtomicBool::new(false));
         let halt = stop.clone();
         let thread = std::thread::spawn(move || {
-            while !halt.load(Ordering::SeqCst) {
+            'connections: while !halt.load(Ordering::SeqCst) {
                 let Ok((mut socket, _)) = listener.accept() else {
                     std::thread::sleep(std::time::Duration::from_millis(10));
                     continue;
@@ -30,8 +30,24 @@ impl Server {
                 let mut bytes = Vec::new();
                 let (path, request) = loop {
                     let mut chunk = [0; 8192];
-                    let n = socket.read(&mut chunk).unwrap();
-                    assert!(n > 0 && bytes.len() + n <= 2 * 1024 * 1024);
+                    // Stopping the daemon cancels its long poll. Windows may
+                    // report that abandoned connection as a reset rather than EOF.
+                    let n = match socket.read(&mut chunk) {
+                        Ok(0) => continue 'connections,
+                        Ok(n) => n,
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::ConnectionReset
+                                    | std::io::ErrorKind::ConnectionAborted
+                                    | std::io::ErrorKind::BrokenPipe
+                            ) =>
+                        {
+                            continue 'connections;
+                        }
+                        Err(error) => panic!("Telegram fixture read failed: {error}"),
+                    };
+                    assert!(bytes.len() + n <= 2 * 1024 * 1024);
                     bytes.extend_from_slice(&chunk[..n]);
                     let Some(at) = bytes.windows(4).position(|w| w == b"\r\n\r\n") else { continue };
                     let head = String::from_utf8_lossy(&bytes[..at]);

@@ -647,7 +647,10 @@ mod broker_tests {
             assert!(request(&proxy, value.as_bytes()).await.contains("403 Forbidden"));
         }
         let oversized = format!("GET http://127.0.0.1:{port}/ HTTP/1.1\r\nX-Long: {}", "x".repeat(8192));
-        assert!(request(&proxy, oversized.as_bytes()).await.contains("403 Forbidden"));
+        let response = request(&proxy, oversized.as_bytes()).await;
+        // Rejecting before consuming the oversized header can reset the peer
+        // on Windows. The audit below proves the header bound caused refusal.
+        assert!(response.is_empty() || response.contains("403 Forbidden"), "{response:?}");
         assert!(
             tokio::time::timeout(Duration::from_millis(50), listener.accept()).await.is_err(),
             "no rejected request connected upstream"
