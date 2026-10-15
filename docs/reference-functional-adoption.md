@@ -2,6 +2,10 @@
 
 ## Second adoption scope — 2026-10-15
 
+Release follow-up: the user subsequently requested publication of all changes as
+Rook 0.13.0. The no-publication statements below describe the implementation
+batch before that request; see [release notes](releases/0.13.0.md).
+
 The user requested every candidate from the October 15 review. All eight candidates have now been implemented and verified or evaluated. Seven
 capabilities are delivered; the cache experiment did not establish a useful
 improvement, so no cache/effort parameter change was adopted. ACP v2 remains a draft watch
