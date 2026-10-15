@@ -125,6 +125,17 @@ These existing operational skills ship alongside it:
 | `project-instructions` | A project's `AGENTS.md` is being written or trimmed |
 | `rust-release` | A release of a Rust workspace is being cut |
 | `store-triage` | A store has grown, and `gc` or `prune` is about to be run on somebody's history |
+| `github-workflow` | GitHub issues, PRs, completed job logs and verified releases need handling |
+| `browser-qa` | A web journey needs actual browser interactions and attributable evidence |
+| `skill-authoring` | A Rook skill or its bundled resources need creating, adapting or validating |
+
+Additional document, spreadsheet, diagram, cleanup, provider, translation,
+experiment, reverse-engineering, clean-room reimplementation, UI/TUI and game-tooling
+workflows are available in [optional-skills](../optional-skills/README.md).
+They use the existing source installer and stay outside the builtin catalog until
+installed. Libraries and runtime equipment are checked only for the operation
+that needs them; installing instructions does not install an office suite or
+enable browser access.
 
 `cargo xtask dist` packages them next to the binary, which is the first place
 [`builtin_skills_dir`](../crates/rook-core/src/paths.rs) looks. A plain

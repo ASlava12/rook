@@ -21,7 +21,12 @@ fn env(os: &str) -> Environment {
 /// A machine with the toolchains a developer would have, which is who the
 /// shipped skills are for.
 fn equipped(os: &str) -> Environment {
-    env(os).with_language("rust", "1.97.1").with_tool("cargo", "1.97.1").with_tool("git", "2.50.1")
+    Environment::bare(os, "x86_64", env!("CARGO_PKG_VERSION"))
+        .with_language("rust", "1.97.1")
+        .with_language("node", "22.0.0")
+        .with_tool("cargo", "1.97.1")
+        .with_tool("git", "2.50.1")
+        .with_tool("gh", "2.86.0")
 }
 
 #[test]
