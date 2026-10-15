@@ -1791,6 +1791,37 @@ recorded so the design question survives the session that raised it.
 
 ## Next
 
+**Reference review, 2026-10-15.** All ten reference pointers were advanced to
+the fetched upstream tips; exact old/new snapshots and review limits are in
+[the triage log](../references/PORTED.md#triage-log). These are candidates,
+not implementations or a newly authorized implementation programme. Existing
+reference adoption trackers take precedence over older proposal text below.
+
+| Priority | Candidate and reference evidence | Addition to the current Rook | Acceptance question |
+|---|---|---|---|
+| P1 | Correlated diagnostics: [Goose W3C context](../references/goose/crates/goose/src/otel/trace_context.rs) and provider request IDs (`4376f40`) | Existing activity, phase timings and physical attempt receipts remain; add provider request IDs and a shared trace across root/child, ACP and MCP, visible in local diagnostics | Can one report distinguish provider wait, tool wait and child execution and correlate them with server logs, without transcript/credential export? |
+| P1 | [MCP resources and templates](../references/opencode/packages/core/src/tool/plugin/mcp-resource.ts), also [Codex resource client](../references/codex/codex-rs/codex-mcp/src/resource_client.rs) | The current client exposes tools/list and tools/call, not model-visible resource discovery/read; add bounded paged resource/template discovery and explicit reads with server/URI provenance | Can a resources-only server supply a document through every frontend, with cancellation, ordinary policy, byte limits and untrusted source handling? |
+| P1 | [OpenHands request_secret](../references/openhands/src/api/request-secret-client-tool.ts) | Rook already stores named secrets and accepts them through CLI/API/browser; add a model-requested private input flow tied to the waiting conversation, returning only name/status | Can a task resume after private secret entry or dismissal without the value entering history, tool arguments, compaction or another session? |
+| P2 | [Codex MCP elicitation](../references/codex/codex-rs/codex-mcp/src/elicitation.rs) | Existing ask/approval/extension forms do not answer server-initiated MCP form/URL requests; bridge those requests with explicit server and pending-call identity | Do concurrent servers with colliding request IDs, cancellation and client reconnect route answers to exactly one live waiter? Keep secret collection separate. |
+| P2 | [OpenClaw PDF input and extraction](../references/openclaw/docs/tools/pdf.md), [Goose text extraction](../references/goose/crates/goose-mcp/src/computercontroller/pdf_tool.rs) | Add a supported document path alongside existing text/image attachments: selected pages, source page numbers, text extraction and optional rendering for scans | Can local text-only Qwen read a text PDF without a vision model, with clear partial-document notices and bounded parser time/memory? Scans require separately configured OCR/vision. |
+| P2 | [Pi remote execution environment](../references/pi/packages/env/README.md) | Rook SSH currently synchronizes a bounded workspace replica around commands while file tools stay local; add an explicit remote-workspace mode for read/edit/search/list as well as execution | Can a large remote repository be edited without copying it locally, with clear path identity, checkpoint/undo, disconnect and ownership semantics? Keep replica mode available. |
+| Experiment | [Goose session prompt_cache_key](../references/goose/crates/goose-providers/src/openai.rs) (`39c540b`), [Pi effort updates](../references/pi/packages/ai/src/api/openai-responses-shared.ts) (`60ac3bc`) | Rook already keeps prompt/tool prefixes stable; investigate supported provider cache identity and effort changes without prefix churn | Compare cache-read tokens, first-token latency and total cost on the same tasks. Enable only for verified dialects with measured benefit; no assumed speedup on the LAN model. |
+| P3 | [Codex network policy proxy](../references/codex/codex-rs/network-proxy/README.md) | Extend the current network on/off switch with opt-in domain allow/deny and attributable decisions | Can mandatory OS containment prevent direct bypass on supported platforms, while configured LAN model access and permitted package registries still work? A proxy environment variable alone is insufficient. |
+
+Watch [ACP v2 migration](../references/acp/docs/protocol/v2/migration.mdx):
+prompt acceptance is distinct from foreground completion, and client filesystem/
+terminal APIs are replaced by other surfaces. Upstream still labels v2 draft.
+Keep Rook v1 working; any v2 adapter needs explicit negotiation and a feature flag.
+
+Do not reintroduce a compulsory todo tool, Code Mode or semantic memory on the
+strength of feature parity: existing local measurements did not justify them.
+Translation preprocessing also remains subject to the user's measured-benefit
+condition. OpenResearch side chats mostly
+overlap Rook's aside/fork/history mechanisms; experiment reparenting would need
+separate display grouping so immutable measured lineage remains truthful.
+Hermes gateway ownership and Cline worker isolation are useful regression/design
+references, not reasons to add another gateway or an in-process plugin runtime.
+
 **The fourteen reference capabilities requested on 2026-10-11.** Implementation
 and acceptance evidence are tracked in
 [reference-functional-adoption.md](reference-functional-adoption.md). All fourteen

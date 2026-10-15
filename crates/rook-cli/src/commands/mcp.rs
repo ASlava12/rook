@@ -171,11 +171,12 @@ pub(crate) fn describe(report: &rook_core::mcp_connections::Report) -> String {
         use std::fmt::Write;
         let _ = writeln!(
             text,
-            "{} — {}{} · {} tools · {} active requests · generation {}",
+            "{} — {}{} · {} tools{} · {} active requests · generation {}",
             server.name,
             server.state,
             if server.reconnecting { " (reconnecting)" } else { "" },
             server.tools,
+            if server.resources { " · resources" } else { "" },
             server.active_requests,
             server.generation
         );

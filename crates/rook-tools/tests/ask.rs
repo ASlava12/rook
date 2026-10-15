@@ -27,6 +27,18 @@ fn an_empty_line_answers_nothing_when_there_is_no_recommendation() {
 }
 
 #[test]
+fn an_explicit_skip_declines_every_question_shape_without_selecting_a_recommendation() {
+    for q in [
+        question("Which?", &["prod", "staging"], false),
+        question("Which?", &["a", "b"], true),
+        question("Why?", &[], false),
+    ] {
+        assert!(q.interpret(" /SKIP \n").chosen.is_empty());
+        assert!(q.ask_line().contains("/skip"));
+    }
+}
+
+#[test]
 fn text_that_names_no_choice_is_the_users_own_answer() {
     let q = question("Which target?", &["staging", "prod"], false);
     assert_eq!(

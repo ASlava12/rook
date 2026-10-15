@@ -99,6 +99,9 @@ pub struct Status {
     pub reconnecting: bool,
     pub generation: u64,
     pub tools: usize,
+    /// Resource support advertised by the installed connection, not a live probe.
+    #[serde(default)]
+    pub resources: bool,
     pub active_requests: usize,
     pub last_request_error: Option<String>,
     pub error: Option<String>,
@@ -204,6 +207,7 @@ impl McpSession {
                     reconnecting: state.reconnecting.as_deref() == Some(&entry.name),
                     generation: entry.generation,
                     tools: entry.installed.as_ref().map_or(0, |(_, tools)| tools.len()),
+                    resources: entry.installed.as_ref().is_some_and(|(server, _)| server.has_resources()),
                     active_requests: entry
                         .installed
                         .as_ref()
@@ -360,7 +364,13 @@ async fn candidate(
         }
         .map_err(safe_error)?,
     );
-    let tools = server.list_tools().await.map_err(safe_error)?;
+    // Resources-only servers need not implement tools/list. Legacy servers
+    // omitting capabilities still receive the original discovery probe.
+    let tools = if server.has_resources() && server.info().capabilities.get("tools").is_none() {
+        Vec::new()
+    } else {
+        server.list_tools().await.map_err(safe_error)?
+    };
     Ok((server, tools))
 }
 

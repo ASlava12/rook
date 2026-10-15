@@ -92,6 +92,8 @@ impl ToolBox {
         limits: CatalogLimits,
     ) {
         let limits = limits.bounded();
+        let servers: Vec<_> = servers.into_iter().collect();
+        super::resources::register(self, &servers);
         let mut ordered = Vec::new();
         for (server, tools) in servers {
             for descriptor in tools {

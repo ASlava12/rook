@@ -1,10 +1,9 @@
 //! A Model Context Protocol client.
 //!
 //! MCP is JSON-RPC 2.0, carried either over a subprocess's pipes or over HTTP.
-//! Rook uses four methods of it — `initialize`, `notifications/initialized`,
-//! `tools/list` and `tools/call` — so this is written directly rather than
-//! pulling in the full SDK, which would add 21 crates for a fraction of its
-//! surface. See `docs/adr/0008-hand-written-mcp-client.md`.
+//! The direct transports serve handshake, tool discovery/calls and explicit
+//! resource/template discovery and reads. See the original SDK decision and
+//! its subsequent scope notes in `docs/adr/0008-hand-written-mcp-client.md`.
 
 #![warn(clippy::string_slice)]
 //
@@ -26,6 +25,7 @@ pub mod http;
 pub mod oauth;
 pub mod protocol;
 mod reap;
+mod resources;
 pub mod stdio;
 pub mod transport;
 
@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 use transport::Transport;
 
 pub use protocol::{Content, PROTOCOL_VERSION, RpcError, ServerInfo, ToolDescriptor, ToolResult};
+pub use resources::{ResourceContent, ResourcePage, ResourceRead};
 
 #[derive(Debug, thiserror::Error)]
 pub enum McpError {
@@ -383,17 +384,21 @@ impl Server {
             // A dead subprocess is worth one restart and one retry. Anything the
             // server itself answered — an rpc error, a decode failure — is the
             // server working, and restarting it would only lose the answer.
-            Err(e) if e.is_transport() && method != "tools/call" && self.restart().await => {
+            Err(e)
+                if e.is_transport()
+                    && !matches!(method, "tools/call" | "resources/read")
+                    && self.restart().await =>
+            {
                 self.transport.read().await.request(method, params, timeout).await?
             }
-            Err(e) if method == "tools/call" && e.is_transport() => {
+            Err(e) if matches!(method, "tools/call" | "resources/read") && e.is_transport() => {
                 // Repair the connection for a later explicit call, without
                 // repeating an action whose result was lost.
                 self.restart().await;
                 return Err(McpError::Transport {
                     server: self.name.clone(),
                     message: format!(
-                        "tool outcome is unknown; it may have completed and was not retried: {e}"
+                        "{method} outcome is unknown; it may have completed and was not retried: {e}"
                     ),
                 });
             }

@@ -46,6 +46,9 @@ impl Question {
     pub fn interpret(&self, line: &str) -> Answer {
         let answer = |chosen| Answer { question: self.question.clone(), chosen };
         let line = line.trim();
+        if line.eq_ignore_ascii_case("/skip") {
+            return answer(Vec::new());
+        }
         if line.is_empty() {
             return match (self.multi, self.choices.first()) {
                 (false, Some(first)) => answer(vec![first.clone()]),
@@ -70,9 +73,9 @@ impl Question {
     /// What to print after the choices, if any.
     pub fn ask_line(&self) -> &'static str {
         match (self.choices.is_empty(), self.multi) {
-            (true, _) => "your answer: ",
-            (false, true) => "numbers, comma-separated, or your own answer: ",
-            (false, false) => "a number, or your own answer: ",
+            (true, _) => "your answer, or /skip: ",
+            (false, true) => "numbers, comma-separated, your own answer, or /skip: ",
+            (false, false) => "a number, your own answer, or /skip: ",
         }
     }
 
@@ -220,12 +223,14 @@ fn parse(args: &serde_json::Value) -> Result<Vec<Question>> {
 /// and a turn that stops on one throws away everything it did to reach the
 /// point of asking. The third is that a decision taken in somebody's absence
 /// has to be visible when they come back, or they cannot disagree with it.
-const DECIDE_IT: &str = "Nobody answered in the time a question waits, so these are now yours \
+const DECIDE_IT: &str = "These questions were skipped or received no answer, so permitted choices are now yours \
 to decide, and asking again would only spend the turn. Take each unanswered one: weigh the \
 options within the existing task and permissions against each other — what each gains, what it costs, and what it would take \
 to undo — and choose the one that best serves the goal you were given. Then say in your reply \
 which you chose and what you weighed, so that whoever was away can see what was decided for them \
-and change it.";
+and change it. Silence or a skipped answer is not consent: never invent missing facts, \
+credentials or permissions. Continue work that does not require that input; when it is \
+essential, state the concrete missing prerequisite instead of guessing or asking again.";
 
 fn render(answers: &[Answer]) -> String {
     // Keep the assistant's question apart from what a person actually chose.
@@ -288,8 +293,8 @@ impl ChannelAsker {
 impl Asker for ChannelAsker {
     async fn ask(&self, questions: &[Question]) -> Vec<Answer> {
         let request = |id| AskRequest { id, questions: questions.to_vec() };
-        // A question nobody answered is one the model must decide for itself,
-        // which is exactly what a skipped answer says.
+        // Preserve absence, never a selected default. The result explains which
+        // decisions may proceed and which missing prerequisites cannot be guessed.
         let chosen = self.0.ask(request).await.unwrap_or_default();
         let mut chosen = chosen.into_iter();
         questions

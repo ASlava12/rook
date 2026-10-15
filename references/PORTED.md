@@ -9,6 +9,7 @@ Add a row when you implement something after reading a reference. Add it to
 
 | what | from | read at | where it landed |
 |---|---|---|---|
+| Explicit MCP resource/template discovery and source-addressed text/image reads, resource-only connections, bounded continuation and ordinary external-call policy | OpenCode resource tools and Codex resource client; independently implemented with Rook transports and shared equipment | OpenCode `37df62f4a1`, `packages/core/src/tool/plugin/mcp-resource.ts`; Codex `bb64b894fd`, `codex-rs/codex-mcp/src/resource_client.rs` | `rook-mcp/src/resources.rs`, `rook-tools/src/mcp/resources.rs`, shared connection/equipment and status views; focused transport/engine checks pass, native frontend/full gate remain in progress in [adoption tracker](../docs/reference-functional-adoption.md) |
 | Named frozen subrecipes with sequential/parallel child contexts, bounded output handoff and source-pinned stage receipts | Goose subrecipe and parallel composition ideas; independently implemented with existing Rook child execution and ordinary journals | Goose `50666ae0b9a51e260b52b7efbab2e4e020346e94`, recipe subrecipes and parallel tutorial | `rook-core/src/composite_recipes/`, ordinary agent/recipe path, CLI/API/TUI/browser; [composite guide](../docs/composite-recipes.md) |
 | Persistent Telegram chat/topic routing, authorized human inputs and live approval callbacks, owned polling and reviewed uncertain sends | OpenClaw session-routing and Hermes Telegram callback/timeout ideas; independently implemented with Rook ordinary chats and transactional bounded receipts | OpenClaw `bcd05342c0c1831498648f3fee28f2c5a553b60a`; Hermes `f364c19775617acb6c16140b790cda9fb05e1906`, `plugins/platforms/telegram/adapter.py`; Bot API protocol docs | `rook-core/src/telegram/`, daemon chat bridge, CLI/API/TUI/browser; [Telegram guide](../docs/telegram.md) |
 | Authenticated inbound JSON events with durable source/deduplication receipts, fixed operator tasks and ordinary work dispatch | Hermes webhook authentication, replay-window, payload-cap and delivery ideas; independently implemented with Rook store transactions, source envelopes and managed work | Pinned local `hermes/gateway/platforms/webhook.py` | `rook-core/src/inbound/`, `rookd/src/inbound.rs`, CLI/chat/TUI/browser; [event guide](../docs/inbound-events.md) |
@@ -98,6 +99,59 @@ Add a row when you implement something after reading a reference. Add it to
 `cargo xtask refs advance` prints what landed upstream since the pointer was last
 moved; what follows is what was done with it, so a dismissal is a decision rather
 than an omission.
+
+**2026-10-15 (all-reference refresh and candidate review).** User requested
+another functionality review and explicitly asked to advance the pointers.
+Fetched each configured branch with `--no-tags --depth=100`, checked out its
+fetched tip detached, and recorded the gitlinks. All ten submodule worktrees
+were clean before and after checkout. These are fetched snapshots, not claims
+that every main-branch feature has shipped in an upstream release.
+
+| Reference | Previous pointer | Reviewed pointer |
+|---|---|---|
+| acp | `c849ac2f0c` | `1cebe1c018` |
+| cline | `cfe9cadab9` | `789f79e46d` |
+| codex | `c4017a87aa` | `bb64b894fd` |
+| goose | `50666ae0b9` | `dd17bf2021` |
+| hermes | `f364c19775` | `525dbcad8d` |
+| openclaw | `bcd05342c0` | `4ba08fadfd` |
+| opencode | `95daf90670` | `37df62f4a1` |
+| openhands | `de5a79b4ce` | `1c75a05d58` |
+| openresearch | `325eb509dc` | `c28897716b` |
+| pi | `ee602414c7` | `b06c1f2cf1` |
+
+Reviewed recent commit subjects and selected current implementations/docs,
+against Rook's current source and completed adoption trackers. Shallow history
+does not establish total drift or a complete commit-by-commit audit. Upstream
+agents/tests were not run, and candidates have no measured Rook quality or
+performance benefit yet. CodeGraph located the reference-update implementation;
+no Graphify graph exists here, so evidence was checked directly in source.
+
+Decisions and source links are in the
+[October 15 roadmap review](../docs/roadmap.md#next): prioritize correlated
+diagnostics (Goose), MCP resources/templates (OpenCode/Codex), and private
+in-conversation secret requests (OpenHands). Keep MCP elicitation (Codex),
+PDF text/page handling (OpenClaw/Goose), and native remote file tools (Pi)
+as subsequent candidates. Cache identity/effort updates (Goose/Pi) require an
+A/B measurement. Domain network policy (Codex) is a larger optional project.
+ACP v2 is draft: watch it, preserve v1, negotiate any experimental adapter.
+
+OpenResearch side-chat and experiment-tree changes largely overlap existing
+aside/fork/experiment capabilities; do not alter frozen experiment ancestry
+just to rearrange a display. Hermes' gateway ownership changes and Cline's
+worker-only plugins inform regression and process-boundary design; Rook
+already has one engine and external plugin equipment. No additional gateway,
+hosted service, mandatory todo tool or unmeasured Code Mode/semantic-memory/
+translation optimization is proposed. No product functionality was ported in
+this pass.
+
+Pi's malformed-final-tool-JSON fix (`87f9a36`) is a useful regression reference;
+Rook already parses completed argument strings with strict `serde_json::from_str`
+and passes invalid input as `null` for tool rejection instead of running a
+partially parsed prefix (`rook-llm/src/stream.rs`). Cline's local-model idle
+timeout fix (`26cea2f`) likewise reinforces Rook's existing separation of
+connection, first-token and stream-idle deadlines, rather than supplying a new
+feature to copy.
 
 **2026-08-31 (twenty-fifth pass)** — codex 12, goose 5, openhands 4, opencode 3,
 acp 1. Nothing taken; one gap found and recorded rather than guessed at.

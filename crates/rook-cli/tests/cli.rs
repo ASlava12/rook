@@ -1883,6 +1883,16 @@ fn rookd() -> PathBuf {
         }
         let built = build.current_dir(env!("CARGO_MANIFEST_DIR")).status();
         assert!(built.is_ok_and(|s| s.success()), "could not build rookd for the daemon tests");
+        // On a cold macOS build, exec can wait in _dyld_start before any Rust
+        // code runs (observed with sample). Establish that the sibling is
+        // executable during setup; the 30s deadline below then measures daemon
+        // initialization, not the first OS load of a freshly linked binary.
+        let runnable = Command::new(&path).arg("--version").output().expect("running the built rookd");
+        assert!(
+            runnable.status.success(),
+            "built rookd cannot run: {}",
+            String::from_utf8_lossy(&runnable.stderr)
+        );
     });
     assert!(path.exists(), "{} is still not there after building it", path.display());
     path
@@ -4366,3 +4376,6 @@ mod external_acp;
 
 #[path = "support/model.rs"]
 mod fixture_model;
+
+#[path = "scenarios/mcp_resources.rs"]
+mod resource_scenarios;

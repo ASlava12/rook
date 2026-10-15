@@ -1,5 +1,93 @@
 # Reference functionality adoption
 
+## Second adoption scope — 2026-10-15
+
+The user requested every candidate from the October 15 review. The whole scope
+remains active until each row is implemented and verified, except cache changes
+which require measured benefit before adoption. ACP v2 remains a draft watch
+item, as recommended in the review, not a replacement of the working v1 adapter.
+Current starting commit: `9cab33f`; refreshed reference gitlinks are already in
+the index and their snapshot table is in `references/PORTED.md`.
+
+| Requirement | Acceptance scope | State |
+|---|---|---|
+| Correlated diagnostics | Provider request IDs and root/child/ACP/MCP trace identity; local bounded reports; no credential/transcript export by default; real transport/reopen checks | Pending |
+| MCP resources/templates | Bounded paged discovery and source-addressed reads, resource-only servers, common policy/engine/frontends, cancellation and transport/reconnect checks | In progress |
+| Private secret requests | Private conversation-bound collection, only name/status returned; decline, dismissal, no answer, timeout, disconnect and replay are ordinary states; no value in model/history/compaction | Pending |
+| MCP elicitation | Server-initiated form/URL requests, exact connection/call identity and common user interfaces; explicit refusal, timeout, cancellation and concurrent ID collisions | Pending |
+| PDF documents | Bounded local extraction with selected pages and page provenance; ordinary text-only local model; optional scan rendering/OCR with explicit partial notices; actual document/frontend checks | Pending |
+| Remote workspace files | Explicit SSH-native read/edit/search/list and execution, remote path identity, bounded transfers, checkpoint/undo and disconnect ownership; preserve existing replica mode | Pending |
+| Prompt cache experiment | Supported dialect identity and effort changes; compare cache hits, first-token latency and cost on equal tasks; adopt only measured improvement | Pending |
+| Domain network policy | Opt-in domain rules and attributable decisions, enforced with OS containment on supported platforms; direct-bypass and allowed LAN/registry checks; explicit unsupported behavior | Pending |
+
+User clarification: a person may choose not to answer a question or provide a
+secret. Absence of an answer is never consent. A declined or expired request must
+not repeat itself, silently select a default, leak private values, or certify
+task completion. The task either proceeds without the optional input or reports
+the concrete missing prerequisite. Tests must exercise these real control paths.
+
+This section is the current work tracker. The older evidence below describes
+the previous fourteen-item scope; it cannot prove these additions complete.
+
+### October 15 implementation evidence
+
+MCP resource/template pages and resource reads now use the existing stdio/HTTP
+transports. Resource-only connections are retained without tools/list. Shared
+equipment registers bounded resource helpers, ordinary external-call policy,
+source hashes, UTF-8 text continuation and normal image handling. No store or
+wire enum layout changed. Unsupported binary content is described rather than
+injected as base64; native PDF handling remains a separate pending requirement.
+
+The focused native MCP resource tests passed (process cancellation,
+ambiguous disconnect without replay, reached count/byte limits and capability
+validation): `/tmp/rook-resource-focused-mcp.log`. Core resource tests passed
+(HTTP/SSE, local server discovery without I/O, bounded complete paging, changed
+sources, Unicode, binary/image admission, shared equipment and durable results):
+`/tmp/rook-resource-core-tests.log`. A subsequently added explicit external-policy
+assertion first failed compilation because Policy::compile returns a tuple; the
+test was corrected to assert its diagnostics before using the policy. Its rerun
+and the dead-API checks passed in `/tmp/rook-resource-focused-core.log`.
+Clippy for all targets in rook-mcp, rook-tools, rook-core and rook-cli passed in
+`/tmp/rook-resource-clippy.log`. Existing browser tool-card and chat rendering
+checks passed in `/tmp/rook-resource-web-tests.log`. The CLI/daemon native
+scenario and full regression gate remain pending; these focused passes do not
+close the entire feature or goal.
+
+The user's refusal clarification exposed a separate terminal bug: EOF was fed
+through empty-line defaults, including an affirmative approval. Terminal EOF
+now stays unanswered, blank approvals require an explicit affirmative answer,
+and `/skip` declines any question shape. Unanswered-question guidance explicitly
+forbids inventing credentials, facts or permissions and says to report essential
+missing input. The focused ask tests pass in `/tmp/rook-input-ask-tests.log`;
+terminal helper assertions also pass in `/tmp/rook-input-cli-tests.log` (the
+command additionally visits filtered integration targets). This fixes the existing input
+baseline; the private secret request feature is not yet implemented.
+
+Input integration constraints from current source: the ordinary Vault snapshots
+entries per turn, so a newly saved secret needs an explicit same-turn refresh
+before a command can resolve it. Secret values must use a private collection
+path, not ordinary Question/Answer serialization. MCP equipment may be shared
+by sessions; an elicitation response must bind to its actual connection
+generation and invoking owner, never the most recently attached asker. Late
+callbacks after cancellation must not bind to a newer call or conversation.
+
+Verification follow-up: the first native CLI scenario reached its daemon fixture
+but failed the existing 30s readiness deadline after rebuilding rookd; stderr was
+empty and the fixture killed/reaped its owned child. A sample of the freshly
+linked CLI test process separately showed it waiting in `_dyld_start` before
+Rust execution. Fixture setup now runs the built sibling's `--version` before
+starting the unchanged daemon-initialization deadline; the corrected native
+scenario still needs a passing rerun. The earlier complete rook-mcp/rook-tools
+regression command exited 0 in `/tmp/rook-resource-tests.log`.
+
+The first workspace CI passed Clippy, then was explicitly interrupted during
+build when the shared target volume had about 1 GiB free. It was not a passing
+gate. `cargo xtask clean` subsequently reclaimed 20.55 GiB of incremental and
+cross-target build caches (`/tmp/rook-reference-clean.log`); a preceding release
+cache cleanup reclaimed 1.3 GiB. The current full rerun is
+`/tmp/rook-reference-20261015-ci-final.log` and remains in progress. No agent
+installation, real daemon restart or LAN host change was performed.
+
 The user requested all fourteen capabilities from the reference review on
 2026-10-11. This document preserves the full implementation and verification
 scope across changes. A library helper, configuration field, or passing mock

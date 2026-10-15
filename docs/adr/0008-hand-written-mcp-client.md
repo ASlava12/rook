@@ -45,6 +45,19 @@ stdio and tools.
 
 ## What the SDK would have handled, and is handled here
 
+### Scope update, 2026-10-15
+
+The original four-method scope and dependency measurement above describe the
+initial decision. The client now also supports `resources/list`,
+`resources/templates/list` and `resources/read` using its existing bounded
+request transports. Resource-only servers are admitted without probing tools.
+Native catalog/read limits, explicit continuation hashes and the ordinary
+external-call policy apply. No resource subscription, sampling or server-initiated
+elicitation capability is advertised by this addition. Elicitation is a separate
+active requirement and requires its own lifecycle/transport verification before
+being advertised. The historical line-count comparison is not a current size
+measurement of either project.
+
 These are the parts that are easy to miss when writing a client by hand, and each
 has a test:
 

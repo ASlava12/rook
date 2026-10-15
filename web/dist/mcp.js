@@ -17,7 +17,7 @@ export function mcpPanel(session) {
   function display(report) {
     rows.replaceChildren(...report.servers.map(server => el('article', { class: 'entry' },
       el('strong', {}, server.name),
-      el('p', {}, `${server.state}${server.reconnecting ? ' (reconnecting)' : ''} · ${server.tools} tools · ${server.active_requests} active requests · generation ${server.generation}`),
+      el('p', {}, `${server.state}${server.reconnecting ? ' (reconnecting)' : ''} · ${server.tools} tools${server.resources ? ' · resources' : ''} · ${server.active_requests} active requests · generation ${server.generation}`),
       server.error ? el('p', { class: 'warn' }, server.error) : null,
       server.last_request_error ? el('p', { class: 'warn' }, `Last request: ${server.last_request_error}`) : null,
       el('button', { type: 'button', onclick: () => load(server.name) }, `Reconnect ${server.name}`),

@@ -1693,6 +1693,30 @@ rules and pre/post hooks still apply, and results keep images and provenance.
 The advertised prefix stays stable while searching. Ordinary names remain
 `server__tool`; oversized or ambiguous names receive bounded distinct aliases.
 
+Servers that advertise MCP resources also expose `list_mcp_resources` and
+`read_mcp_resource` through the common agent engine. These are two bounded
+built-in helpers, separate from the remote-tool advertisement budget. A
+resources-only server needs no `tools/list`. Discovery without a server lists
+configured resource servers locally; selecting one lists documents or, with
+`templates=true`, URI templates. Fill the template's parameters before reading.
+Discovery never fetches resource bodies. External catalog/read calls use the
+selected server's ordinary approval policy; a read-only claim grants nothing.
+
+Discovery returns at most 16 entries within the configured output limit.
+Follow `next_offset` with the same native `cursor` and `page_sha256`, then follow
+`next_cursor` with offset zero. Native pages share the server's
+`catalog_max_bytes` and `catalog_max_tools` limits. Titles/descriptions are
+shortened for display; URI identity is retained. A changed source refuses a
+continuation instead of mixing versions.
+
+Resource reads return one selected `content` block (default zero), with its
+server, requested/returned URI and SHA256. Text is paged by UTF-8 byte `offset`;
+copy `sha256` when following `next_offset`. `next_content` selects another block.
+Replies are bounded to 8 MiB and 64 blocks; image blobs use the ordinary image
+limits below, and other binary payloads are described without base64 in model
+context. Resource URIs are passed only to that MCP server, never opened as local
+files or web URLs. A disconnected read is not automatically replayed.
+
 
 Inline MCP image results reach image-capable models and survive session reopen
 and forks. PNG, JPEG, WebP and GIF are accepted, up to four images per result,

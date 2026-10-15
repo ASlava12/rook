@@ -28,16 +28,7 @@ impl Approver for Terminal {
             let mut out = std::io::stdout();
             let _ = write!(out, "{question}");
             let _ = out.flush();
-            let mut answer = String::new();
-            if std::io::stdin().lock().read_line(&mut answer).is_err() {
-                return Approval::Deny("could not read an answer".into());
-            }
-            match answer.trim().to_lowercase().as_str() {
-                "y" | "yes" | "" => Approval::Once,
-                "a" | "always" => Approval::ForRun,
-                "k" | "kind" => Approval::KindForRun,
-                _ => Approval::declined(),
-            }
+            read_approval(&mut std::io::stdin().lock())
         })
         .await
         .unwrap_or_else(|_| Approval::Deny("the prompt failed".into()))
@@ -96,9 +87,51 @@ fn prompt(q: &Question) -> Answer {
     let _ = write!(out, "  {}", q.ask_line());
     let _ = out.flush();
 
+    read_answer(q, &mut std::io::stdin().lock())
+}
+
+fn read_approval(input: &mut impl BufRead) -> Approval {
     let mut answer = String::new();
-    match std::io::stdin().lock().read_line(&mut answer) {
+    match input.read_line(&mut answer) {
+        Ok(0) => return Approval::Unanswered("terminal input ended without an answer".into()),
+        Err(_) => return Approval::Unanswered("could not read an answer".into()),
+        Ok(_) => {}
+    }
+    match answer.trim().to_lowercase().as_str() {
+        "y" | "yes" => Approval::Once,
+        "a" | "always" => Approval::ForRun,
+        "k" | "kind" => Approval::KindForRun,
+        _ => Approval::declined(),
+    }
+}
+
+fn read_answer(q: &Question, input: &mut impl BufRead) -> Answer {
+    let mut answer = String::new();
+    match input.read_line(&mut answer) {
+        Ok(0) | Err(_) => q.unanswered(),
         Ok(_) => q.interpret(&answer),
-        Err(_) => q.unanswered(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn eof_and_a_blank_approval_never_authorize_an_action() {
+        assert!(matches!(read_approval(&mut Cursor::new(b"")), Approval::Unanswered(_)));
+        assert!(matches!(read_approval(&mut Cursor::new(b"\n")), Approval::Deny(_)));
+        assert!(matches!(read_approval(&mut Cursor::new(b"no\n")), Approval::Deny(_)));
+        assert!(matches!(read_approval(&mut Cursor::new(b"yes\n")), Approval::Once));
+    }
+
+    #[test]
+    fn eof_is_an_unanswered_question_even_when_a_recommendation_exists() {
+        let question =
+            Question { question: "Pick a target".into(), choices: vec!["production".into()], multi: false };
+        assert!(read_answer(&question, &mut Cursor::new(b"")).chosen.is_empty());
+        assert!(read_answer(&question, &mut Cursor::new(b"/skip\n")).chosen.is_empty());
+        assert_eq!(read_answer(&question, &mut Cursor::new(b"1\n")).chosen, vec!["production"]);
     }
 }
