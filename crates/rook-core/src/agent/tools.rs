@@ -636,6 +636,8 @@ impl<'a> AgentLoop<'a> {
         let output_activity = std::sync::Arc::<std::sync::atomic::AtomicU64>::default();
         let ctx = rook_tools::ToolContext {
             elicitor: self.mcp_elicitor(call),
+            session: Some(self.session),
+            read_only: self.checking || self.review_only,
             require_command_cleanup: shell_capture.is_some(),
             watching: Some(say),
             output_activity: Some(output_activity.clone()),

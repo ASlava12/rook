@@ -4383,3 +4383,6 @@ mod resource_scenarios;
 
 #[path = "scenarios/pdf.rs"]
 mod pdf;
+
+#[path = "scenarios/native_workspace.rs"]
+mod native_workspace;

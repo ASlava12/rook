@@ -192,6 +192,9 @@ impl<'a> AgentLoop<'a> {
     /// will not say what it touches. A tool that declares its paths is
     /// checkpointed and diffed properly, and a read needs no watching.
     pub(super) fn watching_a_command(&self, call: &rook_llm::ToolCall) -> bool {
+        if call.name == "ssh_workspace" {
+            return false;
+        }
         let Some(tool) = self.tools.get(&call.name) else { return false };
         tool.touched_paths(&call.arguments).is_empty()
             && matches!(tool.risk(&call.arguments), rook_tools::policy::Risk::Execute(_))

@@ -22,13 +22,15 @@ impl Rook {
         if std::path::Path::new(&meta.workspace).canonicalize().ok().as_ref() != Some(&root) {
             return Err(CoreError::Other("environment owner belongs to another workspace".into()));
         }
-        let ctx = crate::agent::tool_context(&self.config, &self.workspace, &self.output_dir);
+        let mut ctx = crate::agent::tool_context(&self.config, &self.workspace, &self.output_dir);
+        ctx.session = Some(owner);
+
         let env = rook_tools::environments::Context {
             settings: self.config.execution_environment.clone(),
             pool: self.execution_environments.clone(),
             state_root: self.output_dir.clone(),
         };
-        let recovering = matches!(request, Request::Recover { .. });
+        let recovering = matches!(request, Request::Recover { .. } | Request::NativeUndo { .. });
         let stopping = matches!(request, Request::Stop { .. });
         if recovering {
             if let Some(reason) = self.recovery_block(owner)? {
@@ -50,7 +52,14 @@ impl Rook {
         let journal = if recovering || stopping || matches!(request, Request::Release { .. }) {
             let source = env
                 .pool
-                .request(&ctx, &env, Request::Inspect)
+                .request(
+                    &ctx,
+                    &env,
+                    match &request {
+                        Request::NativeUndo { id } => Request::NativeInspect { id: Some(id.clone()) },
+                        _ => Request::Inspect,
+                    },
+                )
                 .await
                 .map_err(|e| CoreError::Other(e.to_string()))?;
             let session = rook_store::new_session_id();

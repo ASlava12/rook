@@ -1,5 +1,7 @@
 # Architecture
 
+Direct remote SSH file authority: [configuration and recovery limits](ssh-native-workspaces.md).
+
 Intermediate child display hints coalesce within configured queue bounds;
 critical receipts and lifecycle events retain their existing persistence.
 See [the delivery contract and measurements](delegation-progress.md).

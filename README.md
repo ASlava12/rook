@@ -1,5 +1,7 @@
 # Rook
 
+Direct remote SSH file authority: [configuration and recovery limits](docs/ssh-native-workspaces.md).
+
 [English](README.md) · [Русский](README.ru.md)
 
 An autonomous agent whose memory you can actually read.

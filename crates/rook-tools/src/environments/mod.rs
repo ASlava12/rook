@@ -1,6 +1,7 @@
 //! Trusted execution profiles and per-workspace resource ownership.
 mod container;
 mod manage;
+pub mod native;
 mod ssh;
 mod sync;
 mod transport;
@@ -18,6 +19,7 @@ use std::{
 #[serde(default)]
 pub struct Settings {
     pub selected: String,
+    pub native_workspace: bool,
     pub profiles: BTreeMap<String, Profile>,
     pub max_resources: usize,
     pub setup_timeout_secs: u64,
@@ -32,6 +34,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             selected: "local".into(),
+            native_workspace: false,
             profiles: BTreeMap::new(),
             max_resources: 4,
             setup_timeout_secs: 30,
@@ -79,6 +82,9 @@ fn pids() -> usize {
 impl Settings {
     pub fn errors(&self) -> Vec<String> {
         let mut errors = Vec::new();
+        if self.native_workspace && !matches!(self.profiles.get(&self.selected), Some(Profile::Ssh { .. })) {
+            errors.push("execution_environment.native_workspace requires a selected SSH profile".into());
+        }
         if !(1..=16).contains(&self.max_resources) {
             errors.push("execution_environment.max_resources: expected 1..=16".into());
         }
@@ -333,6 +339,29 @@ impl Pool {
         env: &Context,
         request: Request,
     ) -> Result<serde_json::Value> {
+        if env.settings.native_workspace {
+            return match request {
+                request @ (Request::NativeInspect { .. } | Request::NativeUndo { .. }) => {
+                    native::manage(ctx, request).await
+                }
+                Request::Inspect => {
+                    let Some(Profile::Ssh { host, remote_workspace, .. }) =
+                        env.settings.profiles.get(&env.settings.selected)
+                    else {
+                        return Err(invalid("native workspace requires a selected SSH profile"));
+                    };
+                    Ok(
+                        serde_json::json!({"profile":env.settings.selected,"kind":"ssh_native","workspace":remote_workspace,"host":host,"state":"configured","notice":"direct workspace; use ssh_workspace checkpoint/undo in its owning session, and session stop for an active call"}),
+                    )
+                }
+                _ => Err(invalid(
+                    "replica recovery/release cannot manage an SSH-native workspace; use its owning session's native receipts and stop control",
+                )),
+            };
+        }
+        if matches!(request, Request::NativeInspect { .. } | Request::NativeUndo { .. }) {
+            return Err(invalid("native receipt controls require the original selected SSH-native profile"));
+        }
         if env.settings.local() {
             return match request {
                 Request::Inspect => Ok(

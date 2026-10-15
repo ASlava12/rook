@@ -1258,6 +1258,14 @@ impl Rook {
             }
             let mut ordered = Vec::new();
             for (owner, events) in logs {
+                if rook_tools::environments::native::has_unrestored(&self.output_dir, owner)
+                    .map_err(|e| CoreError::Other(e.to_string()))?
+                {
+                    return Err(CoreError::Other(format!(
+                        "session {} retains applied or uncertain SSH-native checkpoints; use ssh_workspace checkpoint/undo for its exact receipts before a file rewind. No local file was restored",
+                        rook_store::format_session_id(owner)
+                    )));
+                }
                 for event in events.into_iter().filter(|e| e.record.kind == EventKind::Checkpoint) {
                     let order = self
                         .store

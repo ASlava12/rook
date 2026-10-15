@@ -63,6 +63,11 @@ impl Tool for RunCommand {
         if let Some(environment) = &ctx.execution
             && !environment.settings.local()
         {
+            if environment.settings.native_workspace {
+                return Ok(ToolOutcome::error(
+                    "native SSH workspaces use ssh_workspace; replica execution is disabled for this profile",
+                ));
+            }
             if ctx.terminals.is_some() || ctx.files.is_some() {
                 return Ok(ToolOutcome::error(
                     "configured execution cannot override an editor's file/terminal authority",

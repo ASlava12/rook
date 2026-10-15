@@ -5,6 +5,8 @@ use serde_json::{Value, json};
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
     Inspect,
+    NativeInspect { id: Option<String> },
+    NativeUndo { id: String },
     PrepareRelease,
     PrepareRecover,
     PrepareStop,

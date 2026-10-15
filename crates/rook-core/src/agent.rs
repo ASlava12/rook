@@ -111,6 +111,9 @@ pub fn jobs_for(config: &Config) -> std::sync::Arc<rook_tools::jobs::Jobs> {
 /// dropped at the end of a turn takes its running servers with it, and
 /// rust-analyzer spends seconds indexing the workspace every time it starts.
 pub fn servers_for(config: &Config, workspace: &Path) -> std::sync::Arc<crate::lsp::Servers> {
+    if config.execution_environment.native_workspace {
+        return crate::lsp::Servers::new(Vec::new(), workspace);
+    }
     crate::lsp::Servers::new(crate::lsp::for_workspace(config, workspace), workspace)
 }
 
@@ -689,6 +692,7 @@ impl<'a> AgentLoop<'a> {
 
     pub fn new(rook: &'a Rook, provider: std::sync::Arc<dyn Provider>, session: u128) -> Self {
         let mut tool_ctx = tool_context(&rook.config, &rook.workspace, &rook.output_dir);
+        tool_ctx.session = Some(session);
 
         // No language servers until a front end hands them over with `equip`.
         // A loop is rebuilt for every turn, so a pool built here is rebuilt with
@@ -697,6 +701,21 @@ impl<'a> AgentLoop<'a> {
         // Rust in it was offered rust-analyzer for exactly this reason.
         let servers = crate::lsp::Servers::new(Vec::new(), &rook.workspace);
         let mut tools = ToolBox::standard();
+        if rook.config.execution_environment.native_workspace {
+            tools = tools.without(&[
+                "read_file",
+                "write_file",
+                "edit_file",
+                "delete_file",
+                "move_file",
+                "list_dir",
+                "search",
+                "run_command",
+                "crate_api",
+                "read_pdf",
+            ]);
+            tools.register(std::sync::Arc::new(rook_tools::environments::native::NativeWorkspace));
+        }
         crate::browser::register(&mut tools, rook, session);
         // Registered rather than gated at the call: a tool the agent is never
         // shown is one it cannot decide to try, and off is the default because

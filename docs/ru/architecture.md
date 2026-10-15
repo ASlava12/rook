@@ -1,5 +1,7 @@
 # Архитектура
 
+Режим прямой работы с файлами по SSH: [настройка и границы отката](../ssh-native-workspaces.md).
+
 [English](../architecture.md) · [Русский](architecture.md)
 
 ## Общая форма

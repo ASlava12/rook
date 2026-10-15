@@ -207,6 +207,8 @@ pub struct Ran {
 #[derive(Clone)]
 pub struct ToolContext {
     pub documents: pdf::Settings,
+    pub session: Option<u128>,
+    pub read_only: bool,
     pub workspace: PathBuf,
     pub trace: Option<rook_llm::TraceContext>,
     pub propagate_trace: bool,
@@ -375,6 +377,8 @@ impl ToolContext {
     pub fn new(workspace: PathBuf) -> Self {
         Self {
             documents: Default::default(),
+            session: None,
+            read_only: false,
             isolation: isolate::Isolation::for_workspace(&workspace),
             isolate: isolate::Mode::Off,
             workspace,
@@ -693,6 +697,22 @@ impl ToolBox {
     }
 
     pub async fn call(&self, ctx: &ToolContext, name: &str, args: &serde_json::Value) -> Result<ToolOutcome> {
+        if ctx.execution.as_ref().is_some_and(|e| e.settings.native_workspace)
+            && [
+                "read_file",
+                "write_file",
+                "edit_file",
+                "delete_file",
+                "move_file",
+                "list_dir",
+                "search",
+                "crate_api",
+                "read_pdf",
+            ]
+            .contains(&name)
+        {
+            return Err(ToolError::Denied("selected SSH-native workspace has remote filesystem authority; use ssh_workspace instead of local file tools".into()));
+        }
         let tool = self
             .get(name)
             .ok_or_else(|| ToolError::Unknown { name: name.to_string(), nearest: self.nearest(name) })?;

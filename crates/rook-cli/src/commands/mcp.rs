@@ -34,6 +34,7 @@ pub(crate) fn cmd_mcp(workspace: Option<PathBuf>, cmd: McpCmd, json: bool) -> Re
         // it, which is exactly when somebody wants both.
         if let McpCmd::Serve { yes } = cmd {
             let config = rook_core::Config::load()?;
+            anyhow::ensure!(!config.execution_environment.native_workspace,"SSH-native workspaces need an owning Rook session; use run, TUI or the daemon rather than standalone mcp serve");
             let here = workspace
                 .clone()
                 .or_else(|| std::env::current_dir().ok())

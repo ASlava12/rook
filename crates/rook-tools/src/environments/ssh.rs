@@ -565,6 +565,9 @@ impl Resource {
             ));
         }
         match request {
+            Request::NativeInspect { .. } | Request::NativeUndo { .. } => {
+                Err(invalid("native receipt controls cannot manage a replica"))
+            }
             Request::Inspect => Ok(view),
             Request::PrepareRelease => {
                 if view["busy"] == true || view["foreign_owner_active"] == true {
