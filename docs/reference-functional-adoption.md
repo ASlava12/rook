@@ -2,9 +2,9 @@
 
 ## Second adoption scope — 2026-10-15
 
-The user requested every candidate from the October 15 review. The whole scope
-remains active until each row is implemented and verified, except cache changes
-which require measured benefit before adoption. ACP v2 remains a draft watch
+The user requested every candidate from the October 15 review. All eight candidates have now been implemented and verified or evaluated. Seven
+capabilities are delivered; the cache experiment did not establish a useful
+improvement, so no cache/effort parameter change was adopted. ACP v2 remains a draft watch
 item, as recommended in the review, not a replacement of the working v1 adapter.
 Starting commit: `9cab33f`; refreshed reference gitlinks and the resource/input
 baseline were saved in local commit `65b4f40`. Their snapshot table is in
@@ -17,9 +17,9 @@ baseline were saved in local commit `65b4f40`. Their snapshot table is in
 | Private secret requests | Private conversation-bound collection, only name/status returned; decline, dismissal, no answer, timeout, disconnect and replay are ordinary states; no value in model/history/compaction | Verified |
 | MCP elicitation | Server-initiated form/URL requests, exact connection/call identity and common user interfaces; explicit refusal, timeout, cancellation and concurrent ID collisions | Verified |
 | PDF documents | Bounded local extraction with selected pages and page provenance; ordinary text-only local model; optional scan rendering/OCR with explicit partial notices; actual document/frontend checks | Verified |
-| Remote workspace files | Explicit SSH-native read/edit/search/list and execution, remote path identity, bounded transfers, checkpoint/undo and disconnect ownership; preserve existing replica mode | In progress |
+| Remote workspace files | Explicit SSH-native read/edit/search/list and execution, remote path identity, bounded transfers, checkpoint/undo and disconnect ownership; preserve existing replica mode | Verified; Unix client, Linux foreground execution |
 | Prompt cache experiment | Supported dialect identity and effort changes; compare cache hits, first-token latency and cost on equal tasks; adopt only measured improvement | Verified; no change adopted |
-| Domain network policy | Opt-in domain rules and attributable decisions, enforced with OS containment on supported platforms; direct-bypass and allowed LAN/registry checks; explicit unsupported behavior | Verification in progress |
+| Domain network policy | Opt-in domain rules and attributable decisions, enforced with OS containment on supported platforms; direct-bypass and allowed LAN/registry checks; explicit unsupported behavior | Verified; macOS Seatbelt, other platforms refuse |
 
 User clarification: a person may choose not to answer a question or provide a
 secret. Absence of an answer is never consent. A declined or expired request must
@@ -30,25 +30,34 @@ the concrete missing prerequisite. Tests must exercise these real control paths.
 This section is the current work tracker. The older evidence below describes
 the previous fourteen-item scope; it cannot prove these additions complete.
 
-Current verification snapshot: the complete resources/private-input/correlation/
-elicitation/PDF tree passes `cargo xtask ci` in the main checkout
-(`/tmp/rook-adoption-mcp-pdf-ci-final.log`, exit 0, `RUST_TEST_THREADS=4`). The
-first integrated gate found the explicit checker admission list missing PDF;
-that list now admits the bounded read-only decoder, and the full rerun is green.
-Native CLI/local TUI/daemon TUI form acceptance and refusal pass; stdio/HTTP
-ownership, colliding IDs, duplicate/flood refusal and cancellation pass. PDF
-source/page hashing, continuation, scan/render/local OCR and native CLI/daemon
-text-only model checks pass (`/tmp/rook-pdf-native-final.log`,
-`/tmp/rook-pdf-cli-native-final.log`). The optional Poppler/tesseract tests were
-run explicitly with installed local tools. The deployed Qwen cache experiment
-found no useful improvement, so no caching or effort parameter is adopted; see
-[the observations and limits](research/prompt-cache-20261015.md). SSH-native implementation is saved in local commit `3daa84b`; actual Linux SSH
-execution/disconnect/undo and native CLI/daemon authority/recovery checks pass.
-Its full gate is running in the frozen native worktree. Domain policy now has
-native Seatbelt allowed LAN/registry, direct TCP/UDP/--noproxy denial,
-framing/capacity/cancellation/one-way traffic and CLI/daemon durable-receipt
-checks. Final combined regression verification remains pending. No installed
-daemon was restarted.
+Current verification snapshot: the integrated eight-candidate implementation
+passes `cargo xtask ci` in the main checkout (`/tmp/rook-reference-all-eight-ci.log`,
+exit 0, `RUST_TEST_THREADS=4`, `ci: ok`). This includes the corrected process-launch
+source audit; the earlier native-only gate failed that audit and is not counted
+as green. Existing resources/private-input/correlation/elicitation/PDF checks
+also have the earlier green integrated gate in
+`/tmp/rook-adoption-mcp-pdf-ci-final.log`.
+
+Actual Linux SSH execution, secret-output redaction, disconnect cleanup and
+owned undo passed in `/tmp/rook-native-live-all.log`; native CLI/daemon file
+authority and offline recovery passed in `/tmp/rook-native-cli-engine.log` and
+the integrated gate. Browser checkpoint inspection/explicit undo passed in
+`/tmp/rook-native-web-final.log`; the updated embedded assets were rebuilt and
+checked in `/tmp/rook-native-web-embedded-tests.log`. Native domain allowed LAN
+and registry access, forbidden destinations and direct TCP/UDP/--noproxy denial
+passed in `/tmp/rook-domain-live-tests.log`; CLI/daemon durable decisions passed
+in `/tmp/rook-domain-cli-test.log` and the integrated gate.
+
+The final reached-transfer-cap regression exposed a missing stop-reason audit
+entry; forwarding already stopped at its ceiling. That diagnostic entry is now
+recorded, and the complete broker suite passes in
+`/tmp/rook-domain-final-broker-tests.log`. Workspace Clippy and frontend builds
+passed again in `/tmp/rook-reference-all-eight-ci-final.log`. Its redundant full
+test repeat was intentionally stopped after the earlier complete gate and these
+focused final checks; exit 130 is not counted as another green full gate.
+The deployed Qwen cache experiment found no useful improvement; see
+[observations and limits](research/prompt-cache-20261015.md). No installed daemon
+was restarted, and nothing in this batch was pushed or released.
 
 Elicitation implementation constraints: route server requests before responses
 so a server request ID cannot consume a client response waiter; support integer
