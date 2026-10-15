@@ -14,6 +14,8 @@
 
 pub mod attempt;
 pub use attempt::{Attempt, AttemptFacts, AttemptObserver, AttemptStatus};
+mod trace;
+pub use trace::{RequestTrace, TraceContext, valid_request_id};
 //
 // Indexing a `&str` by a computed byte panics when the byte is inside a
 // character, and under `panic = "abort"` that is the whole process. One did:

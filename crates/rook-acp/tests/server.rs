@@ -134,6 +134,28 @@ async fn a_new_session_comes_back_as_an_id_the_other_methods_accept() {
 }
 
 #[tokio::test]
+async fn session_correlation_is_stable_on_load_and_propagates_only_when_configured() {
+    for enabled in [false, true] {
+        let mut config = Config::default();
+        config.telemetry.propagate_trace = enabled;
+        let mut editor = Editor::start_with(config, |_| {});
+        let created = editor.call(1, "session/new", serde_json::json!({"cwd":"."})).await;
+        let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+        let session = rook_store::parse_session_id(&id).unwrap();
+        let trace = editor.rook.session_trace(session).unwrap().unwrap();
+        let loaded = editor.call(2, "session/load", serde_json::json!({"sessionId":id})).await;
+        if enabled {
+            assert_eq!(created["result"]["_meta"]["traceparent"], trace.traceparent().unwrap());
+            assert_eq!(loaded["result"]["_meta"]["traceparent"], created["result"]["_meta"]["traceparent"]);
+        } else {
+            assert!(created["result"].get("_meta").is_none());
+            assert!(loaded["result"]["_meta"].get("traceparent").is_none());
+        }
+        editor.serve.abort();
+    }
+}
+
+#[tokio::test]
 async fn loading_a_session_that_does_not_exist_is_an_error_not_a_new_one() {
     let mut editor = Editor::start();
     let reply = editor

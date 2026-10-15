@@ -448,13 +448,16 @@ impl OpenAiCompatible {
         if let Some(key) = &self.config.api_key {
             req = req.bearer_auth(key);
         }
+        let req = request.trace.apply(req);
         let bytes = request.prompt_bytes();
         let patience = crate::first_token_patience(self.config.stream_idle_timeout, bytes);
         let base = self.config.base_url.clone();
-        crate::once_it_answers(patience, bytes, async move {
+        let response = crate::once_it_answers(patience, bytes, async move {
             req.send().await.map_err(|e| LlmError::unreachable(&base, e))
         })
-        .await
+        .await?;
+        request.trace.response(response.headers(), self.config.api_key.as_deref());
+        Ok(response)
     }
 }
 

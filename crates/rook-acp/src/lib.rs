@@ -454,6 +454,9 @@ where
                             if let Some(shared) = &shared { shared.policy.set_stance(mode); }
                             let mut result = serde_json::json!({"modes":protocol::modes(mode),"configOptions":protocol::config_options(mode,effort)});
                             if method == "session/new" { result["sessionId"] = rook_store::format_session_id(session).into(); }
+                            if built.config.telemetry.propagate_trace && let Some(trace) = built.session_trace(session).map_err(|error| protocol::Error::internal(error.to_string()))? {
+                                result["_meta"] = serde_json::json!({"traceparent":trace.traceparent()});
+                            }
                             Ok((result, built, session))
                         }.await;
                         match outcome {

@@ -585,6 +585,7 @@ mod tests {
             usage_reported: true,
             completion_confirmed: true,
             reported_model: Some("server-version".into()),
+            ..Default::default()
         };
         let frozen = prices.estimate(Some(&dispatch), &facts).unwrap();
         assert!((frozen.estimated_usd - 0.000123).abs() < 1e-15);

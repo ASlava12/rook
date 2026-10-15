@@ -22,6 +22,7 @@ pub struct AttemptFacts {
     pub usage_reported: bool,
     pub completion_confirmed: bool,
     pub reported_model: Option<String>,
+    pub provider_request_ids: std::collections::BTreeMap<String, String>,
 }
 
 /// The host persists admission before any generation request is sent.
@@ -33,6 +34,9 @@ pub trait AttemptObserver: Send + Sync {
 }
 
 pub trait Attempt: Send {
+    fn trace_context(&self) -> Option<(crate::TraceContext, bool)> {
+        None
+    }
     fn finish(&mut self, status: AttemptStatus, facts: &AttemptFacts) -> Result<()>;
 }
 
@@ -40,18 +44,18 @@ struct Guard {
     sink: Option<Box<dyn Attempt>>,
     facts: AttemptFacts,
     metadata_seen: bool,
+    trace: crate::RequestTrace,
 }
 
 impl Guard {
     fn new(observer: &dyn AttemptObserver, dispatch: Option<&Dispatch>) -> Result<Self> {
-        Ok(Self {
-            sink: Some(observer.start(dispatch)?),
-            facts: AttemptFacts::default(),
-            metadata_seen: false,
-        })
+        let sink = observer.start(dispatch)?;
+        let trace = crate::RequestTrace::new(sink.trace_context());
+        Ok(Self { sink: Some(sink), facts: AttemptFacts::default(), metadata_seen: false, trace })
     }
 
     fn finish(&mut self, status: AttemptStatus) -> Result<()> {
+        self.facts.provider_request_ids = self.trace.request_ids();
         match self.sink.take() {
             Some(mut sink) => sink.finish(status, &self.facts),
             None => Ok(()),
@@ -93,11 +97,12 @@ fn name(value: &str) -> Option<String> {
 
 pub(crate) async fn complete<P: Provider + ?Sized>(
     provider: &P,
-    request: Request,
+    mut request: Request,
     observer: Arc<dyn AttemptObserver>,
 ) -> Result<Completion> {
     let dispatch = provider.dispatch_identity();
     let mut guard = Guard::new(observer.as_ref(), dispatch.as_ref())?;
+    request.trace = guard.trace.clone();
     match provider.complete_with_metadata(request).await {
         Ok(completed) => {
             guard.facts = AttemptFacts {
@@ -105,6 +110,7 @@ pub(crate) async fn complete<P: Provider + ?Sized>(
                 usage_reported: completed.usage_reported,
                 completion_confirmed: completed.completion_confirmed,
                 reported_model: name(&completed.response.model),
+                provider_request_ids: Default::default(),
             };
             guard.finish(if completed.completion_confirmed {
                 AttemptStatus::Completed
@@ -122,11 +128,12 @@ pub(crate) async fn complete<P: Provider + ?Sized>(
 
 pub(crate) async fn stream<P: Provider + ?Sized>(
     provider: &P,
-    request: Request,
+    mut request: Request,
     observer: Arc<dyn AttemptObserver>,
 ) -> Result<ResponseStream> {
     let dispatch = provider.dispatch_identity();
     let mut guard = Guard::new(observer.as_ref(), dispatch.as_ref())?;
+    request.trace = guard.trace.clone();
     match provider.stream(request).await {
         Ok(stream) => Ok(Box::pin(Observed { stream, guard, ended: false })),
         Err(error) => {

@@ -41,6 +41,20 @@ by the person, with their own tool.
 browser, not the TUI. There is no `show`. This is the property everything else
 rests on, and it is worth more than the convenience of a `show`.
 
+**Missing secrets may be requested privately.** `request_secret` accepts only
+name/reason. A distinct metadata-only chat event opens a dedicated input field;
+values use an owner/nonce-bound write-only HTTP route or a direct private sink
+in standalone terminals. They never use ordinary question answers, composer
+drafts, prompt history, or replay. Browsers discard private edits on disconnect.
+The bounded receipt contains only request identity and status. Decline, skip,
+expiry, cancellation and unavailable input suppress another request for that
+name in the same turn or managed generation. Late/duplicate responses cannot
+admit a save, and a newer credential is never silently overwritten. An admitted
+save may finish after its observer disconnects; an uncertain outcome is not
+replayed. The turn imports a saved credential and registers redaction before
+the next command. ACP has no private-input mapping and does not advertise the
+tool. No input from an absent person is interpreted as consent.
+
 **Redaction happens at the one place a tool's answer becomes context.** Every
 value the vault has handed out this turn is taken back out of what a command
 printed, a page said, a file held or an MCP server answered — one rule, one

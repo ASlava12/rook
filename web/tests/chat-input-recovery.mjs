@@ -11,7 +11,7 @@ class Node {
  get isConnected(){return this===stream||!!this.parent?.isConnected;}
  get childElementCount(){return this.children.length;}
  all(){return this.children.flatMap(c=>[c,...c.all()]);}
- querySelectorAll(selector){return this.all().filter(c=>selector==='input, button'?['input','button'].includes(c.tag):selector==='[data-input-key]'?!!c.dataset.inputKey:selector==='.approve, .ask-form'?['approve','ask-form'].includes(c.className):false);}
+ querySelectorAll(selector){return this.all().filter(c=>selector==='input, button'?['input','button'].includes(c.tag):selector==='input'?c.tag==='input':selector==='input[type="password"]'?c.tag==='input'&&c.type==='password':selector==='.private-input-form'?c.className==='private-input-form':selector==='[data-input-key]'?!!c.dataset.inputKey:selector==='.approve, .ask-form'?['approve','ask-form'].includes(c.className):false);}
 }
 const stream=new Node('div');const reconnect=new Node('button');reconnect.hidden=true;
 const widget=new Node('div');
@@ -30,6 +30,35 @@ const {connect}=await import('../dist/chat.js');
 const question=(id,text='Extension form · request one')=>({type:'ask',id,questions:[{question:text,choices:[],multi:false}]});
 const form=()=>stream.all().find(n=>n.className==='ask-form');
 const snapshot=ids=>({type:'snapshot',session:'session',running:true,truncated:false,approvals:[],questions:ids});
+const secret=id=>({type:'secret_request',prompt:{id,session:'session',name:'deploy',reason:'Authenticate deployment'}});
+const privateForm=()=>stream.all().find(n=>n.className==='private-input-form');
+const posted=[];
+globalThis.fetch=async(path,options)=>{posted.push({path,body:JSON.parse(options.body)});return {ok:true,json:async()=>({status:posted.at(-1).body.status})};};
+
+test('private input discards its value on disconnect and never restores it as a draft',()=>{
+ const socket=connect();socket.receive(snapshot([]));socket.receive(secret('private-one'));
+ const original=privateForm(),input=original.all().find(n=>n.tag==='input');
+ assert.equal(input.type,'password');input.value='PRIVATE_VALUE_NOT_A_DRAFT';
+ socket.disconnect();assert.equal(input.value,'');assert.equal(privateForm(),undefined);
+ const next=connect();next.receive(snapshot(['private-one']));next.receive(secret('private-one'));
+ assert.notEqual(privateForm(),original);assert.equal(privateForm().all().find(n=>n.tag==='input').value,'');
+ next.receive({type:'inputs',approvals:[],questions:[]});assert.equal(privateForm(),undefined);
+ assert(!stream.textContent.includes('PRIVATE_VALUE_NOT_A_DRAFT'));
+});
+
+test('private save uses only the correlated HTTP endpoint and refusal carries no value',async()=>{
+ const socket=connect();socket.receive(snapshot([]));socket.receive(secret('private-save'));
+ let form=privateForm(),input=form.all().find(n=>n.tag==='input');input.value='PRIVATE_ONLY_28';
+ form.listeners.submit({preventDefault(){}});await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(input.value,'');assert.equal(posted.at(-1).path,'/api/sessions/session/private-input/private-save');
+ assert.deepEqual(posted.at(-1).body,{status:'saved',value:'PRIVATE_ONLY_28'});
+ assert(!stream.textContent.includes('PRIVATE_ONLY_28'));
+ socket.receive(secret('private-decline'));form=privateForm();input=form.all().find(n=>n.tag==='input');input.value='NEVER_SEND_ON_REFUSAL';
+ form.all().find(n=>n.tag==='button'&&n.textContent==='Decline').listeners.click();
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(input.value,'');assert.deepEqual(posted.at(-1).body,{status:'declined'});
+ assert(!stream.textContent.includes('NEVER_SEND_ON_REFUSAL'));
+});
 
 test('disconnect disables and retains draft until the same request is authoritatively recovered',()=>{
  const socket=connect();socket.receive(question('same'));

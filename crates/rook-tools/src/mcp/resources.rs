@@ -188,7 +188,11 @@ impl Resources {
             Some(Value::String(value)) => Some(value.as_str()),
             _ => return Err(invalid(self.name(), "cursor must be an opaque string from discovery")),
         };
-        let page = match server.resource_page(templates, cursor).await {
+        let page = match ctx.trace.as_ref().filter(|_| ctx.propagate_trace) {
+            Some(trace) => server.resource_page_traced(templates, cursor, trace).await,
+            None => server.resource_page(templates, cursor).await,
+        };
+        let page = match page {
             Ok(page) => page,
             Err(error) => return Ok(ToolOutcome::error(error.to_string()).with("server", server.name())),
         };
@@ -245,7 +249,11 @@ impl Resources {
         let uri =
             args.get("uri").and_then(Value::as_str).ok_or_else(|| invalid(self.name(), "uri is required"))?;
         let index = number(args, "content").map_err(|why| invalid(self.name(), why))?;
-        let result = match server.read_resource(uri).await {
+        let result = match ctx.trace.as_ref().filter(|_| ctx.propagate_trace) {
+            Some(trace) => server.read_resource_traced(uri, trace).await,
+            None => server.read_resource(uri).await,
+        };
+        let result = match result {
             Ok(result) => result,
             Err(error) => return Ok(ToolOutcome::error(error.to_string()).with("server", server.name())),
         };

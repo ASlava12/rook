@@ -418,8 +418,12 @@ impl DaemonLink {
         session: &mut Option<String>,
     ) -> bool {
         use rook_proto::ChatEvent;
+        let mut private = crate::private_input::RemoteRequests::new(&self.base, true);
         while let Some(frame) = self.events.recv().await {
             let Ok(event) = serde_json::from_str::<ChatEvent>(&frame.text) else { continue };
+            if private.observe(&event) {
+                continue;
+            }
             if let ChatEvent::Started { session: started } = &event
                 && retry.started(started)
             {

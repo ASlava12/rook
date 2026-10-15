@@ -301,6 +301,8 @@ pub struct Request {
     /// serialized request. Wire adapters use only facts for their dialect.
     #[serde(skip)]
     pub model_capabilities: crate::ModelCapabilities,
+    #[serde(skip)]
+    pub trace: crate::RequestTrace,
 }
 
 /// How long a cached prompt prefix is kept.
@@ -358,6 +360,7 @@ impl Request {
             effort: None,
             cache_ttl: CacheTtl::default(),
             model_capabilities: Default::default(),
+            trace: Default::default(),
         }
     }
 }

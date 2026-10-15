@@ -29,8 +29,13 @@ fn main() {
         let Some(id) = message.get("id").and_then(|i| i.as_u64()) else { continue };
 
         if mode.starts_with("resources") {
-            let result = resource_fixture(&mode, &message);
-            let _ = writeln!(out, "{}", serde_json::json!({"jsonrpc":"2.0","id":id,"result":result}));
+            let response = match resource_fixture(&mode, &message) {
+                Ok(result) => serde_json::json!({"jsonrpc":"2.0","id":id,"result":result}),
+                Err(error) => {
+                    serde_json::json!({"jsonrpc":"2.0","id":id,"error":{"code":-32603,"message":error.to_string()}})
+                }
+            };
+            let _ = writeln!(out, "{response}");
             let _ = out.flush();
             continue;
         }
@@ -145,24 +150,26 @@ fn main() {
     }
 }
 
-fn resource_fixture(mode: &str, request: &serde_json::Value) -> serde_json::Value {
+fn resource_fixture(mode: &str, request: &serde_json::Value) -> std::io::Result<serde_json::Value> {
     use serde_json::json;
-    match request["method"].as_str().unwrap_or_default() {
+    let result = match request["method"].as_str().unwrap_or_default() {
         "initialize" => {
             json!({"protocolVersion":"2025-06-18","serverInfo":{"name":"documents","version":"1"},"capabilities":{"resources":{}}})
         }
         "resources/list" => {
             if mode == "resources-duplicate" {
-                return json!({"resources":[{"uri":"doc:a","name":"a"},{"uri":"doc:a","name":"b"}]});
+                return Ok(json!({"resources":[{"uri":"doc:a","name":"a"},{"uri":"doc:a","name":"b"}]}));
             }
             if mode == "resources-count" {
-                return json!({"resources":(0..3).map(|n| json!({"uri":format!("doc:{n}"),"name":"x"})).collect::<Vec<_>>()});
+                return Ok(
+                    json!({"resources":(0..3).map(|n| json!({"uri":format!("doc:{n}"),"name":"x"})).collect::<Vec<_>>()}),
+                );
             }
             if mode == "resources-bytes" {
-                return json!({"resources":[{"uri":"doc:a","name":"a","description":"x".repeat(3000)}]});
+                return Ok(json!({"resources":[{"uri":"doc:a","name":"a","description":"x".repeat(3000)}]}));
             }
             if request["params"]["cursor"] == "page /+?" {
-                return json!({"resources":[]});
+                return Ok(json!({"resources":[]}));
             }
             json!({"resources":[{"uri":"doc:русский","name":"source","mimeType":"text/plain"}],"nextCursor":"page /+?"})
         }
@@ -171,31 +178,38 @@ fn resource_fixture(mode: &str, request: &serde_json::Value) -> serde_json::Valu
         }
         "resources/read" => {
             if let Ok(path) = std::env::var("MCP_MOCK_RECEIPT") {
-                std::fs::write(path, "read started").unwrap();
+                std::fs::write(path, "read started")?;
             }
             if mode == "resources-crash" {
                 use std::io::Write;
-                let mut file =
-                    std::fs::OpenOptions::new().create(true).append(true).open(died_marker()).unwrap();
-                writeln!(file, "read").unwrap();
+                let mut file = std::fs::OpenOptions::new().create(true).append(true).open(died_marker())?;
+                writeln!(file, "read")?;
                 std::process::exit(1);
             }
             if mode == "resources-hang" {
                 std::thread::sleep(std::time::Duration::from_secs(30));
             }
             if mode == "resources-bad-content" {
-                return json!({"contents":[{"uri":"doc:a","text":"one","blob":"two"}]});
+                return Ok(json!({"contents":[{"uri":"doc:a","text":"one","blob":"two"}]}));
             }
             if mode == "resources-many-contents" {
-                return json!({"contents":(0..65).map(|n| json!({"uri":format!("doc:{n}"),"text":"bounded"})).collect::<Vec<_>>()});
+                return Ok(
+                    json!({"contents":(0..65).map(|n| json!({"uri":format!("doc:{n}"),"text":"bounded"})).collect::<Vec<_>>()}),
+                );
             }
             if mode == "resources-oversized-read" {
-                return json!({"contents":[{"uri":"doc:a","text":"x".repeat(9*1024*1024)}]});
+                return Ok(json!({"contents":[{"uri":"doc:a","text":"x".repeat(9*1024*1024)}]}));
             }
             json!({"contents":[{"uri":request["params"]["uri"],"mimeType":"text/plain","text":"Данные 📚 из ресурса"}]})
         }
-        _ => panic!("resources-only fixture received an unsupported method: {request}"),
-    }
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "resources-only fixture received an unsupported method",
+            ));
+        }
+    };
+    Ok(result)
 }
 
 /// The owned external executor fixture exercises the real stdio boundary; it

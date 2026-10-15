@@ -34,12 +34,14 @@ impl Responses {
         if let Some(key) = &config.api_key {
             builder = builder.bearer_auth(key);
         }
+        let builder = request.trace.apply(builder);
         let bytes = request.prompt_bytes();
         let patience = crate::first_token_patience(config.stream_idle_timeout, bytes);
         let response = crate::once_it_answers(patience, bytes, async {
             builder.send().await.map_err(|error| LlmError::unreachable(&config.base_url, error))
         })
         .await?;
+        request.trace.response(response.headers(), config.api_key.as_deref());
         if !response.status().is_success() {
             let status = response.status().as_u16();
             let retry_after = crate::retry_after(response.headers());

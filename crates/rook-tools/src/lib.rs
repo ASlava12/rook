@@ -21,6 +21,7 @@ pub mod jobs;
 pub mod mcp;
 pub mod pending;
 pub mod policy;
+pub mod private_input;
 pub mod search;
 pub mod web;
 
@@ -205,6 +206,8 @@ pub struct Ran {
 #[derive(Clone)]
 pub struct ToolContext {
     pub workspace: PathBuf,
+    pub trace: Option<rook_llm::TraceContext>,
+    pub propagate_trace: bool,
     /// True in a sub-agent. Branch-changing commands remain forbidden even
     /// in an isolated worktree; changes are reviewed and transferred by its parent.
     pub delegated: bool,
@@ -372,6 +375,8 @@ impl ToolContext {
             isolate: isolate::Mode::Off,
             workspace,
             delegated: false,
+            trace: None,
+            propagate_trace: false,
             max_output_bytes: 256 * 1024,
             command_timeout: std::time::Duration::from_secs(120),
             require_command_cleanup: false,

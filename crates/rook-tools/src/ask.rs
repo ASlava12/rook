@@ -87,6 +87,17 @@ impl Question {
 #[async_trait]
 pub trait Asker: Send + Sync {
     async fn ask(&self, questions: &[Question]) -> Vec<Answer>;
+    fn supports_private_input(&self) -> bool {
+        false
+    }
+    async fn request_secret(
+        &self,
+        _prompt: rook_proto::SecretPrompt,
+        sink: Arc<dyn crate::private_input::SecretSink>,
+    ) -> rook_proto::SecretStatus {
+        sink.close();
+        rook_proto::SecretStatus::Unavailable
+    }
 }
 
 /// Registered only when a front end can actually reach a person, so an
@@ -255,7 +266,10 @@ pub struct AskRequest {
 
 /// Hands the questions to whatever is driving the UI and waits for the answers
 /// to come back by id. Used by every front end that has one.
-pub struct ChannelAsker(crate::pending::Pending<AskRequest, Vec<Vec<String>>>);
+pub struct ChannelAsker(
+    crate::pending::Pending<AskRequest, Vec<Vec<String>>>,
+    Option<Arc<crate::private_input::PrivateInput>>,
+);
 
 impl ChannelAsker {
     pub fn changes(&self) -> tokio::sync::watch::Receiver<u64> {
@@ -272,12 +286,21 @@ impl ChannelAsker {
         patience: std::time::Duration,
         limits: crate::pending::Limits,
     ) -> Self {
-        Self(crate::pending::Pending::new(requests, patience, limits))
+        Self(crate::pending::Pending::new(requests, patience, limits), None)
+    }
+
+    pub fn with_private_input(mut self, input: Arc<crate::private_input::PrivateInput>) -> Self {
+        self.1 = Some(input);
+        self
+    }
+
+    pub fn private_input(&self) -> Option<&Arc<crate::private_input::PrivateInput>> {
+        self.1.as_ref()
     }
 
     /// Whether a live request still needs a person's answer.
     pub fn is_waiting(&self) -> bool {
-        self.0.is_waiting()
+        self.0.is_waiting() || self.1.as_ref().is_some_and(|input| input.is_waiting())
     }
 
     /// One entry per question, in the order they were asked; an empty one is a
@@ -291,6 +314,22 @@ impl ChannelAsker {
 
 #[async_trait]
 impl Asker for ChannelAsker {
+    fn supports_private_input(&self) -> bool {
+        self.1.is_some()
+    }
+    async fn request_secret(
+        &self,
+        prompt: rook_proto::SecretPrompt,
+        sink: Arc<dyn crate::private_input::SecretSink>,
+    ) -> rook_proto::SecretStatus {
+        match &self.1 {
+            Some(input) => input.request(prompt, sink).await,
+            None => {
+                sink.close();
+                rook_proto::SecretStatus::Unavailable
+            }
+        }
+    }
     async fn ask(&self, questions: &[Question]) -> Vec<Answer> {
         let request = |id| AskRequest { id, questions: questions.to_vec() };
         // Preserve absence, never a selected default. The result explains which

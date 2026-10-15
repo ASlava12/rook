@@ -126,13 +126,16 @@ impl Anthropic {
     async fn send(&self, request: &Request, stream: bool) -> Result<reqwest::Response> {
         let body = wire_request(&self.model, request, stream);
         let req = self.authorized(self.http.post(self.endpoint("v1/messages")).json(&body));
+        let req = request.trace.apply(req);
         let bytes = request.prompt_bytes();
         let patience = crate::first_token_patience(self.config.stream_idle_timeout, bytes);
         let base = self.config.base_url.clone();
-        crate::once_it_answers(patience, bytes, async move {
+        let response = crate::once_it_answers(patience, bytes, async move {
             req.send().await.map_err(|e| LlmError::unreachable(&base, e))
         })
-        .await
+        .await?;
+        request.trace.response(response.headers(), Some(&self.config.api_key));
+        Ok(response)
     }
 }
 

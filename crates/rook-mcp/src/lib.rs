@@ -81,6 +81,13 @@ fn challenged(offered: &[String]) -> String {
     }
 }
 
+fn trace_params(mut params: serde_json::Value, trace: &rook_llm::TraceContext) -> serde_json::Value {
+    if let Some(parent) = trace.traceparent() {
+        params["_meta"] = serde_json::json!({"traceparent":parent});
+    }
+    params
+}
+
 /// A failing subprocess explains itself on stderr and nowhere else — the
 /// protocol reports only that the pipe closed — so what it said is carried into
 /// the error rather than left in a debug log nobody has enabled. Empty for a
@@ -309,6 +316,19 @@ impl Server {
 
     pub async fn call_tool(&self, tool: &str, arguments: &serde_json::Value) -> Result<ToolResult> {
         self.request("tools/call", Some(serde_json::json!({ "name": tool, "arguments": arguments }))).await
+    }
+
+    pub async fn call_tool_traced(
+        &self,
+        tool: &str,
+        arguments: &serde_json::Value,
+        trace: &rook_llm::TraceContext,
+    ) -> Result<ToolResult> {
+        self.request(
+            "tools/call",
+            Some(trace_params(serde_json::json!({"name":tool,"arguments":arguments}), trace)),
+        )
+        .await
     }
 
     pub async fn shutdown(&self) {

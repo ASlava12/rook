@@ -2928,6 +2928,7 @@ fn diagnostics_export_works_locally_and_through_the_daemon_without_overwriting_f
     }
     let local = rook.json(&["session", "diagnostics", &name]);
     assert_eq!(local["session"]["id"], name);
+    assert_eq!(local["session"]["trace"]["trace_id"], format!("{id:032x}"));
     assert!(!local.to_string().contains("private-prompt"));
     assert!(!local.to_string().contains("private-title"));
     let _daemon = Daemon::start(&rook);

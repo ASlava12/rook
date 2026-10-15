@@ -269,3 +269,138 @@ fn a_value_from_another_source_is_cleaned_the_same_way() {
 
     assert_eq!(handed, "value-with-a-newline", "the newline is not part of the value");
 }
+
+struct PrivatePerson {
+    outcome: rook_proto::SecretStatus,
+    requests: std::sync::atomic::AtomicUsize,
+}
+#[async_trait]
+impl rook_tools::ask::Asker for PrivatePerson {
+    async fn ask(&self, _: &[rook_tools::ask::Question]) -> Vec<rook_tools::ask::Answer> {
+        panic!("private values must never use ordinary questions");
+    }
+    fn supports_private_input(&self) -> bool {
+        true
+    }
+    async fn request_secret(
+        &self,
+        prompt: rook_proto::SecretPrompt,
+        sink: Arc<dyn rook_tools::private_input::SecretSink>,
+    ) -> rook_proto::SecretStatus {
+        self.requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        assert!(!serde_json::to_string(&prompt).unwrap().contains(PASSWORD));
+        match self.outcome {
+            rook_proto::SecretStatus::Saved => sink.save(PASSWORD),
+            status => status,
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_privately_requested_secret_is_usable_in_the_same_turn_and_redacted_everywhere() {
+    let (_w, rook) = fixture("private-saved");
+    let session = rook.start_session("request a missing credential").unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let echo = if cfg!(windows) {
+        "echo %ROOK_SECRET_PRIVATE_SAVED%"
+    } else {
+        "printf '%s' \"$ROOK_SECRET_PRIVATE_SAVED\""
+    };
+    let provider = Arc::new(Scripted(
+        Mutex::new(vec![
+            call(
+                "request_secret",
+                serde_json::json!({"name":"private_saved","reason":"Authenticate the requested command"}),
+            ),
+            call("run_command", serde_json::json!({"command":echo,"secrets":["private_saved"]})),
+            reply("done"),
+        ]),
+        seen.clone(),
+    ));
+    let person =
+        Arc::new(PrivatePerson { outcome: rook_proto::SecretStatus::Saved, requests: Default::default() });
+    let mut agent = AgentLoop::new(&rook, provider, session);
+    agent.ask_via(person.clone());
+    agent.run("Use a missing named credential, requesting it privately").await.unwrap();
+    assert_eq!(person.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let handed: String =
+        seen.lock().unwrap().iter().flat_map(|r| r.messages.clone()).map(|m| m.content).collect();
+    assert!(handed.contains("saved") && handed.contains("${secret}"), "{handed}");
+    assert!(!handed.contains(PASSWORD));
+    let logged: String =
+        rook.transcript(session, 0, 200, 8000).unwrap().iter().map(|e| e.body.clone()).collect();
+    assert!(!logged.contains(PASSWORD));
+    let receipt = rook
+        .store
+        .kv_get(&format!("private-input/{}", rook_store::format_session_id(session)))
+        .unwrap()
+        .unwrap();
+    let receipt = String::from_utf8(receipt).unwrap();
+    assert!(receipt.contains("saved"));
+    assert!(!receipt.contains(PASSWORD));
+    assert_eq!(rook_tools::Secrets::value(&Vault::load().unwrap(), "private_saved").unwrap(), PASSWORD);
+}
+
+#[tokio::test]
+async fn refusal_and_no_answer_are_final_for_the_ongoing_request_without_retrying_the_person() {
+    use rook_proto::SecretStatus;
+    for status in [
+        SecretStatus::Declined,
+        SecretStatus::Skipped,
+        SecretStatus::Expired,
+        SecretStatus::Cancelled,
+        SecretStatus::Unavailable,
+    ] {
+        let label = serde_json::to_value(status).unwrap().as_str().unwrap().to_owned();
+        let (_w, rook) = fixture(&format!("private-{label}"));
+        let session = rook.start_session("respect refusal").unwrap();
+        let name = format!("private_{label}");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let ask = || {
+            call(
+                "request_secret",
+                serde_json::json!({"name":name,"reason":"Only needed for an optional authenticated check"}),
+            )
+        };
+        let provider = Arc::new(Scripted(
+            Mutex::new(vec![ask(), ask(), reply("Continue independent work")]),
+            seen.clone(),
+        ));
+        let person = Arc::new(PrivatePerson { outcome: status, requests: Default::default() });
+        let mut agent = AgentLoop::new(&rook, provider, session);
+        agent.ask_via(person.clone());
+        agent.run("Do the work; I may not supply credentials").await.unwrap();
+        assert_eq!(
+            person.requests.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "{label} must not ask again"
+        );
+        let handed: String =
+            seen.lock().unwrap().iter().flat_map(|r| r.messages.clone()).map(|m| m.content).collect();
+        assert!(handed.contains(&label));
+        assert!(!Vault::load().unwrap().named().iter().any(|s| s.name == name));
+        let receipt = rook
+            .store
+            .kv_get(&format!("private-input/{}", rook_store::format_session_id(session)))
+            .unwrap()
+            .unwrap();
+        assert!(String::from_utf8(receipt).unwrap().contains(&label));
+    }
+}
+
+#[test]
+fn stale_vault_snapshots_preserve_other_saved_credentials_and_parse_errors_are_private() {
+    let (dir, mut a) = alone();
+    let path = dir.path().join("secrets.toml");
+    let mut b = Vault::load_from(path.clone()).unwrap();
+    a.keep("one", "first").unwrap();
+    b.keep("two", "second").unwrap();
+    a.forget("one").unwrap();
+    assert_eq!(
+        Vault::load_from(path.clone()).unwrap().named().iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
+        ["two"]
+    );
+    std::fs::write(&path, format!("invalid secret {PASSWORD} = [")).unwrap();
+    let error = Vault::load_from(path).err().unwrap().to_string();
+    assert!(!error.contains(PASSWORD), "parse errors must not quote file content");
+}

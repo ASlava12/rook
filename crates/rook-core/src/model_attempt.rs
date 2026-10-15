@@ -34,6 +34,10 @@ pub(crate) struct Record {
     pub elapsed_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<crate::model_route::Cost>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<rook_llm::TraceContext>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub provider_request_ids: std::collections::BTreeMap<String, String>,
 }
 
 impl Record {
@@ -55,6 +59,17 @@ impl Record {
             ));
         }
         let record: Self = serde_json::from_slice(bytes)?;
+        if record.trace.as_ref().is_some_and(|t| {
+            rook_llm::TraceContext::bounded(&t.trace_id, &t.span_id, t.parent_span_id.as_deref()).is_none()
+        }) || record.provider_request_ids.len() > 4
+            || record.provider_request_ids.iter().any(|(key, value)| {
+                !["x-request-id", "request-id", "x-amzn-requestid", "x-goog-request-id", "cf-ray"]
+                    .contains(&key.as_str())
+                    || !rook_llm::valid_request_id(value)
+            })
+        {
+            return Err(CoreError::Other("unsupported saved correlation metadata".into()));
+        }
         rook_store::parse_session_id(&record.id)
             .ok_or_else(|| CoreError::Other("unsupported saved model attempt ID".into()))?;
         if record
@@ -114,7 +129,14 @@ pub(crate) fn observer_with_prices(
     purpose: Purpose,
     prices: Arc<crate::model_route::Prices>,
 ) -> Arc<dyn rook_llm::AttemptObserver> {
-    Arc::new(Observer { store: rook.store.clone(), session, vault, purpose, prices })
+    Arc::new(Observer {
+        store: rook.store.clone(),
+        session,
+        vault,
+        purpose,
+        prices,
+        propagate_trace: rook.config.telemetry.propagate_trace,
+    })
 }
 
 struct Observer {
@@ -123,6 +145,7 @@ struct Observer {
     vault: Arc<Vault>,
     purpose: Purpose,
     prices: Arc<crate::model_route::Prices>,
+    propagate_trace: bool,
 }
 
 impl rook_llm::AttemptObserver for Observer {
@@ -132,8 +155,10 @@ impl rook_llm::AttemptObserver for Observer {
             crate::model_route::identity(&d.model, &self.vault)?;
             Dispatch::bounded(&d.provider, &d.model, d.input_includes_cache)
         });
+        let id = rook_store::format_session_id(rook_store::new_session_id());
+        let trace = crate::correlation::operation(&self.store, self.session, &id);
         let record = Record {
-            id: rook_store::format_session_id(rook_store::new_session_id()),
+            id,
             purpose: self.purpose,
             state: State::Started,
             dispatch,
@@ -143,6 +168,8 @@ impl rook_llm::AttemptObserver for Observer {
             reported_model: None,
             elapsed_ms: 0,
             cost: None,
+            trace,
+            provider_request_ids: Default::default(),
         };
         // A failed admission prevents the leaf from opening its HTTP request.
         record.save(&self.store, self.session)?;
@@ -153,6 +180,7 @@ impl rook_llm::AttemptObserver for Observer {
             record,
             started: Instant::now(),
             prices: self.prices.clone(),
+            propagate_trace: self.propagate_trace,
         }))
     }
 }
@@ -164,9 +192,13 @@ struct Active {
     record: Record,
     started: Instant,
     prices: Arc<crate::model_route::Prices>,
+    propagate_trace: bool,
 }
 
 impl rook_llm::Attempt for Active {
+    fn trace_context(&self) -> Option<(rook_llm::TraceContext, bool)> {
+        self.record.trace.clone().map(|trace| (trace, self.propagate_trace))
+    }
     fn finish(&mut self, status: AttemptStatus, facts: &AttemptFacts) -> rook_llm::Result<()> {
         self.record.state = match status {
             AttemptStatus::Completed => State::Completed,
@@ -180,6 +212,13 @@ impl rook_llm::Attempt for Active {
         self.record.reported_model =
             facts.reported_model.as_deref().and_then(|name| crate::model_route::identity(name, &self.vault));
         self.record.elapsed_ms = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        self.record.provider_request_ids = facts
+            .provider_request_ids
+            .iter()
+            .take(4)
+            .filter(|(_, value)| self.vault.redact(value) == **value && rook_llm::valid_request_id(value))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
         self.record.cost = self.prices.estimate(self.record.dispatch.as_ref(), facts);
         self.record.save(&self.store, self.session)
     }
@@ -225,6 +264,7 @@ mod tests {
                     usage_reported: true,
                     completion_confirmed: true,
                     reported_model: Some("server".into()),
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -268,6 +308,7 @@ mod tests {
         let session = rook.start_session("attempt history").unwrap();
         let vault = Arc::new(Vault::empty());
         let observer = Observer {
+            propagate_trace: false,
             store: rook.store.clone(),
             session,
             vault: vault.clone(),
@@ -283,6 +324,7 @@ mod tests {
             usage_reported: true,
             completion_confirmed: false,
             reported_model: Some("echo".into()),
+            ..Default::default()
         };
         second.finish(AttemptStatus::Failed, &facts).unwrap();
         let coverage = rook.context_usage(session, Some(65536)).unwrap().cost_coverage.unwrap();
@@ -328,6 +370,7 @@ mod tests {
         let vault = Arc::new(Vault::empty());
         vault.also_hide("private-token");
         let recorder = Observer {
+            propagate_trace: false,
             store: rook.store.clone(),
             session,
             vault,
@@ -339,7 +382,14 @@ mod tests {
         active
             .finish(
                 AttemptStatus::Failed,
-                &AttemptFacts { reported_model: Some("private-token".into()), ..Default::default() },
+                &AttemptFacts {
+                    reported_model: Some("private-token".into()),
+                    provider_request_ids: std::collections::BTreeMap::from([(
+                        "x-request-id".into(),
+                        "private-token".into(),
+                    )]),
+                    ..Default::default()
+                },
             )
             .unwrap();
         let events = rook.store.events(session, 0, 8).unwrap();
@@ -348,6 +398,7 @@ mod tests {
             assert!(!String::from_utf8_lossy(&body).contains("private-token"));
             let record = Record::read(&body).unwrap();
             assert!(record.dispatch.is_none() && record.reported_model.is_none());
+            assert!(record.provider_request_ids.is_empty());
         }
         let mut bytes = rook.store.get(&events[0].record.body).unwrap();
         bytes.resize(MAX_BYTES + 1, b' ');

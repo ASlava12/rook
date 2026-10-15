@@ -446,6 +446,10 @@
       "trace"
     ]
   },
+  "telemetry.propagate_trace": {
+    "kind": "boolean",
+    "help": "Send W3C traceparent metadata to configured LLM, MCP and ACP peers. Off by default; local correlation remains available. Does not enable an exporter or upload support reports."
+  },
   "telemetry.diagnostic_events": {
     "kind": "integer",
     "help": "Recent event metadata included in a diagnostic report, clamped to 1..2048. Default 256."

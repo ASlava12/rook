@@ -30,6 +30,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 
+static STORE_WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Where a secret's value comes from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
@@ -111,6 +113,7 @@ struct Entry {
 /// resolved for one turn is not in memory for the next.
 pub struct Vault {
     entries: BTreeMap<String, Entry>,
+    imported: std::sync::Mutex<BTreeMap<String, Entry>>,
     path: std::path::PathBuf,
     /// What has actually been handed to a tool, for the redaction. A `cmd:`
     /// secret nobody asked for is never resolved: running a password manager
@@ -124,7 +127,12 @@ impl Vault {
     /// whose file would not read: a name asked for then is a name nobody set,
     /// which is the answer that sends somebody to `rook secrets`.
     pub fn empty() -> Self {
-        Self { entries: BTreeMap::new(), path: crate::paths::secrets_file(), handed_out: Default::default() }
+        Self {
+            entries: BTreeMap::new(),
+            imported: Default::default(),
+            path: crate::paths::secrets_file(),
+            handed_out: Default::default(),
+        }
     }
 
     pub fn load() -> Result<Self> {
@@ -132,14 +140,29 @@ impl Vault {
     }
 
     pub fn load_from(path: std::path::PathBuf) -> Result<Self> {
-        let entries = match std::fs::read_to_string(&path) {
-            Ok(text) => toml::from_str(&text).map_err(|e| {
-                crate::CoreError::Other(format!("{} is not readable as secrets: {e}", path.display()))
-            })?,
+        use std::io::Read;
+        let entries = match std::fs::File::open(&path) {
+            Ok(file) => {
+                let mut text = String::new();
+                file.take(1024 * 1024 + 1)
+                    .read_to_string(&mut text)
+                    .map_err(|source| crate::CoreError::Io { path: path.clone(), source })?;
+                if text.len() > 1024 * 1024 {
+                    return Err(crate::CoreError::Other(
+                        "secret store exceeds 1 MiB; use external secret sources".into(),
+                    ));
+                }
+                toml::from_str(&text).map_err(|_| {
+                    crate::CoreError::Other(format!(
+                        "{} is not valid secrets TOML; edit it privately",
+                        path.display()
+                    ))
+                })?
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
             Err(source) => return Err(crate::CoreError::Io { path: path.clone(), source }),
         };
-        Ok(Self { entries, path, handed_out: Default::default() })
+        Ok(Self { entries, imported: Default::default(), path, handed_out: Default::default() })
     }
 
     fn save(&self) -> Result<()> {
@@ -149,22 +172,100 @@ impl Vault {
         }
         let text = toml::to_string_pretty(&self.entries)
             .map_err(|e| crate::CoreError::Other(format!("writing secrets: {e}")))?;
-        std::fs::write(&self.path, text)
-            .map_err(|source| crate::CoreError::Io { path: self.path.clone(), source })?;
-        // Before anything else can open it. A file of passwords written
-        // world-readable for even a moment is a file that was world-readable.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))
-                .map_err(|source| crate::CoreError::Io { path: self.path.clone(), source })?;
+        if text.len() > 1024 * 1024 {
+            return Err(crate::CoreError::Other(
+                "secret store exceeds 1 MiB; use external secret sources".into(),
+            ));
         }
+        let parent = self
+            .path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let name = self
+            .path
+            .file_name()
+            .ok_or_else(|| crate::CoreError::Other("secret store needs a file name".into()))?;
+        rook_contain::files::write_private(parent, std::path::Path::new(name), text.as_bytes())
+            .map_err(|source| crate::CoreError::Io { path: self.path.clone(), source })?;
         Ok(())
+    }
+
+    fn change<T>(&mut self, edit: impl FnOnce(&mut BTreeMap<String, Entry>) -> T) -> Result<T> {
+        let _writing = STORE_WRITES.lock().unwrap_or_else(|e| e.into_inner());
+        let parent = self
+            .path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        crate::paths::private_dir(parent)
+            .map_err(|source| crate::CoreError::Io { path: parent.into(), source })?;
+        let lock_name = self
+            .path
+            .file_name()
+            .ok_or_else(|| crate::CoreError::Other("secret store needs a file name".into()))?
+            .to_string_lossy()
+            .to_string()
+            + ".lock";
+        let lock = rook_contain::files::lock_file(parent, std::path::Path::new(&lock_name))
+            .map_err(|source| crate::CoreError::Io { path: self.path.clone(), source })?;
+        lock.try_lock().map_err(|_| {
+            crate::CoreError::Other("secret store is busy; finish the other private save and retry".into())
+        })?;
+        let mut current = Self::load_from(self.path.clone())?;
+        let result = edit(&mut current.entries);
+        current.save()?;
+        self.entries = current.entries;
+        self.imported.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        Ok(result)
+    }
+
+    /// Passive presence check: no password manager or credential helper runs.
+    pub(crate) fn contains_name(&self, name: &str) -> bool {
+        self.imported.lock().unwrap_or_else(|e| e.into_inner()).contains_key(name)
+            || self.entries.contains_key(name)
+    }
+
+    /// Import only the secret a private request just saved into this turn's
+    /// snapshot. Values are registered for redaction before any tool can run.
+    pub(crate) fn import_saved(&self, name: &str) -> Result<bool> {
+        let name = usable_name(name)?;
+        let mut fresh = Self::load_from(self.path.clone())?;
+        let Some(entry) = fresh.entries.remove(&name) else { return Ok(false) };
+        if let Some(value) = &entry.value {
+            self.also_hide(value);
+        }
+        let mut imported = self.imported.lock().unwrap_or_else(|e| e.into_inner());
+        if imported.len() >= 32 && !imported.contains_key(&name) {
+            return Err(crate::CoreError::Other(
+                "a turn can import at most 32 privately supplied secrets".into(),
+            ));
+        }
+        imported.insert(name, entry);
+        Ok(true)
+    }
+
+    fn entry(&self, name: &str) -> Option<Entry> {
+        self.imported
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(name.trim())
+            .cloned()
+            .or_else(|| self.entries.get(name.trim()).cloned())
+    }
+
+    pub(crate) fn file_path(&self) -> &std::path::Path {
+        &self.path
     }
 
     /// Hold a value here, because there was nowhere else to put it.
     pub fn keep(&mut self, name: &str, value: &str) -> Result<()> {
         let name = usable_name(name)?;
+        if value.len() > 65536 {
+            return Err(crate::CoreError::Other(
+                "a secret value exceeds 64 KiB; name an external source instead".into(),
+            ));
+        }
         let value = cleaned(value);
         if value.is_empty() {
             return Err(crate::CoreError::Other(format!(
@@ -172,23 +273,40 @@ impl Vault {
                  which is what a bad paste looks like"
             )));
         }
-        self.entries.insert(name, Entry { value: Some(value), source: None });
-        self.save()
+        self.change(|entries| {
+            entries.insert(name, Entry { value: Some(value), source: None });
+        })
+    }
+
+    /// A waiting private form cannot replace a secret configured elsewhere.
+    pub(crate) fn keep_missing(&mut self, name: &str, value: &str) -> Result<bool> {
+        let name = usable_name(name)?;
+        if value.len() > 8192 {
+            return Err(crate::CoreError::Other("private secret input exceeds 8192 bytes".into()));
+        }
+        let value = cleaned(value);
+        if value.is_empty() {
+            return Err(crate::CoreError::Other("nothing was supplied privately".into()));
+        }
+        self.change(|entries| match entries.entry(name) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(Entry { value: Some(value), source: None });
+                true
+            }
+            std::collections::btree_map::Entry::Occupied(_) => false,
+        })
     }
 
     /// Name where a value lives without holding it.
     pub fn refer(&mut self, name: &str, source: &Source) -> Result<()> {
         let name = usable_name(name)?;
-        self.entries.insert(name, Entry { value: None, source: Some(source.as_str()) });
-        self.save()
+        self.change(|entries| {
+            entries.insert(name, Entry { value: None, source: Some(source.as_str()) });
+        })
     }
 
     pub fn forget(&mut self, name: &str) -> Result<bool> {
-        let gone = self.entries.remove(name.trim()).is_some();
-        if gone {
-            self.save()?;
-        }
-        Ok(gone)
+        self.change(|entries| entries.remove(name.trim()).is_some())
     }
 
     /// Every secret, with its source and whether it answers right now.
@@ -198,7 +316,9 @@ impl Vault {
     /// manager and a name nobody set are two different problems that look the
     /// same in a list of names.
     pub fn named(&self) -> Vec<Named> {
-        self.entries
+        let mut entries = self.entries.clone();
+        entries.extend(self.imported.lock().unwrap_or_else(|e| e.into_inner()).clone());
+        entries
             .iter()
             .map(|(name, entry)| Named {
                 name: name.clone(),
@@ -229,7 +349,7 @@ impl Vault {
     /// run for an offline cache lookup; the live credential is checked separately.
     pub(crate) fn cache_scope(&self, name: &str) -> String {
         use sha2::{Digest, Sha256};
-        let Some(entry) = self.entries.get(name.trim()) else { return String::new() };
+        let Some(entry) = self.entry(name) else { return String::new() };
         struct Hash(Sha256);
         impl std::io::Write for Hash {
             fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -241,7 +361,7 @@ impl Vault {
             }
         }
         let mut hash = Hash(Sha256::new());
-        if serde_json::to_writer(&mut hash, entry).is_err() {
+        if serde_json::to_writer(&mut hash, &entry).is_err() {
             return String::new();
         }
         // Passive environment rotations are observable without executing a
@@ -255,7 +375,7 @@ impl Vault {
     /// The value, and remembered as handed out so it can be taken back out of
     /// what comes back.
     pub fn value(&self, name: &str) -> Option<String> {
-        let value = self.value_of(self.entries.get(name.trim())?)?;
+        let value = self.value_of(&self.entry(name)?)?;
         let mut handed = self.handed_out.lock().unwrap_or_else(|e| e.into_inner());
         if !handed.contains(&value) {
             handed.push(value.clone());
@@ -397,7 +517,7 @@ fn cleaned(value: &str) -> String {
 }
 
 /// A name a tool argument can carry and a shell can hold in a variable.
-fn usable_name(name: &str) -> Result<String> {
+pub(crate) fn usable_name(name: &str) -> Result<String> {
     let name = name.trim();
     let usable = !name.is_empty()
         && name.len() <= 64

@@ -98,7 +98,11 @@ impl Tool for McpTool {
     async fn call(&self, ctx: &ToolContext, args: &serde_json::Value) -> Result<ToolOutcome> {
         // A failing server is the model's problem to work around, not the
         // turn's to die on, so transport errors come back as tool errors.
-        let result = match self.server.call_tool(&self.remote_name, args).await {
+        let result = match ctx.trace.as_ref().filter(|_| ctx.propagate_trace) {
+            Some(trace) => self.server.call_tool_traced(&self.remote_name, args, trace).await,
+            None => self.server.call_tool(&self.remote_name, args).await,
+        };
+        let result = match result {
             Ok(result) => result,
             Err(e) => return Ok(ToolOutcome::error(e.to_string()).with("server", self.server.name())),
         };

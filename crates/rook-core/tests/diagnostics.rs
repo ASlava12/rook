@@ -261,4 +261,108 @@ async fn diagnostics_measure_real_execution_bound_export_and_preserve_private_da
     assert!(report.notices.iter().any(|s| s.contains("no measured timings")));
     report.notices.push("x".repeat(1024 * 1024 + 1));
     assert!(report.json().is_err(), "serialization itself has a hard byte bound");
+    native_report_round_trip().await;
+}
+
+async fn native_report_round_trip() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let seen = requests.clone();
+    let server = tokio::spawn(async move {
+        let mut count = 0;
+        while let Ok((mut socket, _)) = listener.accept().await {
+            count += 1;
+            assert!(count < 32);
+            let mut raw = Vec::new();
+            let (headers, request): (String, Value) = loop {
+                let mut chunk = [0; 4096];
+                let n = socket.read(&mut chunk).await.unwrap();
+                assert!(n > 0 && raw.len() + n <= 1024 * 1024);
+                raw.extend_from_slice(&chunk[..n]);
+                let Some(split) = raw.windows(4).position(|p| p == b"\r\n\r\n") else { continue };
+                let headers = String::from_utf8(raw[..split].to_vec()).unwrap();
+                let size: usize = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_lowercase().strip_prefix("content-length:").map(|n| n.trim().parse().unwrap())
+                    })
+                    .unwrap();
+                if raw.len() < split + 4 + size {
+                    continue;
+                }
+                break (headers, serde_json::from_slice(&raw[split + 4..split + 4 + size]).unwrap());
+            };
+            seen.lock().unwrap().push(headers);
+            let stream = request["stream"] == true;
+            let content = if request["messages"].to_string().contains("Classify whether an assistant") {
+                r#"{"action":"finish"}"#
+            } else {
+                "Done"
+            };
+            let frame = if stream {
+                json!({"choices":[{"index":0,"delta":{"content":content},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}})
+            } else {
+                json!({"choices":[{"message":{"role":"assistant","content":content},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}})
+            };
+            let body = if stream { format!("data: {frame}\n\ndata: [DONE]\n\n") } else { frame.to_string() };
+            let mime = if stream { "text/event-stream" } else { "application/json" };
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\nx-request-id: native-{count}\r\nrequest-id: native-private-credential\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+        }
+    });
+    for propagate in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.telemetry.propagate_trace = propagate;
+        config.memory.enabled = false;
+        config.agent.install_servers = false;
+        let rook = rook_at(dir.path(), config);
+        let root = rook.start_session("private-title").unwrap();
+        let child = rook.start_session("private-child-title").unwrap();
+        rook.store.update_session(child, |meta| meta.parent = Some(root)).unwrap();
+        let mut native =
+            rook_llm::openai::Config::new(base.clone(), Some("native-private-credential".into()), 32000);
+        native.proxy = rook_llm::Proxy::Direct;
+        let provider: Arc<dyn Provider> =
+            Arc::new(rook_llm::openai::OpenAiCompatible::new("native", "qwen", native).unwrap());
+        let before = requests.lock().unwrap().len();
+        let mut reports = Vec::new();
+        for session in [root, child] {
+            let mut agent = AgentLoop::new(&rook, provider.clone(), session);
+            agent.run("Reply Done to private-user-prompt").await.unwrap();
+            let report = rook.diagnostics(session, false).unwrap();
+            let ends: Vec<_> = report.traces.iter().filter(|t| t["state"] != "started").collect();
+            assert!(!ends.is_empty());
+            assert!(ends.iter().all(|t| {
+                t["provider_request_ids"]["x-request-id"].as_str().is_some_and(|s| s.starts_with("native-"))
+            }));
+            let text = report.json().unwrap();
+            for private in ["private-user-prompt", "private-title", "native-private-credential"] {
+                assert!(!text.contains(private));
+            }
+            reports.push(report.traces);
+        }
+        let trace = rook.session_trace(root).unwrap().unwrap();
+        assert_eq!(rook.session_trace(child).unwrap().unwrap().trace_id, trace.trace_id);
+        for headers in &requests.lock().unwrap()[before..] {
+            assert_eq!(headers.contains("traceparent:"), propagate);
+            if propagate {
+                assert!(headers.contains(&trace.trace_id));
+            }
+        }
+        let sent = requests.lock().unwrap().len();
+        drop(provider);
+        drop(rook);
+        let reopened = rook_at(dir.path(), Config::default());
+        for (index, session) in [root, child].into_iter().enumerate() {
+            assert_eq!(reopened.diagnostics(session, false).unwrap().traces, reports[index]);
+        }
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            sent,
+            "diagnostic reads and reopen never contact the provider"
+        );
+    }
+    server.abort();
 }

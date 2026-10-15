@@ -218,6 +218,28 @@ pub struct AskQuestion {
     pub multi: bool,
 }
 
+/// Metadata for private collection. Values never use chat messages or answers.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SecretPrompt {
+    pub id: String,
+    pub session: String,
+    pub name: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretStatus {
+    Saved,
+    Declined,
+    Skipped,
+    Expired,
+    Cancelled,
+    Unavailable,
+    Busy,
+    Failed,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalDecision {
@@ -392,6 +414,10 @@ pub enum ChatEvent {
     Ask {
         id: String,
         questions: Vec<AskQuestion>,
+    },
+    /// Values use the private HTTP endpoint and never the chat answer stream.
+    SecretRequest {
+        prompt: SecretPrompt,
     },
     /// What the settings are now, after a [`ClientMessage::Setting`] or on
     /// connecting — and what they may be set to, so the page draws the

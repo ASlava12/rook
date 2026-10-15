@@ -13,6 +13,27 @@ impl AgentLoop<'_> {
         prompt: &str,
         progress: &mut impl FnMut(Progress<'_>),
     ) -> Result<TurnOutcome> {
+        let mut timing =
+            crate::diagnostics::Timer::start(self.rook, self.session, crate::diagnostics::Phase::AcpRequest);
+        self.tool_ctx.trace = timing.trace();
+        self.tool_ctx.propagate_trace = self.rook.config.telemetry.propagate_trace;
+        let result = self.run_acp_inner(prompt, progress).await;
+        timing.finish(
+            if result.is_ok() {
+                crate::diagnostics::Status::Completed
+            } else {
+                crate::diagnostics::Status::Failed
+            },
+            None,
+        );
+        result
+    }
+
+    async fn run_acp_inner(
+        &mut self,
+        prompt: &str,
+        progress: &mut impl FnMut(Progress<'_>),
+    ) -> Result<TurnOutcome> {
         let name = self.external_executor.clone().ok_or_else(|| bad("ACP executor was not selected"))?;
         let cfg = &self.rook.config.acp_executor;
         let profile = cfg.profiles.get(&name).ok_or_else(|| bad("Unknown configured ACP executor"))?;
@@ -240,13 +261,13 @@ impl AgentLoop<'_> {
                 String::from_utf8(bytes).map_err(|_| bad("ACP prompt serialization is not UTF-8"))?
             }
         };
-        let request = client
-            .request(
-                "session/prompt",
-                json!({"sessionId":session,
-            "prompt":[{"type":"text","text":transmitted}]}),
-            )
-            .await?;
+        let mut params = json!({"sessionId":session,"prompt":[{"type":"text","text":transmitted}]});
+        if self.tool_ctx.propagate_trace
+            && let Some(parent) = self.tool_ctx.trace.as_ref().and_then(rook_llm::TraceContext::traceparent)
+        {
+            params["_meta"] = json!({"traceparent":parent});
+        }
+        let request = client.request("session/prompt", params).await?;
         let mut text_bytes = 0usize;
         let mut callbacks = 0u32;
         let mut callback_ids = std::collections::HashSet::new();

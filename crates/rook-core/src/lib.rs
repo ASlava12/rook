@@ -27,6 +27,7 @@ mod completion;
 pub mod composite_recipes;
 pub mod config;
 pub mod context;
+mod correlation;
 pub mod delivery;
 pub mod diagnostics;
 pub mod docs;

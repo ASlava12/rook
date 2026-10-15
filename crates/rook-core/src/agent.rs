@@ -38,6 +38,7 @@ pub(crate) mod history;
 mod lifecycle;
 pub mod observe;
 mod output;
+mod private_input;
 mod prompt;
 mod repetition;
 mod review;
@@ -303,6 +304,7 @@ pub fn changed_note(files: &[String]) -> Option<String> {
 /// the writing tools has not been stopped from writing, only from doing it
 /// itself.
 const CHANGES_THINGS: &[&str] = &[
+    REQUEST_SECRET,
     WRITE_SKILL,
     FIND_SKILL,
     REMEMBER,
@@ -486,6 +488,7 @@ pub const STANCE: &str = "stance";
 pub const SUBAGENTS: &str = "subagents";
 pub const VERIFY: &str = "verify";
 pub const DOCS: &str = "docs";
+pub const REQUEST_SECRET: &str = "request_secret";
 
 /// How deep delegation may nest. One level of sub-delegation is useful for
 /// splitting a task; beyond that the token cost compounds faster than the work
@@ -1824,6 +1827,8 @@ impl<'a> AgentLoop<'a> {
                     self.session,
                     crate::diagnostics::Phase::ToolDispatch,
                 );
+                self.tool_ctx.trace = timing.trace();
+                self.tool_ctx.propagate_trace = self.rook.config.telemetry.propagate_trace;
                 let (mut result, failed, recorded_seq) =
                     match self.cycle_refusal(call, nursery.live_poll(call))? {
                         Some((said, seq)) => (said, true, Some(seq)),

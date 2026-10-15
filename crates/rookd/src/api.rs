@@ -32,6 +32,8 @@ static REVIEW_OPS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
 static WORKTREE_RECOVERIES: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
+static PRIVATE_INPUT_OPS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(4)));
 
 pub fn router(state: Shared) -> Router {
     let allowed = state.rook.try_read().map(|r| r.config.server.allowed_hosts.clone()).unwrap_or_default();
@@ -52,6 +54,10 @@ pub fn router(state: Shared) -> Router {
             get(worktree_diagnosis).post(restore_worktree).layer(axum::extract::DefaultBodyLimit::max(4096)),
         )
         .route("/api/sessions/{id}/diagnostics", get(diagnostics))
+        .route(
+            "/api/sessions/{session}/private-input/{id}",
+            post(private_input).layer(axum::extract::DefaultBodyLimit::max(65536)),
+        )
         .route("/api/sessions/{id}/transcript", get(transcript))
         .route("/api/sessions/{id}/turns", get(turns))
         .route("/api/sessions/{id}/tree", get(branches))
@@ -1072,6 +1078,73 @@ async fn apply_prices(Json(body): Json<ApplyPrices>) -> ApiResult<rook_core::pri
 async fn secrets(State(_): State<Shared>) -> ApiResult<Page<rook_core::Named>> {
     let vault = rook_core::Vault::load().map_err(Fail::from)?;
     Ok(Json(Page::new(vault.named())))
+}
+
+/// Values use this write-only route, never websocket answers or chat history.
+async fn private_input(
+    State(state): State<Shared>,
+    Path((session, id)): Path<(String, String)>,
+    body: axum::body::Bytes,
+) -> ApiResult<serde_json::Value> {
+    use rook_proto::SecretStatus;
+    let invalid = || Fail(StatusCode::BAD_REQUEST, ApiError::new("bad_request", "invalid private response"));
+    // Generic parse errors: serde's diagnostic must never echo submitted values.
+    let body: serde_json::Value = serde_json::from_slice(&body).map_err(|_| invalid())?;
+    let fields = body.as_object().ok_or_else(invalid)?;
+    if fields.len() > 2 || fields.keys().any(|key| key != "status" && key != "value") {
+        return Err(invalid());
+    }
+    let status = match fields.get("status").and_then(|s| s.as_str()) {
+        Some("saved") => SecretStatus::Saved,
+        Some("declined") => SecretStatus::Declined,
+        Some("skipped") => SecretStatus::Skipped,
+        Some("cancelled") => SecretStatus::Cancelled,
+        _ => return Err(invalid()),
+    };
+    let value = match fields.get("value") {
+        None => None,
+        Some(serde_json::Value::String(value)) if !value.is_empty() && value.len() <= 8192 => {
+            Some(value.clone())
+        }
+        _ => return Err(invalid()),
+    };
+    if (status == SecretStatus::Saved) != value.is_some() || session.len() > 64 || id.len() > 128 {
+        return Err(invalid());
+    }
+    let stale = || {
+        Fail(
+            StatusCode::CONFLICT,
+            ApiError::new("expired_input", "this private request is no longer waiting"),
+        )
+    };
+    let input = {
+        let live = state.live.read().await;
+        // Delegated sessions share their root's broker. Bind both the session
+        // and nonce instead of assuming the session has its own live entry.
+        let mut candidates = live
+            .values()
+            .filter(|live| live.running())
+            .filter_map(|live| live.private_input())
+            .filter(|input| input.accepts(&id, &session));
+        let input = candidates.next().ok_or_else(stale)?;
+        if candidates.next().is_some() {
+            return Err(stale());
+        }
+        input
+    };
+    let permit = PRIVATE_INPUT_OPS.clone().try_acquire_owned().map_err(|_| {
+        Fail(StatusCode::TOO_MANY_REQUESTS, ApiError::new("busy", "private input is busy; try again"))
+    })?;
+    let actual = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        input.respond(&id, &session, status, value.as_deref())
+    })
+    .await
+    .map_err(|_| {
+        Fail(StatusCode::INTERNAL_SERVER_ERROR, ApiError::new("private_input_failed", "private input failed"))
+    })?
+    .ok_or_else(stale)?;
+    Ok(Json(serde_json::json!({ "status": actual })))
 }
 
 #[derive(Deserialize)]
@@ -2329,6 +2402,79 @@ mod tests {
         );
         let (status, _) = post(&f, "/api/history/recall", serde_json::json!({"query":""})).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn private_http_input_binds_delegated_owner_and_rejects_replay_without_echoing_values() {
+        use rook_proto::{SecretPrompt, SecretStatus};
+        use rook_tools::{ask::Asker, private_input::SecretSink};
+        struct Sink(std::sync::atomic::AtomicUsize);
+        impl SecretSink for Sink {
+            fn save(&self, value: &str) -> SecretStatus {
+                assert_eq!(value, "PRIVATE_HTTP_41");
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                SecretStatus::Saved
+            }
+            fn close(&self) {}
+        }
+        let f = fixture();
+        let (outbound, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let (approver, approval_relay) =
+            crate::chat::approver(outbound.clone(), std::time::Duration::from_secs(60), Default::default());
+        let (asker, relay) =
+            crate::chat::asker(outbound, std::time::Duration::from_secs(60), Default::default());
+        let (said, _) = tokio::sync::broadcast::channel(16);
+        let live = Arc::new(crate::chat::Live::for_test(
+            tokio::spawn(std::future::pending()),
+            vec![approval_relay.abort_handle(), relay.abort_handle()],
+            said,
+            approver,
+            asker.clone(),
+        ));
+        f.state.remember(f.session, live).await;
+        let child = rook_store::format_session_id(rook_store::new_session_id());
+        let sink = Arc::new(Sink(Default::default()));
+        let asking = tokio::spawn({
+            let asker = asker.clone();
+            let sink = sink.clone();
+            let child = child.clone();
+            async move {
+                asker
+                    .request_secret(
+                        SecretPrompt {
+                            id: String::new(),
+                            session: child,
+                            name: "deploy".into(),
+                            reason: "Requested check".into(),
+                        },
+                        sink,
+                    )
+                    .await
+            }
+        });
+        let Some(rook_proto::ChatEvent::SecretRequest { prompt }) = events.recv().await else {
+            panic!("missing private request");
+        };
+        let path = format!("/api/sessions/{child}/private-input/{}", prompt.id);
+        let wrong =
+            format!("/api/sessions/{}/private-input/{}", rook_store::format_session_id(f.session), prompt.id);
+        let payload = serde_json::json!({"status":"saved","value":"PRIVATE_HTTP_41"});
+        assert_eq!(post(&f, &wrong, payload.clone()).await.0, StatusCode::CONFLICT);
+        let (status, body) = post(&f, &path, serde_json::json!({"status":"PRIVATE_HTTP_41"})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(!body.to_string().contains("PRIVATE_HTTP_41"));
+        let (status, body) = post(&f, &path, payload.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, serde_json::json!({"status":"saved"}));
+        assert_eq!(asking.await.unwrap(), SecretStatus::Saved);
+        assert_eq!(post(&f, &path, payload).await.0, StatusCode::CONFLICT);
+        assert_eq!(sink.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(f.state.rook.read().await.store.get_session(f.session).unwrap().unwrap().next_seq, 1);
+        assert_eq!(
+            post(&f, &path, serde_json::json!({"status":"saved","value":"x".repeat(8193)})).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        f.state.live.write().await.remove(&f.session);
     }
 
     async fn get(f: &Fixture, path: &str) -> (StatusCode, serde_json::Value) {

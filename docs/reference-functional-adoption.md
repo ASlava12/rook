@@ -6,14 +6,15 @@ The user requested every candidate from the October 15 review. The whole scope
 remains active until each row is implemented and verified, except cache changes
 which require measured benefit before adoption. ACP v2 remains a draft watch
 item, as recommended in the review, not a replacement of the working v1 adapter.
-Current starting commit: `9cab33f`; refreshed reference gitlinks are already in
-the index and their snapshot table is in `references/PORTED.md`.
+Starting commit: `9cab33f`; refreshed reference gitlinks and the resource/input
+baseline were saved in local commit `65b4f40`. Their snapshot table is in
+`references/PORTED.md`; no push, release or daemon restart is part of this batch.
 
 | Requirement | Acceptance scope | State |
 |---|---|---|
-| Correlated diagnostics | Provider request IDs and root/child/ACP/MCP trace identity; local bounded reports; no credential/transcript export by default; real transport/reopen checks | Pending |
-| MCP resources/templates | Bounded paged discovery and source-addressed reads, resource-only servers, common policy/engine/frontends, cancellation and transport/reconnect checks | In progress |
-| Private secret requests | Private conversation-bound collection, only name/status returned; decline, dismissal, no answer, timeout, disconnect and replay are ordinary states; no value in model/history/compaction | Pending |
+| Correlated diagnostics | Provider request IDs and root/child/ACP/MCP trace identity; local bounded reports; no credential/transcript export by default; real transport/reopen checks | Verified |
+| MCP resources/templates | Bounded paged discovery and source-addressed reads, resource-only servers, common policy/engine/frontends, cancellation and transport/reconnect checks | Verified |
+| Private secret requests | Private conversation-bound collection, only name/status returned; decline, dismissal, no answer, timeout, disconnect and replay are ordinary states; no value in model/history/compaction | Verified |
 | MCP elicitation | Server-initiated form/URL requests, exact connection/call identity and common user interfaces; explicit refusal, timeout, cancellation and concurrent ID collisions | Pending |
 | PDF documents | Bounded local extraction with selected pages and page provenance; ordinary text-only local model; optional scan rendering/OCR with explicit partial notices; actual document/frontend checks | Pending |
 | Remote workspace files | Explicit SSH-native read/edit/search/list and execution, remote path identity, bounded transfers, checkpoint/undo and disconnect ownership; preserve existing replica mode | Pending |
@@ -29,7 +30,38 @@ the concrete missing prerequisite. Tests must exercise these real control paths.
 This section is the current work tracker. The older evidence below describes
 the previous fourteen-item scope; it cannot prove these additions complete.
 
+Current verification snapshot: resources, private input and correlation pass
+`cargo xtask ci` in `agent-input` (`/tmp/rook-adoption-batch-one-ci-limited.log`,
+exit 0, `RUST_TEST_THREADS=4`). The preceding full run had one native CLI
+queue/start timeout under load; that exact test passed individually too.
+Elicitation and PDF remain separate, unfinished parts of the adoption scope.
+No installed daemon has been restarted.
+
 ### October 15 implementation evidence
+
+Correlated diagnostics now records physical generation spans, bounded response
+IDs and common root/child trace identity in existing JSON notes. Local support
+exports select those metadata fields without prompts, model URLs or credentials.
+`telemetry.propagate_trace` is opt-in for native LLM headers and MCP/ACP metadata;
+the default is local correlation only. Native OpenAI, Responses, Anthropic and
+Google HTTP checks, real retries, failover and stream cancellation pass in
+`/tmp/rook-correlation-wire-tests-final.log`. Native generation report/reopen and
+MCP resource propagation checks pass in `/tmp/rook-correlation-engine-tests.log`;
+actual delegated ACP writes retain a common trace and carry the measured ACP
+span in `/tmp/rook-correlation-acp-test.log`. The merged all-target check passes
+(`/tmp/rook-correlation-merged-check.log`). ACP session metadata/load checks pass
+in `/tmp/rook-correlation-acp-session-final.log`; reached ancestry bounds and
+corrupt links pass in `/tmp/rook-correlation-unit-tests.log`. All-target Clippy
+for the engine, native providers, MCP/ACP, CLI and daemon passes in
+`/tmp/rook-correlation-clippy-final.log`. Final CLI export and combined regression
+checks remain pending.
+
+The first complete private-input gate ran all workspace suites. The only failed
+test was the no-panic source audit, identifying four newly added panic sites in
+the MCP resource fixture. Those now return I/O/protocol errors; the audit rerun
+passes in `/tmp/rook-private-input-no-panics-rerun.log`. The other suites,
+including the corrected resource CLI scenario, passed in
+`/tmp/rook-private-input-full-ci.log`; its exit remains 101, not a green gate.
 
 MCP resource/template pages and resource reads now use the existing stdio/HTTP
 transports. Resource-only connections are retained without tools/list. Shared
@@ -61,7 +93,23 @@ forbids inventing credentials, facts or permissions and says to report essential
 missing input. The focused ask tests pass in `/tmp/rook-input-ask-tests.log`;
 terminal helper assertions also pass in `/tmp/rook-input-cli-tests.log` (the
 command additionally visits filtered integration targets). This fixes the existing input
-baseline; the private secret request feature is not yet implemented.
+baseline. Private requests are now implemented in the separate private-input
+worktree, with final integration verification still in progress.
+
+Private-input focused checks pass: broker ownership, duplicate/late replies,
+reached capacity, refusal, timeout, cancellation and missing listener
+(`/tmp/rook-private-input-tools-tests.log`); the real engine's same-turn command
+use/redaction and repeated refusal suppression, plus preservation of concurrent
+Vault edits (`/tmp/rook-private-input-core-tests.log`); browser private HTTP
+submission and clearing on disconnect (`/tmp/rook-private-input-web-tests.log`);
+and the daemon HTTP route's delegated owner binding, status-only errors and
+replay rejection (`/tmp/rook-private-input-api-test.log`). Native local/daemon
+PTY hidden-entry/save/skip checks pass in `/tmp/rook-private-input-pty-final.log`;
+the initial fixture repeated calls forever and was corrected to finish after
+one request. Durable receipt cancellation, replacement, no-overwrite and reopen
+checks pass in `/tmp/rook-private-input-receipts-test.log`. Final regression
+checks remain pending. ACP deliberately advertises
+no private input because ordinary permission choices are not a private channel.
 
 Input integration constraints from current source: the ordinary Vault snapshots
 entries per turn, so a newly saved secret needs an explicit same-turn refresh

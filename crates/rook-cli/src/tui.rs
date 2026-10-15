@@ -451,6 +451,8 @@ enum TurnEvent {
     },
     Approval(ApprovalRequest),
     Ask(AskRequest),
+    Secret(rook_proto::SecretPrompt),
+    PrivateResult(u64, Option<u128>, Option<rook_proto::SecretStatus>),
     Done(String),
     Error(String),
     /// A turn the daemon is running, verbatim. Translated where the rest are
@@ -781,6 +783,7 @@ struct Chat {
     stop_attempt: Option<StopAttempt>,
     pending: Option<ApprovalRequest>,
     asking: Option<Asking>,
+    private: std::collections::VecDeque<crate::private_input::Draft>,
     /// Lines back from the newest, so zero is pinned to the bottom.
     scroll: u16,
     /// Lines the pane held when it was last drawn, so a reader who has scrolled
@@ -1324,6 +1327,7 @@ impl Chat {
         self.busy = false;
         self.remote = None;
         self.turn_id = None;
+        self.private.clear();
         let waiting = self.pending.take().is_some() || self.asking.take().is_some();
         if waiting {
             self.push("stat", "  the turn ended, so what it was waiting for is gone");
@@ -1594,6 +1598,16 @@ impl App {
             }
         });
 
+        let (private_tx, mut private_rx) = mpsc::unbounded_channel();
+        let relay = to_loop.clone();
+        runtime.spawn(async move {
+            while let Some(prompt) = private_rx.recv().await {
+                if relay.send(TurnEvent::Secret(prompt)).is_err() {
+                    break;
+                }
+            }
+        });
+
         let config = config_seen_by(source.here().map(|r| &**r), rook_core::paths::config_file());
         let workspace = source.workspace().to_path_buf();
         // Connected only where turns run here: a routed window's tools are the
@@ -1655,11 +1669,14 @@ impl App {
             to_loop,
             connection_epoch: 0,
             approver: Arc::new(ChannelApprover::new(requests, patience, config.user_input)),
-            asker: Arc::new(ChannelAsker::new(
-                questions,
-                config.agent.decide_alone_after(),
-                config.user_input,
-            )),
+            asker: Arc::new(
+                ChannelAsker::new(questions, config.agent.decide_alone_after(), config.user_input)
+                    .with_private_input(Arc::new(rook_tools::private_input::PrivateInput::new(
+                        private_tx,
+                        config.agent.decide_alone_after(),
+                        config.user_input,
+                    ))),
+            ),
             shared: crate::chat::Session {
                 output: Default::default(),
                 policy: rook_core::agent::policy_for(&config),
@@ -1880,6 +1897,11 @@ impl App {
         while !self.quit {
             terminal.draw(|f| self.draw(f))?;
             self.drain_turn_events();
+            if self.source.here().is_some()
+                && let Some(input) = self.asker.private_input()
+            {
+                self.chat.private.retain(|draft| input.accepts(&draft.prompt.id, &draft.prompt.session));
+            }
             self.tasks.poll();
             self.history.poll();
             if let Some(result) = self.history.take_recall() {
@@ -2201,6 +2223,17 @@ impl App {
                         chosen: Vec::new(),
                     })
                 }
+                TurnEvent::Secret(prompt) => self.offer_private(prompt),
+                TurnEvent::PrivateResult(epoch, session, status)
+                    if epoch == self.connection_epoch && session == self.chat.session =>
+                {
+                    let status = status
+                        .and_then(|s| serde_json::to_value(s).ok())
+                        .and_then(|s| s.as_str().map(str::to_owned))
+                        .unwrap_or_else(|| "not confirmed; inspect request status".into());
+                    self.chat.push("stat", &format!("private request: {status}"));
+                }
+                TurnEvent::PrivateResult(..) => {}
                 TurnEvent::Done(note) => {
                     self.chat.push("stat", &note);
                     self.finished();
@@ -2250,8 +2283,10 @@ impl App {
             ChatEvent::Inputs { approvals, questions } => {
                 self.chat.pending = self.chat.pending.take().filter(|r| approvals.contains(&r.id));
                 self.chat.asking = self.chat.asking.take().filter(|r| questions.contains(&r.id));
+                self.chat.private.retain(|draft| questions.contains(&draft.prompt.id));
             }
             ChatEvent::Snapshot { session, running, truncated, approvals, questions } => {
+                self.chat.private.clear();
                 self.chat.goal_generation = None;
                 self.chat.turn_id = None;
                 self.chat.session = rook_store::parse_session_id(&session);
@@ -2406,6 +2441,7 @@ impl App {
                 crate::notify::attention();
                 self.chat.pending = Some(ApprovalRequest { id, tool, action, preview, kind })
             }
+            ChatEvent::SecretRequest { prompt } => self.offer_private(prompt),
             ChatEvent::Ask { id, questions } => {
                 if self.chat.asking.is_some() {
                     return;
@@ -2567,6 +2603,12 @@ impl App {
     }
 
     fn on_key(&mut self, key: crossterm::event::KeyEvent) {
+        if let Some(draft) = self.chat.private.front_mut() {
+            if let Some(status) = draft.key(key) {
+                self.submit_private(status);
+            }
+            return;
+        }
         if let Some(picker) = &mut self.editor {
             match key.code {
                 KeyCode::Esc => self.editor = None,
@@ -2611,6 +2653,10 @@ impl App {
     /// a paste arriving there is dropped rather than typed into a box nobody can
     /// see.
     fn on_paste(&mut self, text: &str) {
+        if let Some(draft) = self.chat.private.front_mut() {
+            draft.push(text);
+            return;
+        }
         if self.editor.is_some() {
             return;
         }
@@ -3396,6 +3442,7 @@ impl App {
             self.chat.joining = None;
             self.chat.pending = None;
             self.chat.asking = None;
+            self.chat.private.clear();
             self.chat.clear_log();
             self.chat.spent = None;
             self.chat.running_calls = Default::default();
@@ -3805,6 +3852,7 @@ impl App {
         };
         self.chat.pending = None;
         self.chat.asking = None;
+        self.chat.private.clear();
         self.chat.running_calls = Default::default();
         self.chat.spent = None;
         self.chat.joining = self.source.daemon_base().map(|_| id);
@@ -3991,6 +4039,37 @@ impl App {
         self.shared.effort.set(next);
         self.tell_the_daemon("effort", next.as_str());
         self.chat.push("stat", &format!("  effort requested: {}", next.as_str()));
+    }
+
+    fn offer_private(&mut self, prompt: rook_proto::SecretPrompt) {
+        if self.chat.private.len() >= 32 || self.chat.private.iter().any(|d| d.prompt.id == prompt.id) {
+            return;
+        }
+        crate::notify::attention();
+        self.chat.private.push_back(crate::private_input::Draft::new(prompt));
+    }
+
+    fn submit_private(&mut self, status: rook_proto::SecretStatus) {
+        let Some(draft) = self.chat.private.pop_front() else {
+            return;
+        };
+        let relay = self.to_loop.clone();
+        let epoch = self.connection_epoch;
+        let session = self.chat.session;
+        if let Some(base) = self.source.daemon_base().map(str::to_owned) {
+            self.runtime.spawn(async move {
+                let result =
+                    crate::private_input::submit_remote(&base, &draft.prompt, status, draft.value(status))
+                        .await;
+                let _ = relay.send(TurnEvent::PrivateResult(epoch, session, result));
+            });
+        } else if let Some(input) = self.asker.private_input().cloned() {
+            self.runtime.spawn_blocking(move || {
+                let result =
+                    input.respond(&draft.prompt.id, &draft.prompt.session, status, draft.value(status));
+                let _ = relay.send(TurnEvent::PrivateResult(epoch, session, result));
+            });
+        }
     }
 
     fn answer(&mut self) {
@@ -4581,6 +4660,20 @@ impl App {
                 Overlay::Models => self.draw_models(f, area),
                 Overlay::Help => self.draw_help(f, area),
             }
+        }
+
+        if let Some(draft) = self.chat.private.front() {
+            let area = centred(f.area(), 90, 40);
+            f.render_widget(Clear, area);
+            let text = format!(
+                "Private credential: {}\n{}\n\n[value hidden]\nEnter saves · Esc declines · Ctrl-D skips\nThis value is not sent as a chat message.",
+                draft.prompt.name, draft.prompt.reason
+            );
+            f.render_widget(
+                Paragraph::new(text).block(bordered(" private input ")).wrap(Wrap { trim: false }),
+                area,
+            );
+            f.set_cursor_position((area.x.saturating_add(1), area.y.saturating_add(1)));
         }
 
         let mut spans: Vec<Span> = vec![Span::raw(" ")];
@@ -8174,7 +8267,7 @@ and the next line"
         assert!(lines[1].contains("Which target?"), "{lines:?}");
         assert!(lines[2].contains("1. staging  (recommended)"), "{lines:?}");
         assert!(lines[3].contains("2. prod") && !lines[3].contains("recommended"), "{lines:?}");
-        assert!(lines[4].contains("a number, or your own answer"), "{lines:?}");
+        assert!(lines[4].contains("a number, your own answer, or /skip"), "{lines:?}");
     }
 
     #[test]
@@ -8203,7 +8296,7 @@ and the next line"
         assert!(!lines[2].contains("recommended"), "a multi-select recommends nothing: {lines:?}");
         assert!(lines[5].contains("numbers, comma-separated"), "{lines:?}");
         assert!(
-            lines[5].contains("your own") && lines[6].contains("answer:"),
+            lines[5].contains("your own") && lines[6].contains("answer, or /skip:"),
             "the wrapped hint remains readable: {lines:?}"
         );
     }
@@ -8213,7 +8306,7 @@ and the next line"
         let lines = screen(&asking(vec![question("Why?", &[], false)]), 40);
 
         assert_eq!(lines.len(), 4, "border, question, prompt, border: {lines:?}");
-        assert!(lines[2].contains("your answer:"), "{lines:?}");
+        assert!(lines[2].contains("your answer, or /skip:"), "{lines:?}");
     }
 
     #[test]

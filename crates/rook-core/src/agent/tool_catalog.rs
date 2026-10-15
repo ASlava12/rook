@@ -22,6 +22,13 @@ impl<'a> AgentLoop<'a> {
             }
             specs.push(if lazy { spec.stub() } else { spec })
         };
+        if !checking && self.asker.as_ref().is_some_and(|asker| asker.supports_private_input()) {
+            push(ToolSpec {
+                name:super::REQUEST_SECRET.into(),
+                description:"Ask the user to supply a missing named secret through private input. Never put a value in arguments or ask for it in chat. Returns only name/status. Decline, skip, expiry and unavailable input do not authorize anything; do not repeat the request. Continue independent work or report the missing prerequisite.".into(),
+                parameters:json!({"type":"object","properties":{"name":{"type":"string","maxLength":64},"reason":{"type":"string","maxLength":1024}},"required":["name","reason"],"additionalProperties":false}),
+            });
+        }
         if self.selected_recipe.as_ref().is_some_and(|(definition, _)| !definition.children.is_empty())
             && (self.depth as usize) < self.rook.config.composite_recipes.max_depth
         {

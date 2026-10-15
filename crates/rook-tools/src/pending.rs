@@ -103,6 +103,10 @@ impl<Q, A> Pending<Q, A> {
         self.hold().values().any(|entry| !entry.answer.is_closed())
     }
 
+    pub fn accepts(&self, id: &str, matches: impl FnOnce(&Q) -> bool) -> bool {
+        self.hold().get(id).is_some_and(|entry| !entry.answer.is_closed() && matches(&entry.request))
+    }
+
     /// Only requests whose answers can still be delivered, never old replay.
     pub fn current(&self) -> Vec<Q>
     where
@@ -160,6 +164,30 @@ impl<Q, A> Pending<Q, A> {
             self.changed();
             let _ = entry.answer.send(answer);
         }
+    }
+
+    /// Claim an exact live request before applying a private response. The
+    /// effect runs outside the registry lock; duplicate/late responses lose
+    /// the claim and never run it. Scope mismatch preserves the rightful waiter.
+    pub fn answer_with(
+        &self,
+        id: &str,
+        matches: impl FnOnce(&Q) -> bool,
+        answer: impl FnOnce(&Q) -> A,
+    ) -> bool {
+        let entry = {
+            let mut waiting = self.hold();
+            let Some(entry) = waiting.get(id) else { return false };
+            if entry.answer.is_closed() || !matches(&entry.request) {
+                return false;
+            }
+            waiting.remove(id)
+        };
+        let Some(entry) = entry else { return false };
+        self.changed();
+        let value = answer(&entry.request);
+        let _ = entry.answer.send(value);
+        true
     }
 
     /// A poisoned map is one a panicking asker left mid-insert; the entries are

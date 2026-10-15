@@ -52,6 +52,13 @@ async fn spawn_reply(mode: &'static str, version: &'static str, echo: bool) -> S
                     let body = &text[split + 4..];
                     let request: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
                     let method = request["method"].as_str().unwrap_or("");
+                    if method == "tools/call" && mode == "trace" {
+                        assert_eq!(request["params"]["arguments"], serde_json::json!({}));
+                        assert_eq!(
+                            request["params"]["_meta"]["traceparent"],
+                            "00-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-cccccccccccccccc-01"
+                        );
+                    }
                     let id = request["id"].clone();
                     let has_session = text.to_lowercase().contains("mcp-session-id: s-1");
 
@@ -204,6 +211,14 @@ async fn a_json_answer_round_trips() {
     assert_eq!(server.info().server.name, "over-http");
     assert_eq!(server.list_tools().await.unwrap()[0].name, "ping");
     let result = server.call_tool("ping", &serde_json::json!({})).await.unwrap();
+    assert_eq!(result.to_text(), "pong");
+}
+
+#[tokio::test]
+async fn explicit_tool_correlation_travels_as_metadata_without_changing_arguments() {
+    let server = Server::connect(&config(spawn("trace").await), &Default::default()).await.unwrap();
+    let trace = rook_llm::TraceContext::bounded(&"b".repeat(32), &"c".repeat(16), None).unwrap();
+    let result = server.call_tool_traced("ping", &serde_json::json!({}), &trace).await.unwrap();
     assert_eq!(result.to_text(), "pong");
 }
 

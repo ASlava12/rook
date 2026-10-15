@@ -9768,7 +9768,8 @@ fn external_acp_fixture(mode: &str, receipt: &std::path::Path) -> Fixture {
 async fn an_external_acp_delegate_writes_through_native_checkpoints_and_retains_unpriced_lineage() {
     let receipts = tempfile::tempdir().unwrap();
     let marker = receipts.path().join("process.json");
-    let f = external_acp_fixture("acp-write", &marker);
+    let mut f = external_acp_fixture("acp-write", &marker);
+    f.rook.config.telemetry.propagate_trace = true;
     let session = f.rook.start_session("ACP parent").unwrap();
     let provider = ScriptedProvider::new(vec![call(
         "delegate",
@@ -9787,6 +9788,15 @@ async fn an_external_acp_delegate_writes_through_native_checkpoints_and_retains_
     assert_eq!(std::fs::read_to_string(f.rook.workspace.join("fixture.txt")).unwrap(), "owned ACP change\n");
     let child = rook_store::parse_session_id(&outcome.delegated[0]).unwrap();
     assert_eq!(f.rook.store.get_session(child).unwrap().unwrap().parent, Some(session));
+    let root_trace = f.rook.session_trace(session).unwrap().unwrap();
+    let child_trace = f.rook.session_trace(child).unwrap().unwrap();
+    assert_eq!(root_trace.trace_id, child_trace.trace_id);
+    assert_eq!(child_trace.parent_span_id.as_deref(), Some(root_trace.span_id.as_str()));
+    let diagnostics = f.rook.diagnostics(child, false).unwrap();
+    let acp =
+        diagnostics.timings.iter().find(|entry| entry["measurement"]["phase"] == "acp_request").unwrap();
+    let acp_trace: rook_llm::TraceContext =
+        serde_json::from_value(acp["measurement"]["trace"].clone()).unwrap();
     let events = f.rook.store.events(child, 0, 128).unwrap();
     assert_eq!(
         events
@@ -9809,6 +9819,7 @@ async fn an_external_acp_delegate_writes_through_native_checkpoints_and_retains_
     }));
     let transmitted: serde_json::Value =
         serde_json::from_slice(&std::fs::read(marker.with_extension("prompt.json")).unwrap()).unwrap();
+    assert_eq!(transmitted["_meta"]["traceparent"], acp_trace.traceparent().unwrap());
     let transmitted = transmitted["prompt"][0]["text"].as_str().unwrap();
     assert!(transmitted.contains("literal delegated context"));
     assert!(

@@ -1150,6 +1150,7 @@ fn carry_view(
     let carrying = tokio::spawn(async move {
         let mut approvals_changed = live.approver.changes();
         let mut questions_changed = live.asker.changes();
+        let mut private_changed = live.asker.private_input().map(|input| input.changes());
         loop {
             let (mut coming, missed, truncated) = live.join();
             // Starting a new turn keeps this window's prior conversation and
@@ -1157,7 +1158,11 @@ fn carry_view(
             // turn does so only if it already outgrew the replay budget.
             if live_snapshots && (replace || truncated) {
                 let approvals = missed.iter().filter_map(|e| match e { ChatEvent::Approval { id, .. } => Some(id.clone()), _ => None }).collect();
-                let questions = missed.iter().filter_map(|e| match e { ChatEvent::Ask { id, .. } => Some(id.clone()), _ => None }).collect();
+                let questions = missed.iter().filter_map(|e| match e {
+                    ChatEvent::Ask { id, .. } => Some(id.clone()),
+                    ChatEvent::SecretRequest { prompt } => Some(prompt.id.clone()),
+                    _ => None,
+                }).collect();
                 if to_window.send(ChatEvent::Snapshot {
                     session: rook_store::format_session_id(session), running: live.running(), truncated,
                     approvals, questions,
@@ -1181,13 +1186,16 @@ fn carry_view(
                     changed = questions_changed.changed(), if live_snapshots => {
                         if changed.is_err() || send_inputs(&live, &to_window).await.is_err() { return; }
                     }
+                    changed=async {match private_changed.as_mut(){Some(changed)=>changed.changed().await,None=>std::future::pending().await}}, if live_snapshots => {
+                        if changed.is_err() || send_inputs(&live,&to_window).await.is_err(){return;}
+                    }
                     notification = coming.recv() => match notification {
                         Ok(sequence) => {
                             let event = live.backlog.lock().unwrap_or_else(|e| e.into_inner()).get(sequence);
                             let Some(event) = event else { break };
                             // Current requests arrive from their authoritative map,
                             // including resolution; an old relay event is not state.
-                            if live_snapshots && matches!(event, ChatEvent::Approval { .. } | ChatEvent::Ask { .. }) { continue; }
+                            if live_snapshots && matches!(event, ChatEvent::Approval { .. } | ChatEvent::Ask { .. } | ChatEvent::SecretRequest { .. }) { continue; }
                             if to_window.send(event).await.is_err() { return; }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => break,
@@ -1216,6 +1224,7 @@ async fn send_inputs(live: &Live, to_window: &delivery::Sender) -> Result<(), de
         .iter()
         .filter_map(|event| match event {
             ChatEvent::Ask { id, .. } => Some(id.clone()),
+            ChatEvent::SecretRequest { prompt } => Some(prompt.id.clone()),
             _ => None,
         })
         .collect();
@@ -1573,7 +1582,12 @@ impl Live {
         let (events, truncated) = kept.snapshot();
         let mut missed: Vec<_> = events
             .into_iter()
-            .filter(|event| !matches!(event, ChatEvent::Approval { .. } | ChatEvent::Ask { .. }))
+            .filter(|event| {
+                !matches!(
+                    event,
+                    ChatEvent::Approval { .. } | ChatEvent::Ask { .. } | ChatEvent::SecretRequest { .. }
+                )
+            })
             .collect();
         missed.extend(self.inputs());
         if let Some(state) = self.activity() {
@@ -1604,7 +1618,14 @@ impl Live {
                     .collect(),
             });
         }
+        if let Some(private) = self.asker.private_input() {
+            missed.extend(private.current().into_iter().map(|prompt| ChatEvent::SecretRequest { prompt }));
+        }
         missed
+    }
+
+    pub(crate) fn private_input(&self) -> Option<Arc<rook_tools::private_input::PrivateInput>> {
+        self.asker.private_input().cloned()
     }
 
     /// End the turn and everything that was carrying it.
@@ -2204,19 +2225,26 @@ pub(crate) fn asker(
     limits: rook_tools::pending::Limits,
 ) -> (Arc<ChannelAsker>, tokio::task::JoinHandle<()>) {
     let (requests, mut incoming) = mpsc::unbounded_channel::<AskRequest>();
+    let (secrets, mut private_requests) = mpsc::unbounded_channel::<rook_proto::SecretPrompt>();
+    let private = Arc::new(rook_tools::private_input::PrivateInput::new(secrets, patience, limits));
     let relay = tokio::spawn(async move {
-        while let Some(request) = incoming.recv().await {
-            let questions = request
-                .questions
-                .into_iter()
-                .map(|q| AskQuestion { question: q.question, choices: q.choices, multi: q.multi })
-                .collect();
-            if outbound.send(ChatEvent::Ask { id: request.id, questions }).is_err() {
-                break;
+        loop {
+            tokio::select! {
+                request = incoming.recv() => {
+                    let Some(request) = request else { break };
+                    let questions = request.questions.into_iter()
+                        .map(|q| AskQuestion { question: q.question, choices: q.choices, multi: q.multi })
+                        .collect();
+                    if outbound.send(ChatEvent::Ask { id: request.id, questions }).is_err() { break; }
+                }
+                prompt = private_requests.recv() => {
+                    let Some(prompt) = prompt else { break };
+                    if outbound.send(ChatEvent::SecretRequest { prompt }).is_err() { break; }
+                }
             }
         }
     });
-    (Arc::new(ChannelAsker::new(requests, patience, limits)), relay)
+    (Arc::new(ChannelAsker::new(requests, patience, limits).with_private_input(private)), relay)
 }
 
 /// Relays approval requests to the browser and routes the answers back.

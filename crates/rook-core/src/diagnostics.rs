@@ -20,6 +20,7 @@ pub(crate) enum Phase {
     CheckRequest,
     CompactionRequest,
     ToolDispatch,
+    AcpRequest,
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -34,6 +35,16 @@ struct Timing {
     status: Status,
     duration_ms: u64,
     result_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    trace: Option<rook_llm::TraceContext>,
+}
+impl Timing {
+    fn valid(&self) -> bool {
+        self.trace.as_ref().is_none_or(|trace| {
+            rook_llm::TraceContext::bounded(&trace.trace_id, &trace.span_id, trace.parent_span_id.as_deref())
+                .is_some()
+        })
+    }
 }
 
 /// Cancellation drops the future before ordinary completion code can run.
@@ -44,6 +55,7 @@ pub(crate) struct Timer {
     phase: Phase,
     started: tokio::time::Instant,
     finished: bool,
+    trace: Option<rook_llm::TraceContext>,
 }
 impl Timer {
     pub(crate) fn start(rook: &Rook, session: u128, phase: Phase) -> Self {
@@ -53,7 +65,15 @@ impl Timer {
             phase,
             started: tokio::time::Instant::now(),
             finished: false,
+            trace: crate::correlation::operation(
+                &rook.store,
+                session,
+                &rook_store::format_session_id(rook_store::new_session_id()),
+            ),
         }
+    }
+    pub(crate) fn trace(&self) -> Option<rook_llm::TraceContext> {
+        self.trace.clone()
     }
     pub(crate) fn finish(&mut self, status: Status, result_seq: Option<u64>) {
         if self.finished {
@@ -65,6 +85,7 @@ impl Timer {
             status,
             duration_ms: self.started.elapsed().as_millis().min(u64::MAX as u128) as u64,
             result_seq,
+            trace: self.trace.clone(),
         };
         if let Ok(body) = serde_json::to_vec(&sample)
             && let Err(error) = self.store.append_event(
@@ -104,7 +125,10 @@ pub(crate) fn tool_measurement(
         }
         let bytes = rook.store.get_range(&event.record.body, 0, MAX_TIMING as usize)?;
         let Ok(sample) = serde_json::from_slice::<Timing>(&bytes) else { continue };
-        if !matches!(sample.phase, Phase::ToolDispatch) || sample.result_seq != Some(result.seq) {
+        if !sample.valid()
+            || !matches!(sample.phase, Phase::ToolDispatch)
+            || sample.result_seq != Some(result.seq)
+        {
             continue;
         }
         let failed = match sample.status {
@@ -133,6 +157,8 @@ pub struct Report {
     pub settings: Value,
     pub events: Vec<Value>,
     pub timings: Vec<Value>,
+    #[serde(default)]
+    pub traces: Vec<Value>,
     pub logs: Vec<Value>,
     pub notices: Vec<String>,
     #[serde(default)]
@@ -204,6 +230,7 @@ impl Rook {
                 "stream_idle_timeout_secs":self.config.agent.stream_idle().as_secs()}),
             events: Vec::new(),
             timings: Vec::new(),
+            traces: Vec::new(),
             logs: Vec::new(),
             notices: Vec::new(),
             activity: None,
@@ -212,6 +239,13 @@ impl Rook {
             Ok(state) => report.activity = state,
             Err(_) => report.notices.push("activity observation could not be read".into()),
         }
+        report.session["trace"] = serde_json::to_value(self.session_trace(session)?)?;
+        if report.session["trace"].is_null() {
+            report.notices.push(
+                "session ancestry is missing, cyclic or exceeds 64 levels; correlation is unavailable".into(),
+            );
+        }
+        report.settings["propagate_trace"] = json!(self.config.telemetry.propagate_trace);
         match crate::execution::diagnostic_state(&self.store, session) {
             Ok(state) => report.execution = state,
             Err(_) => report.notices.push("execution receipt could not be read".into()),
@@ -223,12 +257,30 @@ impl Rook {
             let size = self.store.stat_object(&event.record.body)?.map(|m| m.size_raw).unwrap_or(0);
             report.events.push(json!({"seq":event.seq,"at":event.record.ts,
                 "kind":event.record.kind.as_str(),"bytes":size}));
+            if event.record.kind == EventKind::Note && event.record.label == crate::model_attempt::LABEL {
+                let attempt = if size <= crate::model_route::MAX_BYTES as u64 {
+                    self.store
+                        .get(&event.record.body)
+                        .ok()
+                        .and_then(|body| crate::model_attempt::Record::read(&body).ok())
+                } else {
+                    None
+                };
+                if let Some(attempt) = attempt {
+                    report.traces.push(json!({"seq":event.seq,"at":event.record.ts,
+                        "attempt_id":attempt.id,"purpose":attempt.purpose,"state":attempt.state,
+                        "trace":attempt.trace,"provider_request_ids":attempt.provider_request_ids}));
+                } else if !report.notices.iter().any(|n| n == "some correlation records could not be read") {
+                    report.notices.push("some correlation records could not be read".into());
+                }
+            }
             if event.record.kind == EventKind::Note && event.record.label == TIMING_LABEL {
                 let sample = if size <= MAX_TIMING {
                     self.store
                         .get(&event.record.body)
                         .ok()
                         .and_then(|bytes| serde_json::from_slice::<Timing>(&bytes).ok())
+                        .filter(Timing::valid)
                 } else {
                     None
                 };

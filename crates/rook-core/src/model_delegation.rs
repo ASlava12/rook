@@ -177,6 +177,7 @@ mod tests {
                     usage_reported: true,
                     completion_confirmed: true,
                     reported_model: Some("server".into()),
+                    ..Default::default()
                 },
             )
             .unwrap();

@@ -7,6 +7,7 @@ mod commands;
 mod fmt;
 mod notify;
 mod paste;
+mod private_input;
 mod remote;
 mod source;
 mod tui;

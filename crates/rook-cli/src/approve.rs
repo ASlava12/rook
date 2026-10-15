@@ -37,6 +37,24 @@ impl Approver for Terminal {
 
 #[async_trait]
 impl rook_tools::ask::Asker for Terminal {
+    fn supports_private_input(&self) -> bool {
+        crate::private_input::available()
+    }
+
+    async fn request_secret(
+        &self,
+        prompt: rook_proto::SecretPrompt,
+        sink: std::sync::Arc<dyn rook_tools::private_input::SecretSink>,
+    ) -> rook_proto::SecretStatus {
+        let (draft, status) = crate::private_input::read(prompt).await;
+        let status = match draft.value(status) {
+            Some(value) => sink.save(value),
+            None => status,
+        };
+        sink.close();
+        status
+    }
+
     async fn ask(&self, questions: &[Question]) -> Vec<Answer> {
         crate::notify::attention();
         let asked = questions.to_vec();

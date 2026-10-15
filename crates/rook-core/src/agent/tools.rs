@@ -326,6 +326,15 @@ impl<'a> AgentLoop<'a> {
             return (text, failed);
         }
 
+        if call.name == super::REQUEST_SECRET {
+            let (text, failed) = match self.request_private_secret(&call.arguments).await {
+                Ok(result) => (result.to_string(), false),
+                Err(error) => (self.vault.redact(&error.to_string()), true),
+            };
+            self.rook.log(self.session, EventKind::ToolResult, &call.name, &text).ok();
+            return (text, failed);
+        }
+
         if call.name == VERIFY {
             let text = self.verify(&call.arguments, outcome, on_progress).await;
             self.rook.log(self.session, EventKind::ToolResult, VERIFY, &text).ok();

@@ -936,6 +936,17 @@ compatibility API. Calendar computation and persistence live in
 `rook-core::schedules`.
 See [durable work](durable-work.md) and [ADR-0014](adr/0014-durable-work.md).
 
+Diagnostic correlation uses bounded session ancestry (64 entries) to establish
+one trace identity for a conversation family. Each admitted physical generation
+and timed tool/ACP operation gets its own span. Wire metadata is separate from
+model messages: native adapters capture at most four allowlisted response IDs
+of at most 128 bytes, reject reflected credentials, and the host redacts again
+before JSON receipt persistence. Default support exports select IDs and timing
+metadata without payloads. External propagation requires
+`telemetry.propagate_trace`; it adds W3C `traceparent` to the configured native
+provider headers and MCP/ACP metadata, without an exporter. Request-local state
+is recreated per physical retry, never taken from the last active conversation.
+
 
 Configured external ACP errands run inside ordinary `AgentLoop` child admission,
 workspace leases, lineage and execution recovery. `acp_executor` owns only bounded

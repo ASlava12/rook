@@ -134,6 +134,9 @@ pub(crate) fn cmd_run(
         if yes {
             agent.allow_everything_not_denied();
         }
+        if !json && crate::private_input::available() {
+            agent.ask_via(std::sync::Arc::new(crate::approve::Terminal));
+        }
         let mcp = rook.connect_mcp().await;
         rook_core::agent::equip(
             &mut agent,
@@ -254,8 +257,12 @@ async fn through_the_daemon(
 
     let mut watching = crate::remote::Watching::new(yes, json, view_bytes);
     let mut ended = None;
+    let mut private = crate::private_input::RemoteRequests::new(&daemon.base, !json);
     while let Some(frame) = events.recv().await {
         let Ok(event) = serde_json::from_str::<ChatEvent>(&frame.text) else { continue };
+        if private.observe(&event) {
+            continue;
+        }
         if let Some(over) = watching.saw(event, &to_daemon) {
             ended = Some(over);
             break;

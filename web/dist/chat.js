@@ -241,6 +241,7 @@ function done(keepInputs = false) {
   // a turn that has ended is a control that does nothing, and nothing about it
   // says so — the terminal had the same fault, where it was worse, because an
   // approval there holds the keyboard.
+  clearPrivateInputs();
   for (const open of document.querySelectorAll('.approve, .ask-form')) {
     if (keepInputs) {
       for (const control of open.querySelectorAll('input, button')) control.disabled = true;
@@ -268,7 +269,10 @@ export function connect() {
           ...e.questions.map(id => `question:${id}`),
         ]);
         for (const node of document.querySelectorAll('#stream [data-input-key]')) {
-          if (!active.has(node.dataset.inputKey)) node.replaceWith(el('div', { class: 'stat' }, 'request resolved'));
+          if (!active.has(node.dataset.inputKey)) {
+            for (const field of node.querySelectorAll('input[type="password"]')) field.value = '';
+            node.replaceWith(el('div', { class: 'stat' }, 'request resolved'));
+          }
         }
         retainedInputs = new Map([...retainedInputs].filter(([key]) => active.has(key)));
         state.chat.waiting = active.size > 0;
@@ -276,6 +280,7 @@ export function connect() {
         break;
       }
       case 'snapshot': {
+        clearPrivateInputs();
         finishModel(false);
         if (state.chat.session !== e.session) resetExtensions();
         goalGeneration = null;
@@ -380,6 +385,7 @@ export function connect() {
         break;
       case 'approval': askApproval(e); break;
       case 'ask': askUser(e); break;
+      case 'secret_request': askSecret(e.prompt); break;
       // Which step of the budget it is on, where the button already says it
       // is busy: `…` says something is happening and not how much room is
       // left, and a turn at 190 of 200 is about to stop mid-task.
@@ -434,6 +440,7 @@ export function connect() {
     if (socket === connection && state.chat.session) connection.send(JSON.stringify({ type: 'attach', session: state.chat.session }));
   }, { once: true });
   socket.onclose = () => {
+    clearPrivateInputs();
     if (socket === connection) {
       retryPrompt.disconnected();
       say('err', retryPrompt.candidate()
@@ -577,6 +584,66 @@ function askApproval(request) {
 
 // One form for every question in the call: the agent asked them together
 // because they are independent, and a chain of dialogs would undo that.
+// This form is never a composer draft or ordinary Answers message. Discard
+// private edits on reconnect/turn end instead of retaining them with questions.
+function clearPrivateInputs() {
+  for (const form of document.querySelectorAll('.private-input-form')) {
+    for (const field of form.querySelectorAll('input')) field.value = '';
+    retainedInputs.delete(form.dataset.inputKey);
+    form.replaceWith(el('div', { class: 'stat' }, 'private input closed'));
+  }
+}
+
+function askSecret(prompt) {
+  finishModel();
+  if (reuseInput('question', prompt.id, inputShape(prompt))) return;
+  waitingOn(`private value for ${prompt.name}`);
+  const password = el('input', { type: 'password', autocomplete: 'off', maxlength: '8192',
+    'aria-label': `Private value for ${prompt.name}` });
+  const status = el('div', { class: 'stat' });
+  let submitting = false;
+  const submit = async (choice) => {
+    if (submitting) return;
+    const value = password.value;
+    if (choice === 'saved' && (!value || new TextEncoder().encode(value).length > 8192)) {
+      status.textContent = 'Enter a value of at most 8192 bytes, or skip.';
+      return;
+    }
+    submitting = true;
+    password.value = '';
+    for (const control of form.querySelectorAll('input, button')) control.disabled = true;
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(prompt.session)}/private-input/${encodeURIComponent(prompt.id)}`, {
+        method: 'POST', redirect: 'error', credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(choice === 'saved' ? { status: choice, value } : { status: choice }),
+      });
+      if (!response.ok) throw new Error('private response not confirmed');
+      const result = await response.json();
+      if (!['saved', 'declined', 'skipped', 'expired', 'cancelled', 'unavailable', 'busy', 'failed'].includes(result.status)) {
+        throw new Error('invalid private status');
+      }
+      form.replaceWith(el('div', { class: 'stat' }, `private request: ${result.status}`));
+      answered();
+    } catch (_) {
+      // Never display an HTTP error body alongside a private payload.
+      status.textContent = 'Response not confirmed. Inspect request status before trying again.';
+      submitting = false;
+      for (const control of form.querySelectorAll('input, button')) control.disabled = false;
+    }
+  };
+  const form = el('form', { class: 'private-input-form', autocomplete: 'off', onsubmit: (e) => {
+    e.preventDefault(); submit('saved');
+  } }, el('p', {}, `Private credential: ${prompt.name}`), el('p', {}, prompt.reason), password,
+    el('button', { type: 'submit' }, 'Save privately'),
+    el('button', { type: 'button', onclick: () => submit('declined') }, 'Decline'),
+    el('button', { type: 'button', onclick: () => submit('skipped') }, 'Skip'), status);
+  form.dataset.inputKey = `question:${prompt.id}`;
+  form.dataset.inputShape = inputShape(prompt) || '';
+  const out = chatOut();
+  if (out) { out.append(form); out.scrollTop = out.scrollHeight; }
+}
+
 function askUser(request) {
   finishModel();
   const shape = inputShape(request.questions);

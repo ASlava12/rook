@@ -140,6 +140,9 @@ async fn resource_discovery_is_paged_bounded_attributed_and_rejects_a_changed_co
         tools.register_mcp_catalog(session.servers(), Default::default());
         let mut context = ToolContext::new(std::env::temp_dir());
         context.max_output_bytes = 4096;
+        let trace = rook_llm::TraceContext::bounded(&"b".repeat(32), &"c".repeat(16), None).unwrap();
+        context.trace = Some(trace.clone());
+        context.propagate_trace = true;
         let local = tools.call(&context, "list_mcp_resources", &json!({})).await.unwrap();
         assert_eq!(serde_json::from_str::<Value>(&local.content).unwrap()["servers"], json!(["documents"]));
         assert_eq!(
@@ -201,6 +204,15 @@ async fn resource_discovery_is_paged_bounded_attributed_and_rejects_a_changed_co
         let error = tools.call(&context, "list_mcp_resources", &args).await.unwrap_err();
         assert!(error.to_string().contains("source changed"));
         assert!(fixture.requests.lock().unwrap().iter().all(|r| r["method"] != "resources/read"));
+        assert!(
+            fixture
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r["method"].as_str().is_some_and(|m| m.starts_with("resources/")))
+                .all(|request| request["params"]["_meta"]["traceparent"] == trace.traceparent().unwrap())
+        );
     }
 }
 
@@ -316,6 +328,7 @@ async fn shared_equipment_exposes_resource_only_servers_and_the_ordinary_journal
     let mut config = Config::default();
     config.agent.context_window = Some(32000);
     config.agent.install_servers = false;
+    config.telemetry.propagate_trace = true;
     config.sandbox.allow = vec!["documents__resources_read".into()];
     let rook = Rook::from_parts(
         rook_store::Store::open(root.path().join("store")).unwrap(),
@@ -324,7 +337,9 @@ async fn shared_equipment_exposes_resource_only_servers_and_the_ordinary_journal
         rook_skills::SkillIndex::default(),
         root.path().into(),
     );
+    let parent = rook.start_session("root conversation").unwrap();
     let session = rook.start_session("read MCP document").unwrap();
+    rook.store.update_session(session, |meta| meta.parent = Some(parent)).unwrap();
     let model = Arc::new(Model { seen: Mutex::new(Vec::new()) });
     let mut agent = AgentLoop::new(&rook, model.clone(), session);
     agent::equip(
@@ -334,6 +349,20 @@ async fn shared_equipment_exposes_resource_only_servers_and_the_ordinary_journal
         agent::jobs_for(&rook.config),
     );
     agent.run("Read the second resource content block").await.unwrap();
+    let trace = rook.session_trace(session).unwrap().unwrap();
+    assert_eq!(trace.trace_id, rook.session_trace(parent).unwrap().unwrap().trace_id);
+    let report = rook.diagnostics(session, false).unwrap();
+    assert!(!report.traces.is_empty());
+    assert!(report.traces.iter().all(|entry| entry["trace"]["trace_id"] == trace.trace_id));
+    let calls = fixture.requests.lock().unwrap();
+    let read = calls.iter().find(|call| call["method"] == "resources/read").unwrap();
+    let propagated = read["params"]["_meta"]["traceparent"].as_str().unwrap();
+    let timing =
+        report.timings.iter().find(|entry| entry["measurement"]["phase"] == "tool_dispatch").unwrap();
+    let timed_trace: rook_llm::TraceContext =
+        serde_json::from_value(timing["measurement"]["trace"].clone()).unwrap();
+    assert_eq!(Some(propagated), timed_trace.traceparent().as_deref());
+    drop(calls);
     let seen = model.seen.lock().unwrap();
     assert!(seen.len() >= 2);
     assert!(
@@ -350,7 +379,16 @@ async fn shared_equipment_exposes_resource_only_servers_and_the_ordinary_journal
     rook.store.flush().unwrap();
     drop(rook);
     let reopened = rook_store::Store::open(root.path().join("store")).unwrap();
-    let events = reopened.events(session, 0, 100).unwrap();
+    let reopened_trace = Rook::from_parts(
+        reopened,
+        Config::default(),
+        rook_skills::Environment::bare("linux", "x86_64", "0.1.0"),
+        rook_skills::SkillIndex::default(),
+        root.path().into(),
+    );
+    assert_eq!(reopened_trace.session_trace(session).unwrap(), Some(trace));
+    assert_eq!(reopened_trace.diagnostics(session, false).unwrap().traces, report.traces);
+    let events = reopened_trace.store.events(session, 0, 100).unwrap();
     assert!(
         events
             .iter()

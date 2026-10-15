@@ -480,6 +480,13 @@ rook secrets add npm --source env:NPM_TOKEN    # or say where it already lives
 rook secrets ls                           # names, sources, whether they answer
 ```
 
+In an interactive conversation the agent can call `request_secret` with a name
+and a reason. Enter its value in the dedicated private field (hidden in the
+terminal); the model receives only the name and status. Decline, skip, or leave
+the request unanswered. A refusal or timeout ends that request without another
+prompt for the same secret in the ongoing turn. Existing credential sources are
+preserved. ACP clients without a private input surface do not offer this tool.
+
 ```
 run_command { "command": "sshpass -e ssh deploy@prod 'systemctl restart api'",
               "secrets": ["ssh_prod"] }
@@ -1272,6 +1279,14 @@ and measured request/tool durations. It excludes conversation bodies, session
 titles, tool arguments, model URLs and credentials. Logs are opt-in: credential
 patterns, URLs and local home/workspace paths are redacted, but arbitrary private
 application text can remain, so inspect a log-inclusive report before sharing it.
+
+Reports also contain a shared root/child trace identity, individual generation
+spans and a bounded allowlist of provider response IDs. The IDs survive failures,
+retries, cancellation and restart. Tool and ACP durations carry the same trace.
+Trace metadata is never inserted into model messages. Set
+`telemetry.propagate_trace = true` to additionally send W3C `traceparent` to the
+configured LLM endpoints and in MCP/ACP request metadata. This is off by default
+and enables no telemetry exporter or support-report upload.
 
 `telemetry.diagnostic_events` defaults to 256 and is clamped to 1–2048 events.
 `telemetry.diagnostic_log_bytes` defaults to 65536 and caps each of the two log

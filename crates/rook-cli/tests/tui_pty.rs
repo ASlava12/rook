@@ -880,12 +880,22 @@ fn a_model_that_asks_to_run(
     home: &std::path::Path,
     command: &str,
 ) -> std::sync::mpsc::Receiver<serde_json::Value> {
+    a_model_that_calls(home, "run_command", serde_json::json!({"command":command,"cwd":"."}))
+}
+
+fn a_model_that_calls(
+    home: &std::path::Path,
+    tool: &str,
+    arguments: serde_json::Value,
+) -> std::sync::mpsc::Receiver<serde_json::Value> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    let arguments = serde_json::json!({ "command": command, "cwd": "." }).to_string();
+    let arguments = arguments.to_string();
+    let tool = tool.to_owned();
     let (sent, received) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         use std::io::{BufRead, BufReader, Write};
+        let mut private_called = false;
         while let Ok((mut socket, _)) = listener.accept() {
             let mut reader = BufReader::new(socket.try_clone().unwrap());
             let mut request = String::new();
@@ -906,10 +916,17 @@ fn a_model_that_asks_to_run(
                 let _ = sent.send(serde_json::from_slice(&body).unwrap());
             }
 
-            let body = if request.contains("chat/completions") {
+            let private_finished = tool == "request_secret" && private_called;
+            if tool == "request_secret" && request.contains("chat/completions") {
+                private_called = true;
+            }
+            let body = if private_finished {
+                let frame = serde_json::json!({"choices":[{"index":0,"delta":{"content":"PRIVATE_REQUEST_FINISHED"},"finish_reason":"stop"}]});
+                format!("data: {frame}\n\ndata: [DONE]\n\n")
+            } else if request.contains("chat/completions") {
                 let call = serde_json::json!({"choices": [{"index": 0, "delta": {"tool_calls": [{
                     "index": 0, "id": "call-1", "type": "function",
-                    "function": { "name": "run_command", "arguments": arguments }
+                    "function": { "name": tool, "arguments": arguments }
                 }]}, "finish_reason": null}]});
                 let end = serde_json::json!({"choices": [{"index": 0, "delta": {},
                     "finish_reason": "tool_calls"}]});
@@ -939,6 +956,59 @@ fn a_model_that_asks_to_run(
     .unwrap();
     unsafe { std::env::set_var("ROOK_LLM_BASE_URL", format!("http://{addr}/v1")) };
     received
+}
+
+#[test]
+fn private_input_is_hidden_and_refusal_is_respected_in_local_and_daemon_tui() {
+    let _one = one_at_a_time();
+    const VALUE: &str = "PRIVATE_PTY_VALUE_93";
+    for remote in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let requests = a_model_that_calls(
+            home.path(),
+            "request_secret",
+            serde_json::json!({"name":"private_pty","reason":"Authenticate the requested check"}),
+        );
+        let _daemon = remote.then(|| Daemon::start(home.path(), workspace.path()));
+        let mut args = vec!["--workspace", workspace.path().to_str().unwrap(), "tui"];
+        if !remote {
+            args.push("--alone");
+        }
+        let mut pty = Pty::spawn(
+            std::path::Path::new(env!("CARGO_BIN_EXE_rook")),
+            &args,
+            &[
+                ("ROOK_HOME", home.path().to_str().unwrap()),
+                ("ROOK_LOG", "error"),
+                ("TERM", "xterm-256color"),
+            ],
+            100,
+            30,
+        );
+        pty.screen(100, 30);
+        pty.send("Run the optional authenticated check\r");
+        pty.screen_showing(100, 30, "Private credential: private_pty");
+        pty.send(VALUE);
+        let screen = pty.screen(100, 30).join("\n");
+        assert!(!screen.contains(VALUE));
+        assert!(!pty.seen.contains(VALUE), "private input must never be painted, even transiently");
+        pty.send(if remote { "\u{4}" } else { "\r" });
+        pty.screen_showing(
+            100,
+            30,
+            if remote { "private request: skipped" } else { "private request: saved" },
+        );
+        pty.screen_showing(100, 30, "PRIVATE_REQUEST_FINISHED");
+        assert!(!pty.seen.contains(VALUE));
+        let stored = std::fs::read_to_string(home.path().join("secrets.toml")).unwrap_or_default();
+        assert_eq!(stored.contains(VALUE), !remote);
+        let first = requests.recv_timeout(PATIENCE).unwrap();
+        assert!(first["tools"].as_array().unwrap().iter().any(|t| t["function"]["name"] == "request_secret"));
+        for request in requests.try_iter() {
+            assert!(!request.to_string().contains(VALUE));
+        }
+    }
 }
 
 fn steering_during_a_tool_reaches_the_next_request(through_daemon: bool) {

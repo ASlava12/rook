@@ -55,6 +55,7 @@ impl<'a> AgentLoop<'a> {
                 effort: Some(rook_llm::Effort::Low),
                 cache_ttl: Default::default(),
                 model_capabilities: Default::default(),
+                trace: Default::default(),
             };
             let input = request.messages.iter().map(|m| m.content.len().div_ceil(3)).sum::<usize>();
             request.max_output_tokens = self.room_for_output(input);

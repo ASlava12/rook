@@ -52,6 +52,24 @@ impl Server {
 
     /// One native page. The caller owns pagination; opaque cursors are not URLs.
     pub async fn resource_page(&self, templates: bool, cursor: Option<&str>) -> Result<ResourcePage> {
+        self.resource_page_inner(templates, cursor, None).await
+    }
+
+    pub async fn resource_page_traced(
+        &self,
+        templates: bool,
+        cursor: Option<&str>,
+        trace: &rook_llm::TraceContext,
+    ) -> Result<ResourcePage> {
+        self.resource_page_inner(templates, cursor, Some(trace)).await
+    }
+
+    async fn resource_page_inner(
+        &self,
+        templates: bool,
+        cursor: Option<&str>,
+        trace: Option<&rook_llm::TraceContext>,
+    ) -> Result<ResourcePage> {
         let method = if templates { "resources/templates/list" } else { "resources/list" };
         self.resource_support(method)?;
         if cursor.is_some_and(|s| s.is_empty() || s.len() > 4096) {
@@ -60,6 +78,9 @@ impl Server {
         let mut params = json!({});
         if let Some(cursor) = cursor {
             params["cursor"] = json!(cursor);
+        }
+        if let Some(trace) = trace {
+            params = crate::trace_params(params, trace);
         }
         let mut value: Value = self.request(method, Some(params)).await?;
         self.resource_budget(method, &value, self.config.catalog_max_bytes)?;
@@ -99,13 +120,33 @@ impl Server {
     /// Read only through the selected server. A resource URI is never fetched by
     /// Rook's web/file transports and cannot change the connection's authority.
     pub async fn read_resource(&self, uri: &str) -> Result<ResourceRead> {
+        self.read_resource_inner(uri, None).await
+    }
+
+    pub async fn read_resource_traced(
+        &self,
+        uri: &str,
+        trace: &rook_llm::TraceContext,
+    ) -> Result<ResourceRead> {
+        self.read_resource_inner(uri, Some(trace)).await
+    }
+
+    async fn read_resource_inner(
+        &self,
+        uri: &str,
+        trace: Option<&rook_llm::TraceContext>,
+    ) -> Result<ResourceRead> {
         self.resource_support("resources/read")?;
         if uri.is_empty() || uri.len() > 8192 || uri.chars().any(char::is_control) {
             return Err(
                 self.resource_error("resources/read", "URI must contain 1..8192 bytes without controls")
             );
         }
-        let value: Value = self.request("resources/read", Some(json!({"uri":uri}))).await?;
+        let params = match trace {
+            Some(trace) => crate::trace_params(json!({"uri":uri}), trace),
+            None => json!({"uri":uri}),
+        };
+        let value: Value = self.request("resources/read", Some(params)).await?;
         self.resource_budget("resources/read", &value, MAX_READ_BYTES)?;
         let Some(contents) = value.get("contents").and_then(Value::as_array) else {
             return Err(self.resource_error("resources/read", "missing contents array"));

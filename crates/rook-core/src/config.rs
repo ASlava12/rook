@@ -970,6 +970,9 @@ pub struct TelemetryConfig {
     /// Nothing leaves the machine. Present so the answer is discoverable rather
     /// than a question.
     pub upload: bool,
+    /// Opt-in W3C correlation headers to configured LLM/MCP endpoints only.
+    /// Does not enable an exporter or upload conversation/support reports.
+    pub propagate_trace: bool,
     pub log_level: String,
     /// Hard cap on the local log directory.
     pub max_log_bytes: u64,
@@ -1249,6 +1252,7 @@ impl Default for TelemetryConfig {
     fn default() -> Self {
         Self {
             upload: false,
+            propagate_trace: false,
             log_level: "warn".into(),
             max_log_bytes: 64 << 20,
             diagnostic_events: 256,

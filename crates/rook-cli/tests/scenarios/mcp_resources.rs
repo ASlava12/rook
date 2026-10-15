@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 
 #[test]
 fn mcp_resources_run_through_native_clients_and_survive_daemon_history_and_reopen() {
+    rook_llm::init_tls();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let log = requests.clone();
     let server = fixture_model::Server::new(move |path, request| {
@@ -38,8 +39,16 @@ fn mcp_resources_run_through_native_clients_and_survive_daemon_history_and_reope
             let listed = messages.iter().any(|m| {
                 m["role"] == "tool" && m["content"].as_str().is_some_and(|s| s.contains("document:receipt"))
             });
+            let checking = messages.iter().any(|m| {
+                m["content"]
+                    .as_str()
+                    .is_some_and(|s| s.contains("You are checking a claim somebody else made"))
+            });
             let (delta, finish) = if read {
-                (json!({"content":"The document contains NATIVE_RESOURCE_RECEIPT_26."}), "stop")
+                (
+                    json!({"content":if checking { "The document contains NATIVE_RESOURCE_RECEIPT_26.\nVERDICT: holds" } else { "The document contains NATIVE_RESOURCE_RECEIPT_26." }}),
+                    "stop",
+                )
             } else {
                 let (name, args) = if listed {
                     ("read_mcp_resource", json!({"server":"documents","uri":"document:receipt"}))
@@ -73,11 +82,20 @@ fn mcp_resources_run_through_native_clients_and_survive_daemon_history_and_reope
     let daemon = Daemon::start(&fixture);
     let remote = fixture.json(&["run", "Read the document through MCP resource discovery"]);
     let second = remote["session"].as_str().unwrap().to_owned();
-    assert!(remote["outcome"]["reply"].as_str().unwrap().contains("NATIVE_RESOURCE_RECEIPT_26"));
+    assert!(
+        remote["reply"].as_str().is_some_and(|r| r.contains("NATIVE_RESOURCE_RECEIPT_26")),
+        "daemon result: {remote}"
+    );
     let connections = fixture.json(&["mcp", "status"]);
     assert_eq!(connections["servers"][0]["resources"], true);
     assert_eq!(connections["servers"][0]["tools"], 0);
     assert!(fixture.ok(&["mcp", "status"]).contains("resources"));
+    let reads_before_history =
+        requests.lock().unwrap().iter().filter(|(_, r)| r["method"] == "resources/read").count();
+    assert_eq!(
+        reads_before_history, 4,
+        "the two turns and their independent completion checkers each read the source"
+    );
     let runtime = tokio::runtime::Runtime::new().unwrap();
     for session in [&first, &second] {
         let saved = fixture.json(&["session", "history", session]).to_string();
@@ -115,7 +133,7 @@ fn mcp_resources_run_through_native_clients_and_survive_daemon_history_and_reope
     let requests = requests.lock().unwrap();
     assert_eq!(
         requests.iter().filter(|(_, r)| r["method"] == "resources/read").count(),
-        2,
+        reads_before_history,
         "history/context/reopen must not repeat resource reads"
     );
     assert!(!requests.iter().any(|(_, r)| r["method"] == "tools/list"));
