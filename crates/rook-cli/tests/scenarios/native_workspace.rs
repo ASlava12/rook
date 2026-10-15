@@ -53,7 +53,8 @@ fn remote_files_and_owned_undo_work_locally_and_through_the_daemon_without_local
         Some(("text/event-stream", format!("data: {frame}\n\ndata: [DONE]\n\n")))
     });
     let fixture = Rook::new();
-    let remote = tempfile::tempdir().unwrap();
+    // The worker rejects symlink ancestors; macOS aliases /var to /private/var.
+    let remote = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     std::fs::write(fixture.workspace.path().join("a.txt"), "WRONG_LOCAL_SOURCE").unwrap();
     let ssh = fixture.home.path().join("fixture-ssh");
     std::fs::write(&ssh, "#!/bin/sh\nfor last; do :; done\nexec /bin/sh -c \"$last\"\n").unwrap();

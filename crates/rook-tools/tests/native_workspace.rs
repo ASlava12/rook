@@ -36,7 +36,8 @@ fn context(dir: &std::path::Path, remote: &std::path::Path) -> ToolContext {
 async fn files_come_from_the_selected_remote_root_and_never_a_same_named_local_replica() {
     let _one = one_at_a_time().await;
     let local = tempfile::tempdir().unwrap();
-    let remote = tempfile::tempdir().unwrap();
+    // The worker rejects symlink ancestors; macOS aliases /var to /private/var.
+    let remote = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let ctx = context(local.path(), remote.path());
     std::fs::write(local.path().join("a.txt"), "WRONG_LOCAL_SOURCE").unwrap();
     std::fs::write(remote.path().join("a.txt"), "REMOTE_SOURCE\nneedle\n").unwrap();
@@ -66,7 +67,8 @@ async fn files_come_from_the_selected_remote_root_and_never_a_same_named_local_r
 async fn symlink_escape_and_reached_source_limits_are_refused_without_returning_outside_text() {
     let _one = one_at_a_time().await;
     let local = tempfile::tempdir().unwrap();
-    let remote = tempfile::tempdir().unwrap();
+    // The worker rejects symlink ancestors; macOS aliases /var to /private/var.
+    let remote = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let outside = tempfile::tempdir().unwrap();
     let mut ctx = context(local.path(), remote.path());
     std::fs::write(outside.path().join("private"), "OUTSIDE_PRIVATE_SOURCE").unwrap();
@@ -91,7 +93,8 @@ async fn symlink_escape_and_reached_source_limits_are_refused_without_returning_
 async fn native_edits_have_owned_receipts_and_undo_refuses_external_changes() {
     let _one = one_at_a_time().await;
     let local = tempfile::tempdir().unwrap();
-    let remote = tempfile::tempdir().unwrap();
+    // The worker rejects symlink ancestors; macOS aliases /var to /private/var.
+    let remote = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let mut ctx = context(local.path(), remote.path());
     ctx.session = Some(1);
     std::fs::write(remote.path().join("a.txt"), "before\n").unwrap();
@@ -130,7 +133,8 @@ async fn native_edits_have_owned_receipts_and_undo_refuses_external_changes() {
 async fn a_read_only_checker_or_missing_session_cannot_prepare_remote_mutations() {
     let _one = one_at_a_time().await;
     let local = tempfile::tempdir().unwrap();
-    let remote = tempfile::tempdir().unwrap();
+    // The worker rejects symlink ancestors; macOS aliases /var to /private/var.
+    let remote = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let mut ctx = context(local.path(), remote.path());
     let args = json!({"operation":"write","path":"new.txt","content":"new"});
     assert!(
