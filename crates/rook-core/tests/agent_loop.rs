@@ -2560,6 +2560,13 @@ async fn context_usage_counts_only_what_survives_compaction() {
     assert_eq!(after.compactions, 1);
 }
 
+/// Hook fixtures start real shell processes. Serialise them just like the MCP
+/// and LSP clients so a loaded VM does not spend their deadlines on other hooks.
+async fn one_at_a_time() -> tokio::sync::MutexGuard<'static, ()> {
+    static GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    GATE.lock().await
+}
+
 fn hooked(f: &Fixture, hooks: Vec<rook_core::hooks::HookConfig>) -> Rook {
     let config = Config { hooks, ..Default::default() };
     Rook::from_parts(
@@ -2595,6 +2602,7 @@ fn prints(json: &str) -> String {
 
 #[tokio::test]
 async fn extension_ui_reports_are_source_owned_historical_and_absent_from_model_context() {
+    let _one = one_at_a_time().await;
     use rook_core::extension_ui::Item;
     use rook_core::hooks::{Event, HookConfig};
     let f = fixture();
@@ -2644,6 +2652,7 @@ async fn extension_ui_reports_are_source_owned_historical_and_absent_from_model_
 
 #[tokio::test]
 async fn extension_ui_requires_explicit_opt_in_and_never_replays_invalid_json_as_context() {
+    let _one = one_at_a_time().await;
     use rook_core::hooks::{Event, HookConfig, Hooks};
     let raw = r#"{"ui":[{"kind":"status","id":"x","text":"display only"}]}"#;
     let f = fixture();
@@ -2724,6 +2733,7 @@ fn extension_ui_saved_updates_clear_only_their_source_and_admit_bounded_state() 
 
 #[tokio::test]
 async fn extension_ui_truncation_is_refused_and_oversized_input_never_starts_a_hook() {
+    let _one = one_at_a_time().await;
     use rook_core::hooks::{Event, HookConfig, Hooks};
     let f = fixture();
     let path = f.workspace.path().join("reply.json");
@@ -2788,6 +2798,7 @@ fn extension_stream_hook(workspace: &std::path::Path) -> rook_core::hooks::HookC
 
 #[tokio::test]
 async fn extension_stream_forms_use_live_input_and_keep_typed_values_out_of_model_and_saved_reports() {
+    let _one = one_at_a_time().await;
     use rook_tools::ask::ChannelAsker;
     let f = fixture();
     let rook = Arc::new(hooked(&f, vec![extension_stream_hook(f.workspace.path())]));
@@ -2866,6 +2877,7 @@ async fn extension_stream_forms_use_live_input_and_keep_typed_values_out_of_mode
 #[tokio::test]
 async fn extension_stream_cancellation_releases_input_and_records_interruption_without_delivering_an_answer()
 {
+    let _one = one_at_a_time().await;
     use rook_tools::ask::ChannelAsker;
     let f = fixture();
     let rook = Arc::new(hooked(&f, vec![extension_stream_hook(f.workspace.path())]));
@@ -2921,6 +2933,7 @@ fn keeps_its_payload(at: &std::path::Path) -> String {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_hook_that_will_not_stop_talking_is_cut_off() {
+    let _one = one_at_a_time().await;
     let (hooks, bad) = rook_core::hooks::Hooks::compile(&[hook(
         rook_core::hooks::Event::SessionStart,
         // Far past what a reply may be, and cheap to produce. `head` closes the
@@ -2942,6 +2955,7 @@ async fn a_hook_that_will_not_stop_talking_is_cut_off() {
 
 #[tokio::test]
 async fn a_pre_tool_hook_can_block_a_call_the_policy_would_have_allowed() {
+    let _one = one_at_a_time().await;
     let f = fixture();
     let rook = hooked(
         &f,
@@ -2968,6 +2982,7 @@ async fn a_pre_tool_hook_can_block_a_call_the_policy_would_have_allowed() {
 
 #[tokio::test]
 async fn a_hook_cannot_unlock_what_the_deny_list_forbids() {
+    let _one = one_at_a_time().await;
     let f = fixture();
     let mut config = Config::default();
     config.sandbox.deny = vec!["/rm -rf/".into()];
@@ -2997,6 +3012,7 @@ async fn a_hook_cannot_unlock_what_the_deny_list_forbids() {
 
 #[tokio::test]
 async fn a_post_tool_hook_appends_what_it_prints_to_the_result() {
+    let _one = one_at_a_time().await;
     let f = fixture();
     let rook = hooked(&f, vec![hook(rook_core::hooks::Event::PostTool, "echo 'formatted with prettier'")]);
     let session = rook.start_session("post").unwrap();
@@ -3017,6 +3033,7 @@ async fn a_post_tool_hook_appends_what_it_prints_to_the_result() {
 
 #[tokio::test]
 async fn a_hook_that_fails_blocks_the_call_it_was_guarding() {
+    let _one = one_at_a_time().await;
     let f = fixture();
     let rook = hooked(&f, vec![hook(rook_core::hooks::Event::PreTool, "exit 3")]);
     let session = rook.start_session("failing").unwrap();
@@ -3037,6 +3054,7 @@ async fn a_hook_that_fails_blocks_the_call_it_was_guarding() {
 
 #[tokio::test]
 async fn a_prompt_hook_can_refuse_the_turn_and_add_context() {
+    let _one = one_at_a_time().await;
     let f = fixture();
     let rook = hooked(
         &f,
@@ -3123,6 +3141,7 @@ async fn prompt_admission_is_reported_after_the_atomic_receipt_before_the_model_
 
 #[tokio::test]
 async fn a_session_start_hook_contributes_data_outside_the_system_prompt() {
+    let _one = one_at_a_time().await;
     let f = fixture();
     let rook = hooked(&f, vec![hook(rook_core::hooks::Event::SessionStart, "echo 'this repo pins nightly'")]);
     let session = rook.start_session("start").unwrap();
@@ -3146,6 +3165,7 @@ async fn a_session_start_hook_contributes_data_outside_the_system_prompt() {
 
 #[tokio::test]
 async fn a_hook_matcher_keeps_it_off_calls_it_does_not_care_about() {
+    let _one = one_at_a_time().await;
     let f = fixture();
     let rook = hooked(
         &f,
@@ -4591,6 +4611,7 @@ fn the_catalog_names_only_what_the_model_can_act_on() {
 
 #[tokio::test]
 async fn a_post_tool_hook_is_given_the_facts_the_tool_measured() {
+    let _one = one_at_a_time().await;
     let f = fixture();
     // The hook keeps what it was handed rather than summarising it back through
     // an interpreter, so the assertion is about the payload itself.
@@ -5154,6 +5175,7 @@ async fn a_sub_task_says_what_it_is_doing_before_it_is_done() {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_pre_tool_hook_that_hangs_refuses_rather_than_waits_or_allows() {
+    let _one = one_at_a_time().await;
     let f = fixture();
     let rook = hooked(
         &f,
