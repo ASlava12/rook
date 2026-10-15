@@ -1,5 +1,7 @@
 # Rook
 
+[Domain network policy with OS containment](docs/domain-network-policy.md).
+
 Direct remote SSH file authority: [configuration and recovery limits](docs/ssh-native-workspaces.md).
 
 [English](README.md) · [Русский](README.ru.md)

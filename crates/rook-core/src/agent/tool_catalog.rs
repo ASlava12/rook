@@ -15,8 +15,16 @@ impl<'a> AgentLoop<'a> {
         }
         let lazy = self.rook.config.agent.lazy_tools;
         let mut specs = if lazy { self.tools.stubs() } else { self.tools.specs() };
+        let domains = self.rook.config.sandbox.network_policy.enabled;
+        if domains {
+            specs.retain(|spec| rook_tools::network::local_tool(&spec.name));
+        }
         let checking = self.checking;
         let mut push = |spec: ToolSpec| {
+            if domains && [DOCS, FIND_SKILL].contains(&spec.name.as_str()) {
+                return;
+            }
+
             if checking && CHANGES_THINGS.contains(&spec.name.as_str()) {
                 return;
             }

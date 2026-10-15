@@ -7,6 +7,23 @@ impl Config {
     /// so a broken file can still be inspected and repaired.
     pub fn validation_errors(&self) -> Vec<String> {
         let mut errors = Vec::new();
+        if let Err(error) = self.sandbox.network_policy.validate() {
+            errors.push(error);
+        }
+        if self.sandbox.network_policy.enabled
+            && (!self.sandbox.network
+                || self.sandbox.isolate == rook_tools::isolate::Mode::Off
+                || !self.execution_environment.local())
+        {
+            errors.push(
+                "sandbox.network_policy requires local execution, network=true and isolate auto/required"
+                    .into(),
+            );
+        }
+
+        if self.sandbox.network_policy.enabled && !self.hooks.is_empty() {
+            errors.push("sandbox.network_policy does not support uncontained hooks".into());
+        }
         if let Err(error) = self.documents.validate() {
             errors.push(error.to_string());
         }

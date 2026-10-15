@@ -222,6 +222,15 @@ impl<'a> AgentLoop<'a> {
         }
 
         outcome.tools_called.push(call.name.clone());
+        if self.rook.config.sandbox.network_policy.enabled && (call.name == DOCS || call.name == FIND_SKILL) {
+            let refusal = format!(
+                "{} is unavailable under domain network policy; fetch permitted sources with a local foreground run_command",
+                call.name
+            );
+            self.rook.log(self.session, EventKind::ToolResult, &call.name, &refusal).ok();
+            return (refusal, true);
+        }
+
         if call.name == crate::review::TOOL {
             let result = self.review_changes(&call.arguments, outcome, on_progress).await;
             self.rook.log(self.session, EventKind::ToolResult, &call.name, &result.0).ok();
@@ -740,6 +749,20 @@ impl<'a> AgentLoop<'a> {
                 .filter_map(|p| self.tool_ctx.resolve(p).ok())
                 .collect();
             self.rook.touched(self.session, &seen);
+        }
+        if call.name == "run_command"
+            && let Some(network) = outcome.meta.get("network_policy")
+        {
+            let receipt =
+                serde_json::json!({"tool_call_id":call.id,"tool":"run_command","network_policy":network});
+            self.rook
+                .log(
+                    self.session,
+                    EventKind::Note,
+                    "rook:network-policy:v1",
+                    &self.vault.redact(&receipt.to_string()),
+                )
+                .ok();
         }
         let details = crate::tool_details::note(
             &call.name,

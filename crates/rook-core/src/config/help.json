@@ -1,4 +1,11 @@
 {
+  "sandbox.network_policy": {"kind": "table", "help": "Opt-in domain egress for local foreground commands. Requires macOS Seatbelt; unsupported execution refuses without fallback."},
+  "sandbox.network_policy.enabled": {"kind": "setting", "help": "Default false. When enabled, commands can connect only to a per-command HTTP/CONNECT broker. External tool paths without containment are refused."},
+  "sandbox.network_policy.allow": {"kind": "array", "help": "At most 64 exact host:port or *.dns.suffix:port rules. Ports are mandatory; there are no implicit localhost or public-network exceptions."},
+  "sandbox.network_policy.allow_private": {"kind": "setting", "help": "Default false. Permit allowed DNS names to resolve to private/special addresses. Explicit IP rules already identify the intended address."},
+  "sandbox.network_policy.max_connections": {"kind": "integer", "help": "Concurrent broker connections per command, 1..32; 8 by default. At most 256 accepted requests per command."},
+  "sandbox.network_policy.max_transfer_bytes": {"kind": "integer", "help": "Per response or tunnel direction transfer ceiling, 1024..67108864; default 33554432."},
+  "sandbox.network_policy.idle_timeout_secs": {"kind": "integer", "help": "Network inactivity ceiling, 1..300 seconds; default 60. Activity in either tunnel direction resets its idle timer."},
   "documents": {"kind":"table","help":"Bounded local PDF extraction through Poppler; optional local OCR through tesseract. No cloud service or API key."},
   "documents.max_bytes": {"kind":"integer","help":"Maximum PDF input bytes, 1024..134217728, checked before and during snapshot reads."},
   "documents.max_pages": {"kind":"integer","help":"Maximum selected PDF pages per call, 1..32. Render accepts one page."},

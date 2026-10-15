@@ -45,6 +45,8 @@ async fn a_command_contained_by_rook_writes_the_workspace_and_scratch_and_nothin
         workspace: workspace.clone(),
         scratch: vec![scratch.clone()],
         network: true,
+        network_policy: Default::default(),
+        proxy_port: None,
         unreadable: vec![],
     };
 
@@ -84,8 +86,14 @@ async fn a_refused_write_is_reported_as_contained() {
     std::fs::create_dir(&outside).unwrap();
     let mut ctx = ToolContext::new(workspace.clone());
     ctx.isolate = rook_tools::isolate::Mode::Auto;
-    ctx.isolation =
-        Isolation { workspace: workspace.clone(), scratch: vec![], network: true, unreadable: vec![] };
+    ctx.isolation = Isolation {
+        workspace: workspace.clone(),
+        scratch: vec![],
+        network: true,
+        network_policy: Default::default(),
+        proxy_port: None,
+        unreadable: vec![],
+    };
     ctx.allow_outside_workspace = true;
 
     let args = serde_json::json!({ "command": touch(&outside, "x") });

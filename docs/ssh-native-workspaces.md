@@ -48,6 +48,11 @@ rook session environment SESSION '{"action":"native_inspect","id":"RECEIPT"}'
 rook session environment SESSION '{"action":"native_undo","id":"RECEIPT"}'
 ```
 
+The TUI accepts the same JSON after `/environment`. In the browser session's
+Execution environment panel, list owned checkpoints, inspect one and choose
+Undo inspected checkpoint. Merely opening or inspecting the panel changes no
+files and makes no model call.
+
 Undo checks the recorded after source before restoring. It refuses another
 session's receipt, a changed profile/root or external changes. Recovery itself
 has a durable child operation session. Ordinary session rewind refuses while

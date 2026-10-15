@@ -19,6 +19,7 @@ pub mod files;
 pub mod isolate;
 pub mod jobs;
 pub mod mcp;
+pub mod network;
 pub mod pdf;
 pub mod pending;
 pub mod policy;
@@ -697,6 +698,12 @@ impl ToolBox {
     }
 
     pub async fn call(&self, ctx: &ToolContext, name: &str, args: &serde_json::Value) -> Result<ToolOutcome> {
+        if ctx.isolation.network_policy.enabled && !crate::network::local_tool(name) {
+            return Err(ToolError::Denied(format!(
+                "{name} has no domain-contained network path; use a local foreground run_command through the configured broker"
+            )));
+        }
+
         if ctx.execution.as_ref().is_some_and(|e| e.settings.native_workspace)
             && [
                 "read_file",

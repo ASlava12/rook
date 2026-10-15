@@ -35,6 +35,9 @@ impl AgentLoop<'_> {
         progress: &mut impl FnMut(Progress<'_>),
     ) -> Result<TurnOutcome> {
         let name = self.external_executor.clone().ok_or_else(|| bad("ACP executor was not selected"))?;
+        if self.rook.config.sandbox.network_policy.enabled {
+            return Err(bad("external ACP execution cannot enforce the configured domain network policy"));
+        }
         let cfg = &self.rook.config.acp_executor;
         let profile = cfg.profiles.get(&name).ok_or_else(|| bad("Unknown configured ACP executor"))?;
         if !profile.trusted {

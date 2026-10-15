@@ -4386,3 +4386,6 @@ mod pdf;
 
 #[path = "scenarios/native_workspace.rs"]
 mod native_workspace;
+
+#[path = "scenarios/network_policy.rs"]
+mod network_policy;

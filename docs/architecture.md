@@ -1,5 +1,7 @@
 # Architecture
 
+[Domain network policy with OS containment](domain-network-policy.md).
+
 Direct remote SSH file authority: [configuration and recovery limits](ssh-native-workspaces.md).
 
 Intermediate child display hints coalesce within configured queue bounds;

@@ -19,7 +19,7 @@ baseline were saved in local commit `65b4f40`. Their snapshot table is in
 | PDF documents | Bounded local extraction with selected pages and page provenance; ordinary text-only local model; optional scan rendering/OCR with explicit partial notices; actual document/frontend checks | Verified |
 | Remote workspace files | Explicit SSH-native read/edit/search/list and execution, remote path identity, bounded transfers, checkpoint/undo and disconnect ownership; preserve existing replica mode | In progress |
 | Prompt cache experiment | Supported dialect identity and effort changes; compare cache hits, first-token latency and cost on equal tasks; adopt only measured improvement | Verified; no change adopted |
-| Domain network policy | Opt-in domain rules and attributable decisions, enforced with OS containment on supported platforms; direct-bypass and allowed LAN/registry checks; explicit unsupported behavior | Pending |
+| Domain network policy | Opt-in domain rules and attributable decisions, enforced with OS containment on supported platforms; direct-bypass and allowed LAN/registry checks; explicit unsupported behavior | Verification in progress |
 
 User clarification: a person may choose not to answer a question or provide a
 secret. Absence of an answer is never consent. A declined or expired request must
@@ -42,8 +42,13 @@ text-only model checks pass (`/tmp/rook-pdf-native-final.log`,
 `/tmp/rook-pdf-cli-native-final.log`). The optional Poppler/tesseract tests were
 run explicitly with installed local tools. The deployed Qwen cache experiment
 found no useful improvement, so no caching or effort parameter is adopted; see
-[the observations and limits](research/prompt-cache-20261015.md). SSH-native and
-domain containment work remain unfinished. No installed daemon was restarted.
+[the observations and limits](research/prompt-cache-20261015.md). SSH-native implementation is saved in local commit `3daa84b`; actual Linux SSH
+execution/disconnect/undo and native CLI/daemon authority/recovery checks pass.
+Its full gate is running in the frozen native worktree. Domain policy now has
+native Seatbelt allowed LAN/registry, direct TCP/UDP/--noproxy denial,
+framing/capacity/cancellation/one-way traffic and CLI/daemon durable-receipt
+checks. Final combined regression verification remains pending. No installed
+daemon was restarted.
 
 Elicitation implementation constraints: route server requests before responses
 so a server request ID cannot consume a client response waiter; support integer
@@ -57,7 +62,7 @@ cancel. URL mode displays the canonical host and URL for a user-initiated visit;
 opening it is distinct from completion of third-party authorization. A skipped
 or absent answer cannot accept defaults or cause automatic re-prompting.
 
-### October 15 implementation evidence
+### Historical interim notes — superseded by the current verification snapshot
 
 Correlated diagnostics now records physical generation spans, bounded response
 IDs and common root/child trace identity in existing JSON notes. Local support

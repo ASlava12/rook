@@ -1,5 +1,7 @@
 # Rook
 
+[Доменные правила сети с изоляцией ОС](docs/domain-network-policy.md).
+
 Режим прямой работы с файлами по SSH: [настройка и границы отката](docs/ssh-native-workspaces.md).
 
 [English](README.md) · [Русский](README.ru.md)

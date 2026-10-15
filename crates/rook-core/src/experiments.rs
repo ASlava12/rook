@@ -1032,6 +1032,7 @@ impl Rook {
         context.command_timeout = std::time::Duration::from_secs(self.config.experiments.timeout_secs);
         context.isolate = self.config.sandbox.isolate;
         context.isolation.network = self.config.sandbox.network;
+        context.isolation.network_policy = self.config.sandbox.network_policy.clone();
         context.secrets = Some(vault.clone());
         let start = std::time::Instant::now();
         let result = rook_tools::exec::RunCommand.call(&context, &args).await;

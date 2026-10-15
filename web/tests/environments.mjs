@@ -56,3 +56,30 @@ test('released SSH sources remain inspectable and file images survive directory 
   panel.button('Read after').listeners.click(); await flush();
   assert.deepEqual(calls.at(-1), {action: 'read', call: 'retained', which: 'after', path: 'directory-to-file', offset: 0});
 });
+test('native checkpoints keep the owner and require source inspection before explicit undo', async () => {
+  const calls = [], entry = {call: 'owned-call', kind: 'edit', path: '<remote-path>', status: 'applied', before_sha256: 'before', after_sha256: 'after'};
+  globalThis.fetch = async (path, options) => {
+    const action = JSON.parse(options.body); calls.push({path, action});
+    if (action.action === 'native_inspect' && !action.id) return response({owner: 'native-owner', receipts: [entry]});
+    if (action.action === 'native_inspect') return response({receipt: entry, workspace: {host: 'trusted', root: '/project'}, observation: {}});
+    if (action.action === 'native_undo') return response({receipt: {...entry, status: 'undone'}, session: 'undo-operation'});
+    return response({kind: 'ssh_native', profile: 'native', host: 'trusted', workspace: '/project', state: 'configured'});
+  };
+  const panel = environmentPanel('native/owner');
+  panel.button('Inspect environment').listeners.click(); await flush();
+  panel.button('List owned checkpoints').listeners.click(); await flush();
+  assert.equal(panel.button('Undo inspected checkpoint'), null);
+  panel.button('Inspect checkpoint').listeners.click(); await flush();
+  assert.match(panel.textContent, /before.*after/s);
+  assert.equal(calls.some(c => c.action.action === 'native_undo'), false);
+  panel.button('Undo inspected checkpoint').listeners.click(); await flush();
+  assert.deepEqual(calls.at(-1), {path: '/api/sessions/native%2Fowner/environment', action: {action: 'native_undo', id: 'owned-call'}});
+  assert.match(panel.textContent, /undone.*undo-operation|undo-operation.*undone/s);
+  assert.equal(panel.button('Undo inspected checkpoint'), null);
+});
+test('a native command still running offers observation instead of undo', async () => {
+  globalThis.fetch = async () => response({receipt: {call:'running', kind:'run', path:'.', status:'unknown'}, observation:{execution:{quiet:false}}});
+  const panel = environmentPanel('owner'); panel.button('Inspect environment').listeners.click(); await flush();
+  assert.equal(panel.button('Undo inspected checkpoint'), null);
+  assert.ok(panel.button('Inspect checkpoint'));
+});

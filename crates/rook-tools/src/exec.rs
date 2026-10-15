@@ -45,6 +45,24 @@ impl Tool for RunCommand {
 
     async fn call(&self, ctx: &ToolContext, args: &serde_json::Value) -> Result<ToolOutcome> {
         let command = arg_str(args, self.name(), "command")?;
+        if ctx.isolation.network_policy.enabled
+            && (args.get("background").and_then(|v| v.as_bool()).unwrap_or(false)
+                || ctx.terminals.is_some()
+                || ctx.command_transport.is_some()
+                || ctx.execution.as_ref().is_some_and(|e| !e.settings.local()))
+        {
+            return Ok(ToolOutcome::error(
+                "domain network policy currently supports only local foreground commands; editor terminals, remote/container transports and background jobs are refused before launch",
+            ));
+        }
+
+        let managed;
+        let ctx = if ctx.isolation.network_policy.enabled && !ctx.require_command_cleanup {
+            managed = ToolContext { require_command_cleanup: true, ..ctx.clone() };
+            &managed
+        } else {
+            ctx
+        };
 
         // Refused rather than asked about: this is not a question of how much
         // latitude the run has, it is that the answer belongs to the turn that
@@ -441,10 +459,10 @@ impl Tool for RunCommand {
             );
             outcome.full_bytes = full_bytes;
             outcome.truncated = truncated;
-            return Ok(match kept {
+            return Ok(_input.report(match kept {
                 Some((_, path, _)) => outcome.with("output_file", path).with("output_complete", false),
                 None => outcome,
-            });
+            }));
         }
         // Already reaped on the path that ended on the exit rather than on the
         // output; waiting again there is a second wait for a process nobody is
@@ -519,12 +537,12 @@ impl Tool for RunCommand {
         .with("processes_stopped", processes_stopped)
         .with("isolation", contained);
         cleanup.armed = false;
-        Ok(match kept {
+        Ok(_input.report(match kept {
             Some((_, path, complete)) => {
                 outcome.with("output_file", path).with("output_complete", complete && !orphaned)
             }
             None => outcome,
-        })
+        }))
     }
 
     fn risk(&self, args: &serde_json::Value) -> crate::policy::Risk {
@@ -749,12 +767,28 @@ pub fn spawn_shell(
     env: &[(&str, &str)],
     isolation: Option<&crate::isolate::Isolation>,
 ) -> Result<tokio::process::Child> {
+    if isolation.is_some_and(|i| i.network_policy.enabled) {
+        return Err(ToolError::Denied(
+            "domain-contained commands require the managed foreground launcher".into(),
+        ));
+    }
     Ok(spawn_shell_input(command, cwd, env, isolation, None)?.0)
 }
-pub(crate) struct InputTask(Option<tokio::task::JoinHandle<()>>);
+pub(crate) struct InputTask {
+    input: Option<tokio::task::JoinHandle<()>>,
+    network: Option<crate::network::Proxy>,
+}
+impl InputTask {
+    fn report(&self, outcome: ToolOutcome) -> ToolOutcome {
+        match &self.network {
+            Some(proxy) => outcome.with("network_policy", proxy.report()),
+            None => outcome,
+        }
+    }
+}
 impl Drop for InputTask {
     fn drop(&mut self) {
-        if let Some(task) = &self.0 {
+        if let Some(task) = &self.input {
             task.abort();
         }
     }
@@ -766,6 +800,26 @@ pub(crate) fn spawn_shell_input(
     isolation: Option<&crate::isolate::Isolation>,
     input: Option<std::sync::Arc<Vec<u8>>>,
 ) -> Result<(tokio::process::Child, InputTask)> {
+    let network = match isolation.filter(|i| i.network_policy.enabled) {
+        Some(isolation) => {
+            if !cfg!(target_os = "macos") || isolation.proxy_port.is_some() {
+                return Err(ToolError::Denied(
+                    "domain broker requires supported OS containment; no fallback".into(),
+                ));
+            }
+            Some(
+                crate::network::Proxy::start(&isolation.network_policy)
+                    .map_err(|e| ToolError::Denied(format!("cannot start domain broker: {e}")))?,
+            )
+        }
+        None => None,
+    };
+    let broker_isolation = network.as_ref().zip(isolation).map(|(proxy, isolation)| {
+        let mut isolation = isolation.clone();
+        isolation.proxy_port = Some(proxy.port);
+        isolation
+    });
+    let isolation = broker_isolation.as_ref().or(isolation);
     // `cmd /C` rather than PowerShell on Windows: it is always present, and a
     // skill that needs PowerShell invokes it explicitly. How each shell reads a
     // command line is [`rook_contain::shell`]'s question, asked in one place
@@ -787,6 +841,15 @@ pub(crate) fn spawn_shell_input(
             .map_err(|e| ToolError::Io { path: cwd.to_path_buf(), source: e })?,
         None => tokio::process::Command::from(rook_contain::shell(command)),
     };
+    if let Some(proxy) = &network {
+        let url = format!("http://127.0.0.1:{}", proxy.port);
+        for key in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"] {
+            cmd.env(key, &url);
+        }
+        for key in ["NO_PROXY", "no_proxy"] {
+            cmd.env(key, "");
+        }
+    }
     cmd.envs(env.iter().copied())
         .current_dir(cwd)
         .stdout(std::process::Stdio::piped())
@@ -814,7 +877,7 @@ pub(crate) fn spawn_shell_input(
     } else {
         None
     };
-    Ok((child, InputTask(task)))
+    Ok((child, InputTask { input: task, network }))
 }
 
 struct EnvironmentCancellation {

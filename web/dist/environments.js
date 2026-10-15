@@ -30,6 +30,27 @@ export function environmentPanel(owner) {
           button('Back to changed paths', { action: 'changes', call: reply.call, after: null }));
         return;
       }
+      if (reply.receipts || reply.receipt) {
+        const entries = reply.receipts || [reply.receipt];
+        const controls = el('div', {}, el('p', {}, `SSH-native checkpoints · owner ${reply.owner || owner}`),
+          reply.workspace?.host ? el('p', {}, `${reply.workspace.host}:${reply.workspace.root}`) : null,
+          reply.session ? el('p', {}, `Operation receipt: ${reply.session}`) : null);
+        for (const entry of entries) {
+          const row = el('div', {}, el('p', {}, `${entry.call} · ${entry.kind} · ${entry.path} · ${entry.status}`),
+            button('Inspect checkpoint', { action: 'native_inspect', id: entry.call }));
+          if (reply.receipt) {
+            row.append(el('pre', {}, JSON.stringify({ before_sha256: entry.before_sha256, after_sha256: entry.after_sha256, execution: reply.observation?.execution }, null, 2)));
+            if (['prepared', 'applied', 'unknown'].includes(entry.status) && reply.observation?.execution?.quiet !== false) {
+              row.append(el('p', { class: 'sub' }, 'Undo restores only the recorded source. External changes or an active command refuse restoration.'),
+                button('Undo inspected checkpoint', { action: 'native_undo', id: entry.call }));
+            }
+          }
+          controls.append(row);
+        }
+        controls.append(button('List owned checkpoints', { action: 'native_inspect' }));
+        render(controls);
+        return;
+      }
       const state = reply.saved?.status || reply.state || 'not started';
       const details = el('div', {}, el('p', {}, `${reply.profile} · ${reply.kind} · ${state}${reply.busy ? ' · busy' : ''}`),
         reply.workspace ? el('p', {}, `Workspace: ${reply.workspace}`) : null,
@@ -38,6 +59,10 @@ export function environmentPanel(owner) {
         reply.saved?.error ? el('p', { class: 'warn' }, reply.saved.error) : null,
         reply.saved?.pending ? el('p', { class: 'warn' }, `Pending write: ${reply.saved.pending}`) : null,
         reply.session ? el('p', {}, `Operation receipt: ${reply.session}`) : null);
+      if (reply.kind === 'ssh_native') {
+        details.append(el('p', {}, `Host: ${reply.host}`),
+          button('List owned checkpoints', { action: 'native_inspect' }));
+      }
       if (reply.token) {
         const token = reply.token, recovering = reply.action === 'recover', stopping = reply.action === 'stop', note = el('textarea', { 'aria-label': 'Environment inspection note', maxlength: 4096 });
         details.append(el('p', {}, recovering ? 'Review retained file versions and acknowledge unknown execution before publishing observed changes.' : stopping ? 'Confirm stopping this inspected command. Describe what you checked.' : 'Confirm release of this inspected resource. Describe what you checked.'), note,

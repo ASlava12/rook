@@ -113,6 +113,11 @@ async fn request(
     if !settings.native_workspace || !settings.errors().is_empty() {
         return Err(invalid("select a valid SSH-native execution profile first"));
     }
+    if ctx.isolation.network_policy.enabled {
+        return Err(invalid(
+            "native SSH cannot enforce the local domain network policy; use local foreground execution",
+        ));
+    }
     if !ctx.isolation.network {
         return Err(invalid("the configured network policy does not permit an SSH connection"));
     }
@@ -163,6 +168,8 @@ async fn request(
         .kill_on_drop(true);
     #[cfg(unix)]
     command.process_group(0);
+    #[cfg(windows)]
+    command.creation_flags(rook_contain::NO_WINDOW);
     let mut child = command.spawn().map_err(|_| invalid("cannot start the configured SSH launcher"))?;
     let _stop = Stop(rook_contain::Group::holding(child.id()));
     let mut stdin = child.stdin.take().ok_or_else(|| invalid("SSH stdin unavailable"))?;

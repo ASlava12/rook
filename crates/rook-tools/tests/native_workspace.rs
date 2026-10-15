@@ -5,6 +5,10 @@ use rook_tools::{
 };
 use serde_json::{Value, json};
 use std::{os::unix::fs::PermissionsExt, sync::Arc};
+async fn one_at_a_time() -> tokio::sync::MutexGuard<'static, ()> {
+    static ONE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    ONE.lock().await
+}
 fn context(dir: &std::path::Path, remote: &std::path::Path) -> ToolContext {
     let program = dir.join("ssh-fixture");
     std::fs::write(&program, "#!/bin/sh\nfor last; do :; done\nexec /bin/sh -c \"$last\"\n").unwrap();
@@ -30,6 +34,7 @@ fn context(dir: &std::path::Path, remote: &std::path::Path) -> ToolContext {
 }
 #[tokio::test]
 async fn files_come_from_the_selected_remote_root_and_never_a_same_named_local_replica() {
+    let _one = one_at_a_time().await;
     let local = tempfile::tempdir().unwrap();
     let remote = tempfile::tempdir().unwrap();
     let ctx = context(local.path(), remote.path());
@@ -59,6 +64,7 @@ async fn files_come_from_the_selected_remote_root_and_never_a_same_named_local_r
 }
 #[tokio::test]
 async fn symlink_escape_and_reached_source_limits_are_refused_without_returning_outside_text() {
+    let _one = one_at_a_time().await;
     let local = tempfile::tempdir().unwrap();
     let remote = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
@@ -83,6 +89,7 @@ async fn symlink_escape_and_reached_source_limits_are_refused_without_returning_
 
 #[tokio::test]
 async fn native_edits_have_owned_receipts_and_undo_refuses_external_changes() {
+    let _one = one_at_a_time().await;
     let local = tempfile::tempdir().unwrap();
     let remote = tempfile::tempdir().unwrap();
     let mut ctx = context(local.path(), remote.path());
@@ -121,6 +128,7 @@ async fn native_edits_have_owned_receipts_and_undo_refuses_external_changes() {
 
 #[tokio::test]
 async fn a_read_only_checker_or_missing_session_cannot_prepare_remote_mutations() {
+    let _one = one_at_a_time().await;
     let local = tempfile::tempdir().unwrap();
     let remote = tempfile::tempdir().unwrap();
     let mut ctx = context(local.path(), remote.path());
@@ -209,6 +217,7 @@ impl rook_tools::Secrets for FixtureSecret {
 #[tokio::test]
 #[ignore = "requires an explicitly configured trusted Linux SSH fixture"]
 async fn actual_ssh_native_execution_retains_file_effects_and_undo_without_any_local_replica() {
+    let _one = one_at_a_time().await;
     let host = std::env::var("ROOK_TEST_SSH_HOST")
         .expect("set the existing trusted host alias; no passwords in test arguments");
     let local = tempfile::tempdir().unwrap();
@@ -269,6 +278,7 @@ async fn actual_ssh_native_execution_retains_file_effects_and_undo_without_any_l
 #[tokio::test]
 #[ignore = "requires an explicitly configured trusted Linux SSH fixture"]
 async fn disconnect_stops_only_the_owned_remote_command_and_never_replays_it_before_undo() {
+    let _one = one_at_a_time().await;
     let host = std::env::var("ROOK_TEST_SSH_HOST").expect("set a trusted existing SSH host");
     let local = tempfile::tempdir().unwrap();
     let session = ulid::Ulid::generate();

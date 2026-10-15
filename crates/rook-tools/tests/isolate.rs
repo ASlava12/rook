@@ -41,6 +41,8 @@ async fn a_contained_command_writes_the_workspace_and_scratch_and_nothing_else()
         workspace: workspace.clone(),
         scratch: vec![scratch.clone()],
         network: true,
+        network_policy: Default::default(),
+        proxy_port: None,
         unreadable: vec![],
     };
     let touch = |dir: &Path, name: &str| match cfg!(windows) {
@@ -87,12 +89,18 @@ async fn tcp_is_refused_when_the_policy_says_no_network() {
     let (code, said) = run(&connect, workspace.path(), None).await;
     assert_eq!(code, 0, "the precondition: uncontained, the connection is made: {said}");
 
-    let closed =
-        Isolation { workspace: workspace.path().into(), scratch: vec![], network: false, unreadable: vec![] };
+    let closed = Isolation {
+        workspace: workspace.path().into(),
+        scratch: vec![],
+        network: false,
+        network_policy: Default::default(),
+        proxy_port: None,
+        unreadable: vec![],
+    };
     let (code, said) = run(&connect, workspace.path(), Some(&closed)).await;
     assert_ne!(code, 0, "with the network switched off it is refused: {said}");
 
-    let open = Isolation { network: true, ..closed };
+    let open = Isolation { network: true, network_policy: Default::default(), proxy_port: None, ..closed };
     let (code, said) = run(&connect, workspace.path(), Some(&open)).await;
     assert_eq!(code, 0, "and with it on, made again: {said}");
 }
@@ -125,8 +133,14 @@ async fn a_failed_contained_command_says_it_was_contained() {
     std::fs::create_dir(&outside).unwrap();
     let mut ctx = ToolContext::new(workspace.clone());
     ctx.isolate = rook_tools::isolate::Mode::Auto;
-    ctx.isolation =
-        Isolation { workspace: workspace.clone(), scratch: vec![], network: true, unreadable: vec![] };
+    ctx.isolation = Isolation {
+        workspace: workspace.clone(),
+        scratch: vec![],
+        network: true,
+        network_policy: Default::default(),
+        proxy_port: None,
+        unreadable: vec![],
+    };
     ctx.allow_outside_workspace = true;
 
     let args = serde_json::json!({ "command": format!("touch '{}'", outside.join("x").display()) });
@@ -181,6 +195,8 @@ async fn a_contained_command_cannot_read_the_agents_own_store() {
         workspace: workspace.clone(),
         scratch: vec![],
         network: true,
+        network_policy: Default::default(),
+        proxy_port: None,
         unreadable: vec![state.clone()],
     };
     let (code, said) = run(&read, &workspace, Some(&isolation)).await;
@@ -214,6 +230,8 @@ async fn a_workspace_inside_the_hidden_state_directory_still_works() {
         workspace: workspace.clone(),
         scratch: vec![],
         network: false,
+        network_policy: Default::default(),
+        proxy_port: None,
         unreadable: vec![state.path().to_path_buf()],
     };
 

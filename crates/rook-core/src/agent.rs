@@ -111,7 +111,7 @@ pub fn jobs_for(config: &Config) -> std::sync::Arc<rook_tools::jobs::Jobs> {
 /// dropped at the end of a turn takes its running servers with it, and
 /// rust-analyzer spends seconds indexing the workspace every time it starts.
 pub fn servers_for(config: &Config, workspace: &Path) -> std::sync::Arc<crate::lsp::Servers> {
-    if config.execution_environment.native_workspace {
+    if config.execution_environment.native_workspace || config.sandbox.network_policy.enabled {
         return crate::lsp::Servers::new(Vec::new(), workspace);
     }
     crate::lsp::Servers::new(crate::lsp::for_workspace(config, workspace), workspace)
@@ -136,6 +136,7 @@ pub fn tool_context(config: &Config, workspace: &Path, output_dir: &Path) -> Too
     ctx.allow_outside_workspace = sandbox.allow_outside_workspace;
     ctx.isolate = sandbox.isolate;
     ctx.isolation.network = sandbox.network;
+    ctx.isolation.network_policy = sandbox.network_policy.clone();
     // Every project's transcripts, checkpoints and memory live under here, so
     // a command run for one project has no business reading another's — and
     // with the network on, reading is the whole of what an exfiltration needs.
@@ -920,6 +921,9 @@ impl<'a> AgentLoop<'a> {
         on_progress: F,
     ) -> Result<TurnOutcome> {
         let rook = self.rook;
+        if rook.config.sandbox.network_policy.enabled && !rook.config.hooks.is_empty() {
+            return Err(crate::CoreError::Other("domain network policy cannot contain configured hooks; remove hooks for this execution profile".into()));
+        }
         let session = self.session;
         let mut changed = rook.extension_changed.subscribe();
         let mut cursor = crate::extension_ui::live::Cursor::default();

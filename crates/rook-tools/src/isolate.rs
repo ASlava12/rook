@@ -28,6 +28,10 @@ pub struct Isolation {
     /// whatever the caller adds.
     pub scratch: Vec<PathBuf>,
     pub network: bool,
+    pub network_policy: crate::network::Settings,
+    /// Ephemeral broker port; assigned only by the command launcher.
+    #[doc(hidden)]
+    pub proxy_port: Option<u16>,
     /// Kept out of reach entirely, read included.
     ///
     /// Reading is otherwise allowed everywhere, because a build needs its
@@ -45,6 +49,8 @@ impl Isolation {
             workspace: workspace.into(),
             scratch: vec![std::env::temp_dir()],
             network: true,
+            network_policy: Default::default(),
+            proxy_port: None,
             unreadable: Vec::new(),
         }
     }
@@ -95,6 +101,9 @@ impl Backend {
 
     fn without_paths(self, isolation: &Isolation) -> String {
         match self {
+            Self::Seatbelt if isolation.network_policy.enabled => {
+                "seatbelt: writes to workspace and scratch, network only through the per-command domain broker".into()
+            }
             Self::Seatbelt if isolation.network => {
                 "seatbelt: writes to the workspace and scratch, network open".into()
             }
@@ -189,6 +198,17 @@ fn probe() -> Result<Backend, String> {
 /// The isolation a command gets under `mode`, and the words for it — or the
 /// refusal, when the mode requires what the platform has not got.
 pub fn choose(mode: Mode, isolation: &Isolation) -> Result<(Option<&Isolation>, String), String> {
+    if isolation.network_policy.enabled {
+        isolation.network_policy.validate()?;
+        if !isolation.network
+            || mode == Mode::Off
+            || !cfg!(target_os = "macos")
+            || available() != Ok(Backend::Seatbelt)
+            || isolation.proxy_port.is_some()
+        {
+            return Err("domain network policy requires local macOS Seatbelt, network=true and isolation enabled; no unrestricted fallback is permitted".into());
+        }
+    }
     match (mode, available()) {
         (Mode::Off, _) => Ok((None, "off".into())),
         (_, Ok(backend)) => Ok((Some(isolation), backend.describe(isolation))),
@@ -258,7 +278,14 @@ fn profile(isolation: &Isolation) -> String {
         p.push_str(&format!("(allow file-read* (subpath \"{}\"))\n", quoted(&real)));
         p.push_str(&format!("(allow file-write* (subpath \"{}\"))\n", quoted(&real)));
     }
-    if isolation.network {
+    if isolation.network_policy.enabled {
+        // Broad Mach service access could hand networking to an uncontained
+        // helper. Strict egress therefore does not inherit that allowance.
+        p = p.replace("(allow mach-lookup)\n", "");
+        if let Some(port) = isolation.proxy_port {
+            p.push_str(&format!("(allow network-outbound (remote ip \"localhost:{port}\"))\n"));
+        }
+    } else if isolation.network {
         p.push_str("(allow network*)\n");
     }
     p
@@ -421,6 +448,8 @@ mod tests {
             workspace,
             scratch: vec![],
             network: false,
+            network_policy: Default::default(),
+            proxy_port: None,
             unreadable: vec![state.path().to_path_buf()],
         });
 
