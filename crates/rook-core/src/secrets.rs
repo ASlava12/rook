@@ -32,6 +32,15 @@ use crate::error::Result;
 
 static STORE_WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+struct StoreWriteLock(std::fs::File);
+impl Drop for StoreWriteLock {
+    fn drop(&mut self) {
+        // Closing just this descriptor is insufficient when a concurrent fork
+        // inherited its open file description and has not reached exec yet.
+        let _ = self.0.unlock();
+    }
+}
+
 /// Where a secret's value comes from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
@@ -212,6 +221,7 @@ impl Vault {
         lock.try_lock().map_err(|_| {
             crate::CoreError::Other("secret store is busy; finish the other private save and retry".into())
         })?;
+        let _lock = StoreWriteLock(lock);
         let mut current = Self::load_from(self.path.clone())?;
         let result = edit(&mut current.entries);
         current.save()?;
@@ -562,5 +572,27 @@ mod poisoning_tests {
             vault.redact("previous-private-value new-private-value endpoint-private-value"),
             "${secret} ${secret} ${secret}"
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod lock_tests {
+    use super::StoreWriteLock;
+
+    #[test]
+    fn completed_write_releases_its_lock_even_with_an_inherited_descriptor() {
+        let root = tempfile::tempdir().unwrap();
+        let file = rook_contain::files::lock_file(root.path(), std::path::Path::new("secrets.lock")).unwrap();
+        file.try_lock().unwrap();
+        // dup and fork share the open file description; keeping a duplicate
+        // reproduces the fork/exec window without forking a multithreaded test.
+        let inherited = file.try_clone().unwrap();
+        let held = StoreWriteLock(file);
+        let contender =
+            rook_contain::files::lock_file(root.path(), std::path::Path::new("secrets.lock")).unwrap();
+        assert!(contender.try_lock().is_err());
+        drop(held);
+        contender.try_lock().unwrap();
+        drop(inherited);
     }
 }

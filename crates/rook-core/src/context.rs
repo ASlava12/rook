@@ -191,6 +191,9 @@ pub struct ContextBudget {
     pub compact_at: f32,
     /// Held back so there is always room for the reply.
     pub reserve_output: usize,
+    /// Optional retained tail; omission keeps the historic threshold / 3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_recent_tokens: Option<usize>,
 }
 
 // Shared with offline configuration checks; hand-written legacy configs still
@@ -215,7 +218,12 @@ impl ContextBudget {
     pub fn new(window: usize, compact_at: f32) -> Self {
         let compact_at =
             if compact_at.is_finite() { compact_at.clamp(MIN_COMPACT_AT, MAX_COMPACT_AT) } else { 0.75 };
-        Self { window, compact_at, reserve_output: (window / 8).clamp(1024, 32_768) }
+        Self {
+            window,
+            compact_at,
+            reserve_output: (window / 8).clamp(1024, 32_768),
+            keep_recent_tokens: None,
+        }
     }
 
     pub fn usable(&self) -> usize {

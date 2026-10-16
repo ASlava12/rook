@@ -1764,6 +1764,11 @@ The [October reference follow-up](docs/reference-followup-adoption.md) explains
 source-bound skill updates and bundled resource reads, prompt presets (F8 in the
 TUI), responsive saved-source diffs, browser diagnostics and optional MCP Apps.
 
+The [next reference adoption](docs/reference-r16-adoption.md) adds durable model
+selection, a cross-session attention inbox, daemon delay diagnostics, export
+profiles, per-model compaction, restricted recipe equipment, terminal status and
+streaming SSH transfers.
+
 ```sh
 rook skills ls                 # what applies here, and what loading each would cost
 rook skills why deploy         # which version was chosen, and why the others were not

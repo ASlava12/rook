@@ -304,10 +304,10 @@ export function connect() {
         if (e.running) working(); else done();
         say('stat', e.running ? '[joined a turn already running here]' : '[nothing is running in this session]');
         if (e.truncated) say('stat', '[live view refreshed; saved conversation is in history]');
-        renderSettings(); renderPicker();
+        renderSettings(); renderPicker(); refreshModelSelection(e.session);
         break;
       }
-      case 'started': finishModel(false); if (state.chat.session !== e.session) resetExtensions(); clearPendingCalls(); goalGeneration = null; goalObserved = false; turnId = null; retryPrompt.started(e.session); state.chat.session = e.session; state.chat.spent = null; state.chat.context = null; state.chat.modelRequest = null; renderSettings(); renderPicker(); break;
+      case 'started': finishModel(false); if (state.chat.session !== e.session) resetExtensions(); clearPendingCalls(); goalGeneration = null; goalObserved = false; turnId = null; retryPrompt.started(e.session); state.chat.session = e.session; state.chat.spent = null; state.chat.context = null; state.chat.modelRequest = null; renderSettings(); renderPicker(); refreshModelSelection(e.session); break;
       // Joined a turn this page did not start. Said out loud either way: a
       // page that quietly starts streaming looks like it is answering
       // something you did not ask, and one that says nothing after asking
@@ -325,6 +325,7 @@ export function connect() {
           renderSettings();
         }
         state.chat.session = e.session;
+        refreshModelSelection(e.session);
         renderPicker();
         if (e.running) { say('stat', '[joined a turn already running here]'); working(); }
         break;
@@ -373,7 +374,7 @@ export function connect() {
       case 'tool_working': stillGoing(`  ${e.name}: ${e.said}`); break;
       case 'tool_done': toolFinished(e); break;
       case 'model_request': state.chat.modelRequest = e; renderSettings(); break;
-      case 'settings': state.chat.settings = e; renderSettings(); break;
+      case 'settings': state.chat.settings = e; renderSettings(); refreshModelSelection(state.chat.session); break;
       case 'spent': state.chat.spent = e; renderSettings(); break;
       case 'context': state.chat.context = e; renderSettings(); break;
       case 'remembered': say('stat', `remembered: ${e.text}`); break;
@@ -705,16 +706,54 @@ function askUser(request) {
 
 // The selects are built from the lists the server sent, so a stance added to
 // the engine appears here without the page knowing its name.
+let modelViewRequest = 0;
+async function refreshModelSelection(session) {
+  if (!session) return;
+  const request = ++modelViewRequest;
+  try {
+    const view = await api(`/api/sessions/${encodeURIComponent(session)}/model-selection`);
+    if (request !== modelViewRequest || state.chat.session !== session || !state.chat.settings) return;
+    if (view.selected) {
+      state.chat.settings.model = view.selected;
+      state.chat.modelPickNotice = `Selected: ${view.selected} · revision ${view.revision}${view.pending ? ' · queued for next turn' : ''}${view.last_effective ? ` · last turn boundary: ${view.last_effective}` : ''}`;
+      renderSettings();
+    }
+  } catch { /* Older daemons have no durable model-selection endpoint. */ }
+}
+let pendingModelPick = null;
+async function pickSessionModel(model, retry = false) {
+  const session = state.chat.session;
+  if (!session) { send({ type: 'setting', name: 'model', value: model }); return; }
+  try {
+    if (!retry) {
+      if (pendingModelPick) throw new Error('Retry or discard the previous model selection first.');
+      const view = await api(`/api/sessions/${encodeURIComponent(session)}/model-selection`);
+      pendingModelPick = { session, request: { id: crypto.randomUUID(), expected_revision: view.revision, model } };
+    }
+    const pick = pendingModelPick;
+    if (!pick || pick.session !== session) throw new Error('Return to the original session to retry its model selection.');
+    const receipt = await api(`/api/sessions/${encodeURIComponent(session)}/model-selection`, pick.request);
+    pendingModelPick = null;
+    state.chat.settings.model = receipt.model;
+    state.chat.modelPickNotice = `${receipt.model} saved as revision ${receipt.revision}; applies at the next turn boundary.`;
+  } catch (error) {
+    state.chat.modelPickNotice = `Model selection not confirmed: ${error.error || error.message || error}`;
+  }
+  renderSettings();
+}
 function renderSettings() {
   const bar = $('#settings');
   const s = state.chat.settings;
   if (!bar || !s) return;
   const pick = (name, values, selected) => el('label', {},
     `${name === 'effort' ? 'requested effort' : name} `,
-    el('select', { onchange: (e) => send({ type: 'setting', name, value: e.target.value }) },
+    el('select', { onchange: (e) => name === 'model' ? pickSessionModel(e.target.value) : send({ type: 'setting', name, value: e.target.value }) },
       values.map(v => el('option', { value: v, selected: v === selected }, v))));
   const spent = state.chat.spent;
   const controls = [
+    state.chat.modelPickNotice ? el('span', { class: 'sub', 'aria-live': 'polite' }, state.chat.modelPickNotice) : null,
+    pendingModelPick ? el('button', { onclick: () => pickSessionModel(pendingModelPick.request.model, true) }, 'Retry model selection') : null,
+    pendingModelPick ? el('button', { onclick: () => { pendingModelPick = null; state.chat.modelPickNotice = 'Local retry discarded; inspect the saved selection before choosing again.'; renderSettings(); } }, 'Discard retry') : null,
     pick('stance', s.stances && s.stances.length ? s.stances : [s.mode], s.mode),
     pick('effort', s.efforts && s.efforts.length ? s.efforts : [s.effort], s.effort),
     // Only where there is a choice. A daemon with nothing under `[models]`

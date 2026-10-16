@@ -160,7 +160,7 @@ impl Resource {
         }
     }
     fn config(&self, action: &str, state: &State) -> Value {
-        json!({"action":action,"base":self.base,"identity":self.identity,"owner":state.remote_owner,"token":state.call,"previous":state.source,"limits":{"file_bytes":self.settings.file_bytes,"total_bytes":self.settings.total_bytes,"max_files":self.settings.max_files,"max_entries":self.settings.max_entries,"exclude":self.settings.exclude}})
+        json!({"stream_version":2,"action":action,"base":self.base,"identity":self.identity,"owner":state.remote_owner,"token":state.call,"previous":state.source,"limits":{"file_bytes":self.settings.file_bytes,"total_bytes":self.settings.total_bytes,"max_files":self.settings.max_files,"max_entries":self.settings.max_entries,"exclude":self.settings.exclude}})
     }
     fn args(&self, remote: Option<String>) -> Vec<String> {
         let mut args = vec![
@@ -218,6 +218,33 @@ impl Resource {
             )));
         }
         Ok(output.stdout)
+    }
+    fn invoke_parsed<T: Send + 'static>(
+        &self,
+        action: &str,
+        state: &State,
+        input: Option<transport::Input>,
+        cap: usize,
+        parse: impl FnOnce(&mut dyn std::io::Read) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let mut command = Command::new(&self.program);
+        rook_contain::quietly(&mut command);
+        command.args(self.args(Some(self.remote(action, state)?)));
+        let output = transport::run_parsed(command, input, cap, self.settings.setup_timeout_secs, parse)?;
+        if output.code != 0 {
+            return Err(invalid(format!(
+                "SSH {action} refused (exit {}): {}",
+                output.code,
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        output.stdout
+    }
+    fn dump(&self, state: &State) -> Result<(Value, sync::Snapshot)> {
+        let settings = self.settings.clone();
+        self.invoke_parsed("dump", state, None, sync::response_cap(&self.settings), move |reader| {
+            sync::Snapshot::parse_reader(reader, &settings)
+        })
     }
     fn inspect_remote(&self, state: &State) -> Result<Value> {
         let bytes = self.invoke("inspect", state, None, 8192)?;
@@ -349,7 +376,6 @@ impl Resource {
         let expected_source = before.hash()?;
         let resource = self.clone();
         let saved = state.clone();
-        let upload_input = Arc::new(before.frames(&self.settings)?);
         let setup_permit = permit.clone();
         let prepared = tokio::task::spawn_blocking(move || -> Result<()> {
             let _permit = setup_permit;
@@ -357,14 +383,35 @@ impl Resource {
                 return Err(invalid("SSH setup was cancelled"));
             }
             if !resource.initialized.load(Ordering::Acquire) {
-                resource.invoke("init", &saved, None, 8192)?;
+                let reply = resource.invoke("init", &saved, None, 8192)?;
+                let reply: Value = serde_json::from_slice(&reply).map_err(|e| invalid(e.to_string()))?;
+                if reply["stream_version"] != 2 {
+                    return Err(invalid("SSH worker does not support streaming version 2"));
+                }
             }
             if resource.cancelled.load(Ordering::Acquire) {
                 return Err(invalid("SSH setup was cancelled after connection"));
             }
-            let bytes = resource.invoke("upload", &saved, Some(upload_input), 8192)?;
+            let writer_resource = resource.clone();
+            let bytes = resource.invoke_parsed(
+                "upload",
+                &saved,
+                Some(Box::new(move |out| {
+                    use std::io::Write;
+                    let mut out = std::io::BufWriter::new(out);
+                    before.stream(&mut out, &writer_resource.settings, &writer_resource.cancelled)?;
+                    out.flush().map_err(|e| invalid(e.to_string()))
+                })),
+                8192,
+                |reader| {
+                    let mut bytes = Vec::new();
+                    reader.read_to_end(&mut bytes).map_err(|e| invalid(e.to_string()))?;
+                    Ok(bytes)
+                },
+            )?;
             let value: Value = serde_json::from_slice(&bytes).map_err(|e| invalid(e.to_string()))?;
-            if value["prepared"] != true || value["source"] != expected_source {
+            if value["stream_version"] != 2 || value["prepared"] != true || value["source"] != expected_source
+            {
                 return Err(invalid("SSH upload did not certify its source"));
             }
             Ok(())
@@ -408,8 +455,7 @@ impl Resource {
         if self.cancelled.load(Ordering::Acquire) {
             return Err(invalid("SSH writeback was cancelled; inspect its retained sources"));
         }
-        let raw = self.invoke("dump", &state, None, sync::response_cap(&self.settings))?;
-        let (meta, after) = sync::Snapshot::parse(&raw, &self.settings)?;
+        let (meta, after) = self.dump(&state)?;
         if meta["identity"] != self.identity
             || meta["owner"] != state.remote_owner
             || meta["state"]["token"] != call
@@ -644,8 +690,7 @@ impl Resource {
                         "stop the owned remote command and inspect its terminal state before previewing file recovery",
                     ));
                 }
-                let raw = self.invoke("dump", &state, None, sync::response_cap(&self.settings))?;
-                let (meta, after) = sync::Snapshot::parse(&raw, &self.settings)?;
+                let (meta, after) = self.dump(&state)?;
                 if meta["identity"] != self.identity
                     || meta["owner"] != state.remote_owner
                     || meta["state"]["token"] != state.call.as_deref().unwrap_or("")

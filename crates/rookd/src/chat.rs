@@ -190,6 +190,40 @@ async fn serve(
                 // window that is watching a turn means changing that turn's.
                 let theirs = attached(&state, &watching).await.filter(|l| l.running());
                 let setting = theirs.as_ref().map(|l| l.settings.clone()).unwrap_or(settings.clone());
+                if name == "model"
+                    && let Some(watching) = &watching
+                {
+                    let rook = engine.read().await;
+                    let result = rook.model_selection(watching.session).and_then(|view| {
+                        rook.select_model(
+                            watching.session,
+                            &rook_core::model_selection::Request {
+                                id: rook_store::format_session_id(rook_store::new_session_id()),
+                                expected_revision: view.revision,
+                                model: value.clone(),
+                            },
+                        )
+                    });
+                    match result {
+                        Ok(receipt) => {
+                            if let Err(message) = setting.set(&name, &receipt.model) {
+                                report_window(&outbound, message).await;
+                                continue;
+                            }
+                            report_window(
+                                &outbound,
+                                format!(
+                                    "Model {} saved as revision {}; applies at the next turn boundary",
+                                    receipt.model, receipt.revision
+                                ),
+                            )
+                            .await;
+                            let _ = outbound.send(setting.describe()).await;
+                        }
+                        Err(error) => report_window(&outbound, error.to_string()).await,
+                    }
+                    continue;
+                }
                 if let Err(message) = setting.set(&name, &value) {
                     let _ = outbound.send(ChatEvent::Error { message }).await;
                     continue;
@@ -482,7 +516,13 @@ async fn serve(
                 // Cover the first-session claim and live registration with the
                 // same admission lock used for ordinary turn starts. A second
                 // socket must see either the saved claim or its live turn.
+                let waiting = rook_core::runtime_diagnostics::queued(
+                    rook_core::runtime_diagnostics::Operation::TurnAdmission,
+                );
                 let admission = state.work.0.lock().await;
+                if let Some(waiting) = waiting {
+                    waiting.waited(rook_core::runtime_diagnostics::Metric::AdmissionWait);
+                }
                 let claimed = match (session.as_deref(), submission_id.as_deref()) {
                     (None, Some(request)) => {
                         if submission_target.is_some() {
@@ -1539,6 +1579,14 @@ impl Live {
             );
         }
     }
+    pub(crate) fn attention(&self) -> Option<rook_core::attention::Live> {
+        self.running().then(|| rook_core::attention::Live {
+            generation: self.epoch.clone(),
+            questions: self.asker.pending_count(),
+            approvals: self.approver.pending_count(),
+            secrets: self.private_input().map_or(0, |input| input.pending_count()),
+        })
+    }
     pub(crate) fn needs_input(&self) -> bool {
         self.running() && (self.approver.is_waiting() || self.asker.is_waiting())
     }
@@ -1697,7 +1745,7 @@ async fn turn(
     // setting as it stands when the turn starts, which is what "the next turn"
     // means to somebody who has just switched.
     let named = connection.settings.model();
-    let provider = match rook_core::models::chosen(&rook.config, named.as_deref()) {
+    let provider = match rook.provider_for_turn(session, named.as_deref()) {
         Ok(provider) => provider,
         Err(e) => return ended_badly(&rook, session, &outbound, e.to_string()),
     };
@@ -1839,7 +1887,7 @@ async fn goal_turn(
             id,
             |session| {
                 let named = connection.settings.model();
-                let provider = rook_core::models::chosen(&rook.config, named.as_deref())?;
+                let provider = rook.provider_for_turn(session, named.as_deref())?;
                 let mut agent = AgentLoop::new(&rook, provider.into(), session);
                 agent.observer = connection
                     .activity
@@ -1929,7 +1977,7 @@ async fn ended_goal(
     };
     if followups_ready {
         let named = connection.settings.model();
-        let provider = match rook_core::models::chosen(&rook.config, named.as_deref()) {
+        let provider = match rook.provider_for_turn(session, named.as_deref()) {
             Ok(provider) => provider,
             Err(error) => {
                 ended_badly(rook, session, outbound, error.to_string());

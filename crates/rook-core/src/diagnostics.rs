@@ -163,6 +163,8 @@ pub struct Report {
     pub notices: Vec<String>,
     #[serde(default)]
     pub activity: Option<rook_proto::activity::Snapshot>,
+    #[serde(default)]
+    pub runtime: Option<crate::runtime_diagnostics::Snapshot>,
 }
 
 impl Report {
@@ -234,6 +236,7 @@ impl Rook {
             logs: Vec::new(),
             notices: Vec::new(),
             activity: None,
+            runtime: crate::runtime_diagnostics::snapshot(),
         };
         match crate::activity::load(&self.store, session) {
             Ok(state) => report.activity = state,

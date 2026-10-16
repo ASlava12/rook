@@ -80,9 +80,10 @@ impl crate::agent::AgentLoop<'_> {
             LABEL,
             std::str::from_utf8(&body).map_err(|e| CoreError::Other(e.to_string()))?,
         )?;
-        self.budget = crate::context::ContextBudget::new(
+        self.budget = crate::compaction_policy::budget(
+            &self.rook.config,
+            provider.configured_source(),
             self.rook.window_to_budget(provider.as_ref()),
-            self.rook.config.agent.compact_at,
         );
         self.provider = provider;
         self.routed = true;

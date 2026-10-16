@@ -27,6 +27,9 @@ struct Pty {
     /// Every byte so far. A redraw after a keypress only emits the cells that
     /// changed, so a frame has to be replayed over the ones before it.
     seen: String,
+    /// A PTY read may stop in the middle of one UTF-8 character. Replacing each
+    /// partial read separately corrupts the grid and shifts later redraws.
+    pending_utf8: Vec<u8>,
 }
 
 impl Pty {
@@ -53,7 +56,7 @@ impl Pty {
             command.env(k, v);
         }
         let child = command.spawn().unwrap();
-        Self { master: std::fs::File::from(master), child, seen: String::new() }
+        Self { master: std::fs::File::from(master), child, seen: String::new(), pending_utf8: Vec::new() }
     }
 
     /// Collect frames for a fixed window, then read the screen off them.
@@ -123,7 +126,7 @@ impl Pty {
         match self.master.read(&mut chunk) {
             Ok(0) | Err(_) => false,
             Ok(n) => {
-                self.seen.push_str(&String::from_utf8_lossy(&chunk[..n]));
+                append_utf8(&mut self.seen, &mut self.pending_utf8, &chunk[..n]);
                 true
             }
         }
@@ -133,6 +136,43 @@ impl Pty {
         use std::io::Write;
         self.master.write_all(keys.as_bytes()).unwrap();
         self.master.flush().unwrap();
+    }
+}
+
+fn append_utf8(seen: &mut String, pending: &mut Vec<u8>, bytes: &[u8]) {
+    pending.extend_from_slice(bytes);
+    let mut offset = 0;
+    loop {
+        match std::str::from_utf8(&pending[offset..]) {
+            Ok(text) => {
+                seen.push_str(text);
+                offset = pending.len();
+                break;
+            }
+            Err(error) => {
+                let valid = offset + error.valid_up_to();
+                seen.push_str(std::str::from_utf8(&pending[offset..valid]).unwrap());
+                offset = valid;
+                let Some(length) = error.error_len() else { break };
+                seen.push('\u{fffd}');
+                offset += length;
+            }
+        }
+    }
+    pending.drain(..offset);
+    assert!(pending.len() < 4, "only an incomplete UTF-8 character may remain");
+}
+
+#[test]
+fn a_split_utf8_read_preserves_terminal_columns_across_later_redraws() {
+    let frame = "\x1b[1;1H⏎ continue · история\x1b[1;3Hcontinue";
+    let expected = grid(frame, 40, 2);
+    for split in 0..=frame.len() {
+        let (mut seen, mut pending) = (String::new(), Vec::new());
+        append_utf8(&mut seen, &mut pending, &frame.as_bytes()[..split]);
+        append_utf8(&mut seen, &mut pending, &frame.as_bytes()[split..]);
+        assert_eq!(grid(&seen, 40, 2), expected, "split at byte {split}");
+        assert!(pending.is_empty());
     }
 }
 

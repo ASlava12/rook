@@ -1,7 +1,7 @@
 //! Token and time allowances, measured context costs and cache boundaries.
 
 use super::{AgentLoop, TurnOutcome};
-use crate::context::{ContextBudget, estimate_tokens};
+use crate::context::estimate_tokens;
 use rook_llm::Message;
 
 /// A breakpoint below the minimum cacheable prefix only pays the write premium,
@@ -105,7 +105,8 @@ impl<'a> AgentLoop<'a> {
     /// compaction without a hundred thousand tokens of fixture.
     #[doc(hidden)]
     pub fn set_window_for_test(&mut self, window: usize) {
-        self.budget = ContextBudget::new(window, self.rook.config.agent.compact_at);
+        self.budget =
+            crate::compaction_policy::budget(&self.rook.config, self.provider.configured_source(), window);
     }
 
     /// Mark the end of the conversation as it stood before this turn, so each
@@ -134,7 +135,11 @@ impl<'a> AgentLoop<'a> {
             return;
         }
         if let Some(window) = self.rook.learned_window(self.provider.as_ref()) {
-            self.budget = ContextBudget::new(window, self.rook.config.agent.compact_at);
+            self.budget = crate::compaction_policy::budget(
+                &self.rook.config,
+                self.provider.configured_source(),
+                window,
+            );
             return;
         }
         let Ok(Some(window)) =
@@ -147,7 +152,8 @@ impl<'a> AgentLoop<'a> {
         }
         let window = self.rook.learn_window(self.provider.as_ref(), window);
         tracing::info!("the endpoint holds {window} tokens, not the {} assumed", self.budget.window);
-        self.budget = ContextBudget::new(window, self.rook.config.agent.compact_at);
+        self.budget =
+            crate::compaction_policy::budget(&self.rook.config, self.provider.configured_source(), window);
     }
 
     /// How much the reply may be, when nobody has set a number.

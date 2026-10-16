@@ -105,6 +105,7 @@ pub(crate) fn cmd_run(
             runtime.block_on(through_the_daemon(&daemon, &here, &asked, session, yes, json, options))?;
         if elsewhere {
             crate::notify::attention();
+            crate::notify::status(crate::notify::Status::Clear);
             std::process::exit(2);
         }
         return Ok(());
@@ -127,6 +128,7 @@ pub(crate) fn cmd_run(
             }
             None => rook,
         };
+        let provider = rook.provider_for_turn(session, None)?;
         let mut agent = rook_core::agent::AgentLoop::new(&rook, provider.into(), session);
         agent.options = options;
         // `run` is scripted more often than watched, so it refuses what it cannot
@@ -158,6 +160,13 @@ pub(crate) fn cmd_run(
         // finished turn from one that ran out of steps or was refused, and both
         // of those come back as Ok with the work half done.
         let finished = rook_core::agent::finished(&outcome.stopped);
+        if !json {
+            crate::notify::status(if finished {
+                crate::notify::Status::Done
+            } else {
+                crate::notify::Status::Idle
+            });
+        }
         if json {
             println!(
                 "{}",
@@ -210,6 +219,7 @@ pub(crate) fn cmd_run(
     })?;
     if unfinished {
         crate::notify::attention();
+        crate::notify::status(crate::notify::Status::Clear);
         std::process::exit(2);
     }
     Ok(())

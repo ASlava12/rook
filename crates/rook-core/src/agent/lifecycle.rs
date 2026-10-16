@@ -1,7 +1,6 @@
 //! Turn admission and closing: hooks, recipes, execution receipts and persistence.
 
 use super::{AgentLoop, Progress, TurnOutcome};
-use crate::context::ContextBudget;
 use crate::error::{CoreError, Result};
 use crate::hooks;
 use rook_store::EventKind;
@@ -129,6 +128,17 @@ impl AgentLoop<'_> {
         self.recipe_skill = None;
         self.recipe_output = false;
         if let Some(recipe) = prepared {
+            self.equipment = self.equipment.intersect(&recipe.equipment);
+            if self.external_executor.is_some() && self.equipment.restricted() {
+                return Err(CoreError::Other(
+                    "recipe equipment restrictions cannot be enforced by an external ACP executor".into(),
+                ));
+            }
+            if let Some(allowed) = &self.equipment.mcp {
+                self.tools.restrict_mcp(allowed, self.rook.config.mcp_catalog);
+            }
+            let available = self.tool_specs();
+            self.equipment.preflight(&available, &self.tools.mcp_server_names())?;
             self.selected_recipe = Some((recipe.definition, recipe.values));
             self.effective_options = Some(recipe.options);
             self.recipe_skill = recipe.skill;
@@ -136,9 +146,10 @@ impl AgentLoop<'_> {
             if let Some(model) = recipe.model {
                 self.provider = crate::models::provider_for(&self.rook.config, &self.vault, &model)?.into();
                 self.reset_phase_route();
-                self.budget = ContextBudget::new(
+                self.budget = crate::compaction_policy::budget(
+                    &self.rook.config,
+                    self.provider.configured_source(),
                     self.rook.window_to_budget(self.provider.as_ref()),
-                    self.rook.config.agent.compact_at,
                 );
                 self.rook.store.update_session(self.session, |meta| meta.model = model.clone())?;
             }

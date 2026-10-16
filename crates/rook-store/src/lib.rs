@@ -1274,6 +1274,37 @@ impl Store {
 
     // ---------------------------------------------------------------- kv pairs
 
+    /// Commit a guarded companion and a metadata edit in one durable write.
+    /// The edit sees the current record, so concurrent event counters are retained.
+    pub fn kv_update_session_checked(
+        &self,
+        session: u128,
+        key: &str,
+        expected: Option<&[u8]>,
+        value: &[u8],
+        edit: impl FnOnce(&mut SessionMeta),
+    ) -> Result<bool> {
+        let txn = self.db.begin_write()?;
+        {
+            let mut sessions = txn.open_table(schema::SESSIONS)?;
+            let bytes = sessions
+                .get(schema::session_key(session).as_slice())?
+                .ok_or_else(|| StoreError::MissingSession(format_session_id(session)))?;
+            let mut meta: SessionMeta = postcard::from_bytes(bytes.value())?;
+            drop(bytes);
+            let mut kv = txn.open_table(schema::KV)?;
+            if kv.get(key)?.as_ref().map(|v| v.value()) != expected {
+                return Ok(false);
+            }
+            edit(&mut meta);
+            sessions
+                .insert(schema::session_key(session).as_slice(), postcard::to_allocvec(&meta)?.as_slice())?;
+            kv.insert(key, value)?;
+        }
+        txn.commit()?;
+        Ok(true)
+    }
+
     /// Publish related companions only if the caller still owns its observed
     /// value. Session deletion and this transition serialize in the same write.
     pub fn kv_update_checked(

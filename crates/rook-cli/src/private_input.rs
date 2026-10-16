@@ -69,6 +69,7 @@ impl Drop for Cancel {
 /// Dropping the waiter stops terminal polling too; it never leaves a detached
 /// thread consuming later prompts or saving a half-entered credential.
 pub(crate) async fn read(prompt: SecretPrompt) -> (Draft, SecretStatus) {
+    let _waiting = crate::notify::waiting(crate::notify::Status::Secret);
     if !available() {
         return (Draft::new(prompt), SecretStatus::Unavailable);
     }
@@ -138,6 +139,7 @@ pub(crate) async fn read(prompt: SecretPrompt) -> (Draft, SecretStatus) {
 
 /// Forms use an owner-cancellable reader, never a detached blocking stdin read.
 pub(crate) async fn read_question(question: rook_tools::ask::Question) -> rook_tools::ask::Answer {
+    let _waiting = crate::notify::waiting(crate::notify::Status::Question);
     if !available() {
         return question.unanswered();
     }

@@ -99,6 +99,10 @@ impl<Q, A> Pending<Q, A> {
         self.changed.send_modify(|revision| *revision = revision.wrapping_add(1));
     }
 
+    pub fn count(&self) -> usize {
+        self.hold().values().filter(|entry| !entry.answer.is_closed()).count()
+    }
+
     pub fn is_waiting(&self) -> bool {
         self.hold().values().any(|entry| !entry.answer.is_closed())
     }

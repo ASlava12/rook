@@ -404,7 +404,7 @@ async fn iteration(state: &Arc<AppState>, run: &Run, observed: Observed) -> Resu
         &rook,
         &run.id,
         |session| {
-            let provider = rook_core::models::configured(&rook.config)?;
+            let provider = rook.provider_for_turn(session, None)?;
             let mut agent = rook_core::agent::AgentLoop::new(&rook, provider.into(), session);
             let observation = crate::chat::activity::Observation::new(&rook, session);
             *watch.lock().unwrap_or_else(|e| e.into_inner()) = Some(observation.unattended());

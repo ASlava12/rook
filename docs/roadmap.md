@@ -5,6 +5,31 @@ what unblocks the most.
 
 ## Done
 
+**October 16 additional reference adoption (R16-1 through R16-8).**
+All ten reference pointers were advanced again. The
+[dated source review](research/reference-review-20261016.md) records exact pins,
+existing equivalents, bounded-history coverage, acceptance checks and dismissals.
+All eight additional candidates are implemented. Delivery, checks and the live
+SSH verification limit are tracked in the
+[October 16 adoption record](reference-r16-adoption.md):
+
+| Review priority | Delivered capability | Source |
+|---|---|---|
+| P1 | R16-1: durable model selection, explicit queued/effective status and retry receipts | Hermes |
+| P1 | R16-2: attention inbox across sessions/branches for questions, permissions and private input | OpenResearch |
+| P1 | R16-3: scheduler/queue/blocking diagnostics beyond existing inactivity observations | OpenClaw |
+| P1 | R16-4: explicit share-export content profiles and an omission preview | OpenCode |
+| P2 | R16-5: per-model compaction reserves and retained-history policy | Pi durable harness |
+| P2 | R16-6: recipe equipment requirements restricted by parent authority | Goose |
+| P2 | R16-7: optional OSC 7501 terminal lifecycle status | Goose |
+| P2 | R16-8: streaming SSH file payloads with source checks and atomic publication | Codex |
+
+The implementation preserves existing permission/private-input rules: declining or
+ignoring a request is not consent, and a refused secret must not cause repeated
+prompts. Performance/quality changes need local evidence before a default
+changes. The source review is historical; current delivery and remaining
+verification limits are recorded in the adoption tracker above.
+
 - **October 16 reference follow-up** — source-bound skill updates, scoped bundled
   resources, producer-scoped reasoning, summarizer-window admission, reusable
   prompt/model/effort presets, responsive frozen-source diffs, browser diagnostics

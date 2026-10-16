@@ -34,6 +34,8 @@ static WORKTREE_RECOVERIES: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
 static SKILL_RESOURCE_OPS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(4)));
+static MODEL_SELECTION_OPS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(4)));
 static PRIVATE_INPUT_OPS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(4)));
 
@@ -50,6 +52,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/store/objects/{id}", get(object))
         .route("/api/store/refs", get(refs))
         .route("/api/sessions", get(sessions))
+        .route("/api/attention", get(attention))
         .route("/api/history/recall", post(session_recall).layer(axum::extract::DefaultBodyLimit::max(4096)))
         .route("/api/sessions/{id}/recovery", get(execution).post(acknowledge_operation))
         .route(
@@ -71,6 +74,14 @@ pub fn router(state: Shared) -> Router {
         .route("/api/sessions/{id}/rename", post(rename_branch))
         .route("/api/sessions/{id}/bookmarks", get(bookmarks).post(mark_bookmark))
         .route("/api/sessions/{id}/history", get(history_page))
+        .route(
+            "/api/sessions/{id}/export",
+            post(conversation_export).layer(axum::extract::DefaultBodyLimit::max(4096)),
+        )
+        .route(
+            "/api/sessions/{id}/model-selection",
+            get(model_selection).post(select_model).layer(axum::extract::DefaultBodyLimit::max(4096)),
+        )
         .route("/api/sessions/{id}/history/search", get(history_search))
         .route("/api/sessions/{id}/history/{seq}", get(history_entry))
         .route("/api/sessions/{id}/history/{seq}/images/{index}", get(history_image))
@@ -649,6 +660,30 @@ struct ListedSession {
     tree: Option<rook_core::session_list::Row>,
 }
 
+async fn attention(
+    State(s): State<Shared>,
+    Query(query): Query<rook_core::attention::Query>,
+) -> ApiResult<rook_core::attention::Page> {
+    let after = query.cursor()?;
+    let live = {
+        let owners = s.live.read().await;
+        let mut selected = std::collections::BTreeMap::new();
+        for (&id, owner) in owners.iter() {
+            if after.is_some_and(|after| id <= after) {
+                continue;
+            }
+            if let Some(state) = owner.attention().filter(|s| s.questions + s.approvals + s.secrets > 0) {
+                selected.insert(id, state);
+                if selected.len() > query.count() + 1 {
+                    selected.pop_last();
+                }
+            }
+        }
+        selected
+    };
+    history_read(s, move |rook| rook.live_attention_page(&query, &live)).await
+}
+
 async fn sessions(
     State(s): State<Shared>,
     Query(query): Query<SessionListQuery>,
@@ -698,11 +733,81 @@ async fn history_read<T: Send + 'static>(
     s: Shared,
     read: impl FnOnce(&rook_core::Rook) -> rook_core::Result<T> + Send + 'static,
 ) -> ApiResult<T> {
-    let result = tokio::task::spawn_blocking(move || read(&s.rook.blocking_read()))
-        .await
-        .map_err(|e| Fail(StatusCode::INTERNAL_SERVER_ERROR, ApiError::new("internal", e.to_string())))??;
+    let queued =
+        rook_core::runtime_diagnostics::queued(rook_core::runtime_diagnostics::Operation::HistoryRead);
+    let result = tokio::task::spawn_blocking(move || {
+        let _running = queued.map(|p| p.start());
+        let waiting =
+            rook_core::runtime_diagnostics::queued(rook_core::runtime_diagnostics::Operation::HistoryRead);
+        let rook = s.rook.blocking_read();
+        if let Some(waiting) = waiting {
+            waiting.waited(rook_core::runtime_diagnostics::Metric::EngineLockWait);
+        }
+        read(&rook)
+    })
+    .await
+    .map_err(|e| Fail(StatusCode::INTERNAL_SERVER_ERROR, ApiError::new("internal", e.to_string())))??;
     Ok(Json(result))
 }
+async fn model_selection(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+) -> ApiResult<rook_core::model_selection::View> {
+    let session = session_id(&id)?;
+    history_read(s, move |rook| rook.model_selection(session)).await
+}
+async fn select_model(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Json(request): Json<rook_core::model_selection::Request>,
+) -> ApiResult<rook_core::model_selection::Receipt> {
+    let session = session_id(&id)?;
+    let permit = MODEL_SELECTION_OPS.clone().try_acquire_owned().map_err(|_| {
+        Fail(
+            StatusCode::TOO_MANY_REQUESTS,
+            ApiError::new("busy", "model selection is busy; retry the same request later"),
+        )
+    })?;
+    let workspace = s
+        .rook
+        .read()
+        .await
+        .store
+        .get_session(session)
+        .map_err(CoreError::from)?
+        .ok_or(CoreError::NoSession(id))?
+        .workspace;
+    let engine = s.engine_for(Some(std::path::Path::new(&workspace))).await.map_err(CoreError::Other)?;
+    let queued =
+        rook_core::runtime_diagnostics::queued(rook_core::runtime_diagnostics::Operation::ModelSelection);
+    let receipt = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let _running = queued.map(|p| p.start());
+        engine.blocking_read().select_model(session, &request)
+    })
+    .await
+    .map_err(|e| CoreError::Other(e.to_string()))??;
+    Ok(Json(receipt))
+}
+
+async fn conversation_export(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Json(request): Json<rook_core::conversation_export::Request>,
+) -> ApiResult<rook_core::conversation_export::Export> {
+    let session = session_id(&id)?;
+    static READS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+        std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
+    let permit = READS.clone().try_acquire_owned().map_err(|_| {
+        Fail(StatusCode::TOO_MANY_REQUESTS, ApiError::new("busy", "export is busy; try again"))
+    })?;
+    history_read(s, move |r| {
+        let _permit = permit;
+        r.conversation_export(session, &request)
+    })
+    .await
+}
+
 async fn history_page(
     State(s): State<Shared>,
     Path(id): Path<String>,

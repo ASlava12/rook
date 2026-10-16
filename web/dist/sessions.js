@@ -30,6 +30,31 @@ export async function renderSessions() {
   const token = ++follow;
   const { items } = await api('/api/sessions?tree=true');
   if (!state.session && items.length) state.session = items[0].id;
+  const attention = el('section', { class: 'card' }, el('h2', {}, 'Waiting for you'));
+  const attentionRows = el('div');
+  const attentionNext = el('button', { hidden: true }, 'Scan next sessions');
+  let attentionCursor = null, attentionPending = false;
+  async function loadAttention(after = null) {
+    if (attentionPending) return;
+    attentionPending = true;
+    try {
+      const page = await api(`/api/attention?limit=256${after ? `&after=${encodeURIComponent(after)}` : ''}`);
+      if (token !== follow || state.tab !== 'sessions') return;
+      const nodes = page.items.map(item => el('div', {},
+        el('span', { class: 'session-tree-prefix', 'aria-hidden': true }, item.prefix || ''),
+        el('button', { onclick: () => continueIn(item.session) }, item.title || item.session),
+        el('span', {}, item.live ? ` · ${item.live.questions} questions · ${item.live.approvals} permissions · ${item.live.secrets} private inputs` : ' · saved observation; owner unknown'),
+        item.parent ? el('button', { onclick: () => continueIn(item.parent) }, `Parent: ${item.parent}`) : null));
+      attentionRows.replaceChildren(...nodes, ...(nodes.length ? [] : [el('p', {}, 'No requests in this scanned page.')]));
+      attentionCursor = page.next;
+      attentionNext.hidden = !page.next;
+    } catch (error) { attentionRows.textContent = error.error || String(error); }
+    finally { attentionPending = false; }
+  }
+  attentionNext.onclick = () => loadAttention(attentionCursor);
+  attention.append(el('p', {}, 'Open a session to answer its current request. You can skip or decline; secret values are never listed here.'),
+    el('button', { onclick: () => loadAttention() }, 'Refresh waiting sessions'), attentionRows, attentionNext);
+  loadAttention();
   const list = el('ul', { class: 'list' }, items.map(s => el('li', {
       'aria-current': String(String(s.id) === String(state.session)),
       onclick: () => { state.session = s.id; renderSessions(); }
@@ -62,6 +87,7 @@ export async function renderSessions() {
         if (!activity.isConnected || state.session !== session) return;
         const a = report.activity;
         activity.textContent = a ? `${a.session}: ${a.owner_live === null ? 'saved observation; owner unknown' : a.owner_live ? 'running' : 'owner stopped'}; ${a.stage}${a.operation ? ` · ${a.operation}` : ''}; no observed progress for ${a.idle_secs}s; last progress ${new Date(a.last_progress_at * 1000).toISOString()}${a.stalled ? '; inactivity threshold reached' : ''}` : 'No activity observation has been recorded for this session.';
+        if (report.runtime) activity.textContent += `\nDaemon timings: ${report.runtime.aggregates.map(row => `${row.operation}/${row.metric}: max ${row.stats.max_ms} ms, slow ${row.stats.slow}`).join('; ')}. Observations may include waits; they do not establish a cause.`;
       } catch (error) { if (activity.isConnected) activity.textContent = String(error.error || error); }
     } }, 'Check activity')), activity);
 
@@ -162,6 +188,6 @@ export async function renderSessions() {
     right.append(el('p', { class: 'empty' }, 'no sessions yet — run `rook run "…"`'));
   }
   if (token !== follow || state.tab !== 'sessions') return;
-  $('#view').replaceChildren(el('div', { class: 'grid' },
+  $('#view').replaceChildren(attention, el('div', { class: 'grid' },
     el('div', { class: 'card' }, el('h2', {}, `sessions (${items.length})`), list), right));
 }

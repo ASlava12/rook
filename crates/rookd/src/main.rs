@@ -410,6 +410,7 @@ async fn serve() -> Result<()> {
     let config = rook.config.clone();
     // The daemon draws nothing: its stderr is a log file or a console.
     rook_core::telemetry::init(&config.telemetry, true);
+    let _runtime_probe = rook_core::runtime_diagnostics::start(&config.telemetry.runtime_diagnostics)?;
     let port = args.port.unwrap_or(config.server.port);
     let bind: IpAddr =
         args.bind.unwrap_or(config.server.bind.clone()).parse().context("--bind must be an IP address")?;
@@ -505,7 +506,13 @@ async fn maintain(state: Arc<AppState>, every_hours: u32) {
         };
         // As in the handler: off the runtime, so the hours-long timer does not
         // become a stall the moment it fires.
-        let done = tokio::task::spawn_blocking(move || rook.maintenance(false)).await;
+        let queued =
+            rook_core::runtime_diagnostics::queued(rook_core::runtime_diagnostics::Operation::Maintenance);
+        let done = tokio::task::spawn_blocking(move || {
+            let _running = queued.map(|p| p.start());
+            rook.maintenance(false)
+        })
+        .await;
         match done.unwrap_or_else(|e| Err(rook_core::CoreError::Other(e.to_string()))) {
             Ok(report) => tracing::info!(
                 sessions = report.prune.sessions_deleted,

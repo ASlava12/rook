@@ -1,9 +1,12 @@
 # Sent as fixed code over an authenticated SSH channel; request data stays on stdin.
+import contextlib
 import base64, ctypes, fcntl, hashlib, json, os, signal, stat, struct, subprocess, sys, time
 cfg = json.loads(sys.argv[1])
 mode, base, identity, owner = cfg['action'], cfg['base'], cfg['identity'], cfg['owner']
 limits = cfg['limits']
 MAX_META = 8192
+CHUNK = 65536
+MAX_FRAME = CHUNK + MAX_META
 MAX_INPUT = 1024 * 1024
 MAX_PROCESSES = 32768
 root = os.path.join(base, '.rook-exec', identity, owner)
@@ -100,44 +103,95 @@ def snapshot(fd):
     visit(fd, '')
     return {'dirs': sorted(dirs), 'files': dict(sorted(files.items()))}
 
+def file_digest(file):
+    if 'sha256' in file: return file['sha256']
+    digest = hashlib.sha256()
+    for at in range(0, len(file['data']), CHUNK): digest.update(base64.b64decode(file['data'][at:at+CHUNK], validate=True))
+    return digest.hexdigest()
+
 def source_hash(source):
     digest = hashlib.sha256()
     for path in source['dirs']:
         data = path.encode(); digest.update(b'd' + struct.pack('>I', len(data)) + data)
     for path, file in source['files'].items():
-        data = path.encode(); digest.update(b'f' + struct.pack('>I', len(data)) + data + struct.pack('>I', file['mode']) + hashlib.sha256(base64.b64decode(file['data'], validate=True)).digest())
+        data = path.encode(); digest.update(b'f' + struct.pack('>I', len(data)) + data + struct.pack('>I', file['mode']) + bytes.fromhex(file_digest(file)))
     return digest.hexdigest()
 
 def emit(value):
     sys.stdout.write(json.dumps(value, separators=(',', ':'), ensure_ascii=True) + '\n')
 
-def read_source():
-    dirs, files, total, count, terminal = [], {}, 0, 0, None
-    max_line = ((limits['file_bytes'] + 2) // 3) * 4 + MAX_META
-    while True:
-        line = sys.stdin.buffer.readline(max_line + 1)
-        if not line: break
-        if len(line) > max_line: raise RuntimeError('incoming frame exceeds its bound')
-        value = json.loads(line)
-        if terminal is not None: raise RuntimeError('input continued after source certificate')
-        if value.get('type') == 'end': terminal = value['hash']; continue
-        path = value.get('path'); count += 1
-        if count > limits['max_entries'] or not valid(path) or excluded(path): raise RuntimeError('incoming paths exceed the declared contract')
-        if value.get('type') == 'dir':
-            if path in dirs or path in files: raise RuntimeError('duplicate incoming path')
-            dirs.append(path)
-        elif value.get('type') == 'file':
-            text = value['data']
-            if not isinstance(text, str) or len(text) > ((limits['file_bytes'] + 2) // 3) * 4 or len(files) >= limits['max_files']: raise RuntimeError('incoming file exceeds its bound')
-            data = base64.b64decode(text, validate=True)
-            if len(data) > limits['file_bytes'] or len(data) > limits['total_bytes'] - total: raise RuntimeError('incoming file bytes exceed their bound')
-            total += len(data)
-            if path in files or path in dirs or not isinstance(value['mode'], int) or not 0 <= value['mode'] <= 0o777: raise RuntimeError('invalid incoming file identity')
-            files[path] = {'mode': value['mode'], 'data': text}
-        else: raise RuntimeError('unsupported incoming frame')
-    source = {'dirs': sorted(dirs), 'files': dict(sorted(files.items()))}
-    if terminal != source_hash(source): raise RuntimeError('incoming source certificate mismatch')
-    return source
+@contextlib.contextmanager
+def read_source(parent_fd):
+    name = '.incoming-' + os.urandom(12).hex()
+    os.mkdir(name, 0o700, dir_fd=parent_fd)
+    stage = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    names, active = [], None
+    try:
+        dirs, files, total, count, terminal, version, wire = [], {}, 0, 0, None, False, 0
+        wire_cap = ((limits['total_bytes'] + 2) // 3) * 4 + limits['max_entries'] * 8192 + ((limits['total_bytes'] + 49151) // 49152 + limits['max_files']) * 256 + 16384
+        while True:
+            line = sys.stdin.buffer.readline(MAX_FRAME + 1)
+            if not line: break
+            wire += len(line)
+            if len(line) > MAX_FRAME or wire > wire_cap: raise RuntimeError('incoming stream exceeded its bound')
+            value = json.loads(line)
+            if terminal is not None: raise RuntimeError('input continued after source certificate')
+            kind = value.get('type')
+            if kind == 'stream' and not version and not count and value.get('version') == 2:
+                version = True; continue
+            if not version: raise RuntimeError('streaming transfer version 2 is required')
+            if kind == 'end' and active is None: terminal = value['hash']; continue
+            if kind in ('dir', 'file_start') and active is None:
+                path = value.get('path'); count += 1
+                if count > limits['max_entries'] or not valid(path) or excluded(path) or path in dirs or path in files: raise RuntimeError('incoming paths exceed their declared contract')
+                if kind == 'dir': dirs.append(path); continue
+                size, mode, digest = value.get('bytes'), value.get('mode'), value.get('sha256')
+                if type(size) is not int or not 0 <= size <= min(limits['file_bytes'], limits['total_bytes'] - total) or len(files) >= limits['max_files']: raise RuntimeError('incoming file exceeds its byte limit')
+                if type(mode) is not int or not 0 <= mode <= 0o777 or not isinstance(digest, str) or len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest): raise RuntimeError('invalid incoming file identity')
+                slot = str(len(names)); child = os.open(slot, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=stage); names.append(slot)
+                active = {'path': path, 'mode': mode, 'expected': size, 'sha256': digest, 'count': 0, 'digest': hashlib.sha256(), 'writer': os.fdopen(child, 'wb'), 'slot': slot, 'padded': False}
+            elif kind == 'chunk' and active is not None:
+                text = value.get('data')
+                if active['padded'] or type(value.get('offset')) is not int or value['offset'] != active['count'] or not isinstance(text, str) or not 0 < len(text) <= CHUNK: raise RuntimeError('invalid incoming chunk position or size')
+                data = base64.b64decode(text, validate=True)
+                if len(data) > active['expected'] - active['count']: raise RuntimeError('incoming file grew past its admitted size')
+                active['writer'].write(data); active['digest'].update(data); active['count'] += len(data); active['padded'] = text.endswith('=')
+            elif kind == 'file_end' and active is not None:
+                if active['count'] != active['expected'] or active['digest'].hexdigest() != active['sha256'] or value.get('sha256') != active['sha256']: raise RuntimeError('incoming streamed file certificate mismatch')
+                active['writer'].flush(); os.fsync(active['writer'].fileno()); active['writer'].close()
+                files[active['path']] = {'mode': active['mode'], 'bytes': active['count'], 'sha256': active['sha256'], '_fd': stage, '_name': active['slot']}
+                total += active['count']; active = None
+            else: raise RuntimeError('unsupported incoming stream frame')
+        source = {'dirs': sorted(dirs), 'files': dict(sorted(files.items()))}
+        if active is not None or not version or terminal != source_hash(source): raise RuntimeError('incoming source certificate mismatch')
+        # Validate the complete path topology before any workspace file is touched.
+        for path in [*dirs, *files]:
+            parts = path.split('/')
+            if path in dirs and path in files or any('/'.join(parts[:n]) not in dirs for n in range(1, len(parts))): raise RuntimeError('incoming source omitted or conflicted with a parent directory')
+        yield source
+    finally:
+        if active is not None: active['writer'].close()
+        for slot in names:
+            try: os.unlink(slot, dir_fd=stage)
+            except FileNotFoundError: pass
+        os.close(stage); os.rmdir(name, dir_fd=parent_fd)
+
+def file_chunks(file):
+    if '_name' not in file:
+        for at in range(0, len(file['data']), CHUNK): yield base64.b64decode(file['data'][at:at+CHUNK], validate=True)
+        return
+    child = os.open(file['_name'], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=file['_fd'])
+    try:
+        before = os.fstat(child); digest, count = hashlib.sha256(), 0
+        if not stat.S_ISREG(before.st_mode) or before.st_size != file['bytes']: raise RuntimeError('staged source identity changed')
+        while True:
+            data = os.read(child, min(49152, file['bytes'] - count + 1))
+            if not data: break
+            if len(data) > file['bytes'] - count: raise RuntimeError('staged source grew')
+            count += len(data); digest.update(data); yield data
+        after = os.fstat(child)
+        if count != file['bytes'] or digest.hexdigest() != file['sha256'] or (before.st_ino, before.st_mtime_ns, before.st_ctime_ns) != (after.st_ino, after.st_mtime_ns, after.st_ctime_ns): raise RuntimeError('staged source changed before publication')
+    finally: os.close(child)
 
 def publish(fd, before, after):
     if source_hash(snapshot(fd)) != source_hash(before): raise RuntimeError('remote replica changed before publication')
@@ -157,15 +211,17 @@ def publish(fd, before, after):
     for path in after['dirs']:
         child = relative_dir(fd, path, True); os.close(child)
     for path, new in after['files'].items():
-        if before['files'].get(path) == new: continue
+        old = before['files'].get(path)
+        if old is not None and old['mode'] == new['mode'] and file_digest(old) == file_digest(new): continue
         parent, name = path.rsplit('/', 1) if '/' in path else ('', path)
         child = relative_dir(fd, parent, True)
         try:
             temp = '.rook-sync-' + cfg['token']
             out = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=child)
             try:
-                data = base64.b64decode(new['data'], validate=True)
-                with os.fdopen(out, 'wb', closefd=False) as stream: stream.write(data); stream.flush(); os.fsync(out)
+                with os.fdopen(out, 'wb', closefd=False) as stream:
+                    for data in file_chunks(new): stream.write(data)
+                    stream.flush(); os.fsync(out)
                 os.fchmod(out, new['mode']); os.replace(temp, name, src_dir_fd=child, dst_dir_fd=child)
             finally:
                 os.close(out)
@@ -244,13 +300,41 @@ def stop(fd, state):
         time.sleep(0.02)
     return False
 
+def cleanup_staging(fd):
+    # Called only after explicit release has certified the old worker stopped.
+    # A killed upload can leave one private staging directory; never traverse
+    # unknown names or links while reclaiming it.
+    staged, count = [], 0
+    with os.scandir(fd) as entries:
+        for entry in entries:
+            count += 1
+            if count > 64: raise RuntimeError('owned control directory exceeds cleanup bounds')
+            if not entry.name.startswith('.incoming-'): continue
+            if len(entry.name) != 34 or any(c not in '0123456789abcdef' for c in entry.name[10:]) or not stat.S_ISDIR(entry.stat(follow_symlinks=False).st_mode): raise RuntimeError('unrecognized staged source; inspect before cleanup')
+            staged.append(entry.name)
+            if len(staged) > 1: raise RuntimeError('multiple staged sources require explicit inspection')
+    for name in staged:
+        stage = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        try:
+            names, total = [], 0
+            with os.scandir(stage) as entries:
+                for entry in entries:
+                    info = entry.stat(follow_symlinks=False)
+                    if not entry.name.isascii() or not entry.name.isdecimal() or len(entry.name) > 5 or int(entry.name) >= limits['max_files'] or not stat.S_ISREG(info.st_mode) or info.st_size > limits['file_bytes'] or len(names) >= limits['max_files']: raise RuntimeError('invalid staged file; inspect before cleanup')
+                    total += info.st_size
+                    if total > limits['total_bytes']: raise RuntimeError('staged bytes exceed cleanup bound')
+                    names.append(entry.name)
+            for child in names: os.unlink(child, dir_fd=stage)
+        finally: os.close(stage)
+        os.rmdir(name, dir_fd=fd)
+
 def remove_owned_tree(fd):
     entries = []
     def gather(current, prefix):
         with os.scandir(current) as stream:
             for entry in stream:
                 path = prefix + entry.name
-                if len(entries) >= limits['max_entries']: raise RuntimeError('owned cleanup exceeds max_entries; inspect the retained replica before manual cleanup')
+                if len(entries) >= limits['max_entries'] + 16: raise RuntimeError('owned cleanup exceeds max_entries plus control metadata allowance; inspect the retained replica before manual cleanup')
                 kind = entry.stat(follow_symlinks=False)
                 entries.append((path, stat.S_ISDIR(kind.st_mode)))
                 if stat.S_ISDIR(kind.st_mode):
@@ -268,6 +352,7 @@ def remove_owned_tree(fd):
 
 
 try:
+    if mode in ('upload', 'dump') and cfg.get('stream_version') != 2: raise RuntimeError('streaming transfer version 2 is required')
     if sys.platform != 'linux' or not hasattr(os, 'pidfd_open') or not hasattr(signal, 'pidfd_send_signal'): raise RuntimeError('SSH worker needs Linux, Python 3.9+ and pidfd support')
     if not base.startswith('/') or '..' in base.split('/') or not all(c in '0123456789abcdef' for c in identity) or len(identity) != 64 or not all(c.isalnum() for c in owner): raise RuntimeError('invalid owned resource identity')
     try: fd = open_dir(root, mode == 'init')
@@ -282,7 +367,7 @@ try:
                 marker = {'identity': identity, 'owner': owner, 'source': None}; small_write(fd, 'owner.json', marker)
             if marker['identity'] != identity or marker['owner'] != owner: raise RuntimeError('SSH resource identity changed')
             child = relative_dir(fd, 'workspace', True); os.close(child)
-            emit({'ready': True, 'workspace': root + '/workspace', 'identity': identity, 'owner': owner})
+            emit({'stream_version': 2, 'ready': True, 'workspace': root + '/workspace', 'identity': identity, 'owner': owner})
         else:
             marker = small_read(fd, 'owner.json')
             if marker['identity'] != identity or marker['owner'] != owner: raise RuntimeError('SSH resource identity mismatch')
@@ -292,15 +377,16 @@ try:
                 signal.signal(signal.SIGTERM, cancel_upload); signal.signal(signal.SIGHUP, cancel_upload)
                 small_write(fd, 'run.json', transfer)
                 try:
-                    after = read_source(); workspace = relative_dir(fd, 'workspace')
-                    try:
-                        before = snapshot(workspace); expected = cfg.get('previous')
-                        if (expected is not None and source_hash(before) != expected) or (expected is None and (before['dirs'] or before['files'])): raise RuntimeError('remote replica has unreviewed changes')
-                        publish(workspace, before, after)
-                        transfer.update(status='prepared', terminal=False, stopped=True, source=source_hash(after))
-                        small_write(fd, 'run.json', transfer)
-                        emit({'prepared': True, 'source': source_hash(after)})
-                    finally: os.close(workspace)
+                    with read_source(fd) as after:
+                        workspace = relative_dir(fd, 'workspace')
+                        try:
+                            before = snapshot(workspace); expected = cfg.get('previous')
+                            if (expected is not None and source_hash(before) != expected) or (expected is None and (before['dirs'] or before['files'])): raise RuntimeError('remote replica has unreviewed changes')
+                            publish(workspace, before, after)
+                            transfer.update(status='prepared', terminal=False, stopped=True, source=source_hash(after))
+                            small_write(fd, 'run.json', transfer)
+                            emit({'stream_version': 2, 'prepared': True, 'source': source_hash(after)})
+                        finally: os.close(workspace)
                 except BaseException:
                     transfer.update(status='upload_interrupted', terminal=True, stopped=True)
                     small_write(fd, 'run.json', transfer)
@@ -358,8 +444,9 @@ try:
                     finally: os.close(lock)
                     if not stopped: raise RuntimeError('owned remote process cleanup could not be certified')
                     if mode == 'release':
-                        # Keep source/control material available for explicit recovery; release
-                        # stops execution and marks this immutable resource, never another tree.
+                        cleanup_staging(fd)
+                        # Explicit release reclaims only this owned resource after stop;
+                        # recovery sources in the local receipt remain separately retained.
                         remove_owned_tree(fd)
                         parent = open_dir(os.path.dirname(root))
                         try: os.rmdir(owner, dir_fd=parent)
@@ -376,9 +463,17 @@ try:
                     try: source = snapshot(workspace)
                     finally: os.close(workspace)
                     marker['source'] = source_hash(source); small_write(fd, 'owner.json', marker)
-                    emit({'type': 'meta', 'state': state, 'identity': identity, 'owner': owner})
+                    emit({'type': 'meta', 'stream_version': 2, 'state': state, 'identity': identity, 'owner': owner})
+                    emit({'type': 'stream', 'version': 2})
                     for path in source['dirs']: emit({'type': 'dir', 'path': path})
-                    for path, file in source['files'].items(): emit({'type': 'file', 'path': path, **file})
+                    for path, file in source['files'].items():
+                        digest, offset = file_digest(file), 0
+                        size = len(file['data']) // 4 * 3 - (len(file['data']) - len(file['data'].rstrip('=')))
+                        emit({'type': 'file_start', 'path': path, 'mode': file['mode'], 'bytes': size, 'sha256': digest})
+                        for at in range(0, len(file['data']), CHUNK):
+                            text = file['data'][at:at+CHUNK]
+                            emit({'type': 'chunk', 'offset': offset, 'data': text}); offset += len(base64.b64decode(text, validate=True))
+                        emit({'type': 'file_end', 'sha256': digest})
                     emit({'type': 'end', 'hash': source_hash(source)})
             else: raise RuntimeError('unsupported SSH worker action')
     finally: os.close(fd)

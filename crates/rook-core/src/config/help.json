@@ -958,5 +958,14 @@
   "transcript.quote_bytes": {
     "kind": "integer",
     "help": "Maximum source text bytes in one attributed quote, 128–65536; default 16384. Quotes are inserted into drafts and never sent automatically."
-  }
+  },
+  "models.*.compaction": {"kind": "section", "help": "Optional compaction policy for this configured model source. Unset fields keep current defaults."},
+  "models.*.compaction.compact_at": {"kind": "number", "help": "Fraction of usable context that triggers compaction, 0.1–0.9; inherits agent.compact_at."},
+  "models.*.compaction.reserve_output": {"kind": "number", "help": "Optional output token reserve, 1–8388608. Must fit the window; runtime clamps to half a smaller discovered window."},
+  "models.*.compaction.keep_recent_tokens": {"kind": "number", "help": "Optional recent-history token target, 1–8388608. Runtime caps it below the compaction threshold; complete tool batches are preserved."},
+  "telemetry.runtime_diagnostics": {"kind": "section", "help": "Process-local daemon delay probes. Disabled by default; settings apply at daemon startup. No payloads or uploads."},
+  "telemetry.runtime_diagnostics.enabled": {"kind": "boolean", "help": "Enable bounded scheduling and blocking-work observations; requires daemon restart."},
+  "telemetry.runtime_diagnostics.interval_ms": {"kind": "integer", "help": "Independent probe interval, 50\u201310000 ms; one outstanding probe at most."},
+  "telemetry.runtime_diagnostics.slow_ms": {"kind": "integer", "help": "Observation threshold, 1\u201360000 ms. Crossing it never kills or retries work."},
+  "telemetry.runtime_diagnostics.max_samples": {"kind": "integer", "help": "Recent slow samples retained in memory, 1\u2013128; omissions are counted."}
 }

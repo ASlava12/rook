@@ -566,6 +566,7 @@ pub struct AgentLoop<'a> {
     pub options: rook_proto::TurnOptions,
     effective_options: Option<rook_proto::TurnOptions>,
     recipe_skill: Option<String>,
+    equipment: crate::recipes::Equipment,
     composite_cost_unknown: std::sync::Arc<std::sync::atomic::AtomicBool>,
     prepared_recipe: Option<crate::recipes::Prepared>,
     external_executor: Option<String>,
@@ -758,7 +759,7 @@ impl<'a> AgentLoop<'a> {
         }
 
         let window = rook.window_to_budget(provider.as_ref());
-        let budget = ContextBudget::new(window, rook.config.agent.compact_at);
+        let budget = crate::compaction_policy::budget(&rook.config, provider.configured_source(), window);
         let (routing, routing_invalid) = routing::settings(provider.as_ref());
         Self {
             execution: None,
@@ -774,6 +775,7 @@ impl<'a> AgentLoop<'a> {
             options: Default::default(),
             effective_options: None,
             recipe_skill: None,
+            equipment: Default::default(),
             composite_cost_unknown: Default::default(),
             external_executor: None,
             external_context: None,
@@ -1401,7 +1403,11 @@ impl<'a> AgentLoop<'a> {
                     let assumed = self.budget.window;
                     let smaller = (used * 3 / 4).max(4096);
                     let smaller = self.rook.learn_window(self.provider.as_ref(), smaller);
-                    self.budget = ContextBudget::new(smaller, self.rook.config.agent.compact_at);
+                    self.budget = crate::compaction_policy::budget(
+                        &self.rook.config,
+                        self.provider.configured_source(),
+                        smaller,
+                    );
                     let said = format!(
                         "the endpoint refused {used} tokens as too long, so its window is smaller \
                          than the {assumed} assumed — budgeting {smaller} and summarising to fit. \

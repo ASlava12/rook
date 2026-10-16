@@ -190,7 +190,7 @@ pub(super) fn configure<'a>(agent: &mut AgentLoop<'a>, settings: Arc<Settings>) 
     let session = agent.session;
     agent.followup_model = Some(Arc::new(move || {
         settings.save_followups(rook, session, false).map_err(rook_core::CoreError::Other)?;
-        let provider = rook_core::models::chosen(&rook.config, settings.model().as_deref())?;
+        let provider = rook.provider_for_turn(session, settings.model().as_deref())?;
         Ok((provider.into(), settings.effort()))
     }));
 }

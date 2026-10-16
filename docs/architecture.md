@@ -26,6 +26,14 @@ summary budgeting, presets, frozen diff layouts, browser diagnostics and optiona
 MCP Apps. App HTML and approvals remain separate from model-owned instructions;
 store additions use existing labels or bounded JSON companions.
 
+The [next October 16 adoption](reference-r16-adoption.md) covers durable session
+model selections, cross-session input attention, optional daemon delay probes,
+shared export profiles, model-specific compaction, restricted recipe equipment,
+terminal program status and streaming SSH payloads. Runtime diagnostics remain
+process-local and disabled by default; SSH format negotiation changes no stored
+snapshot layout. The adoption record separates implementation from live-fixture
+verification limits.
+
 ## Extension reports
 
 Explicitly enabled `hooks[].ui` replies can declare bounded status, progress,

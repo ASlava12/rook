@@ -1312,6 +1312,7 @@ impl Chat {
     /// "has it stopped", and a window that has been watching for four seconds
     /// cannot say more than that.
     fn began(&mut self) {
+        crate::notify::status(crate::notify::Status::Working);
         self.saw_model_text = false;
         self.busy = true;
         self.since = Some(std::time::Instant::now());
@@ -1914,6 +1915,11 @@ impl App {
             {
                 self.chat.private.retain(|draft| input.accepts(&draft.prompt.id, &draft.prompt.session));
             }
+            crate::notify::inputs(
+                self.chat.pending.is_some(),
+                self.chat.asking.is_some(),
+                !self.chat.private.is_empty(),
+            );
             self.tasks.poll();
             self.history.poll();
             if let Some(result) = self.history.take_recall() {
@@ -2115,6 +2121,7 @@ impl App {
         if let (Some(session), Some(rook)) = (self.chat.session, self.source.here()) {
             rook.log(session, rook_store::EventKind::Note, "interrupted", "the user stopped this turn").ok();
         }
+        crate::notify::status(crate::notify::Status::Idle);
         self.chat.push("stat", "[stopped]");
         self.chat.ended();
         self.status = "turn stopped".into();
@@ -2228,10 +2235,12 @@ impl App {
                     self.chat.spent = Some((input, output, cached));
                 }
                 TurnEvent::Approval(request) => {
+                    crate::notify::status(crate::notify::Status::Permission);
                     crate::notify::attention();
                     self.chat.pending = Some(request);
                 }
                 TurnEvent::Ask(request) => {
+                    crate::notify::status(crate::notify::Status::Question);
                     crate::notify::attention();
                     self.chat.asking = Some(Asking {
                         id: request.id,
@@ -2252,10 +2261,12 @@ impl App {
                 }
                 TurnEvent::PrivateResult(..) => {}
                 TurnEvent::Done(note) => {
+                    crate::notify::status(crate::notify::Status::Done);
                     self.chat.push("stat", &note);
                     self.finished();
                 }
                 TurnEvent::Error(message) => {
+                    crate::notify::status(crate::notify::Status::Error);
                     self.chat.push("err", &message);
                     self.finished();
                 }
@@ -2293,6 +2304,7 @@ impl App {
                 _ => return,
             }
         }
+        crate::notify::event(&event);
         match event {
             ChatEvent::Activity { state } => {
                 self.chat.push(if state.stalled { "err" } else { "stat" }, &state.describe());
@@ -2452,6 +2464,7 @@ impl App {
                 None => self.chat.push("stat", &format!("  ↩ {text}")),
             },
             ChatEvent::Approval { id, tool, action, preview, kind } => {
+                crate::notify::status(crate::notify::Status::Permission);
                 if self.chat.pending.is_some() {
                     return;
                 }
@@ -2460,6 +2473,7 @@ impl App {
             }
             ChatEvent::SecretRequest { prompt } => self.offer_private(prompt),
             ChatEvent::Ask { id, questions } => {
+                crate::notify::status(crate::notify::Status::Question);
                 if self.chat.asking.is_some() {
                     return;
                 }
@@ -2497,7 +2511,14 @@ impl App {
                 if !models.is_empty() {
                     self.endpoints = models;
                 }
-                if !model.is_empty() {
+                let selected = self
+                    .chat
+                    .session
+                    .and_then(|session| self.source.model_selection(session).ok())
+                    .and_then(|view| view.selected);
+                if let Some(selected) = selected {
+                    *self.shared.model.borrow_mut() = Some(selected);
+                } else if !model.is_empty() {
                     *self.shared.model.borrow_mut() = Some(model);
                 }
                 let ours = (self.shared.policy.stance().as_str(), self.shared.effort.get().as_str());
@@ -3925,13 +3946,49 @@ impl App {
             self.chat.push("stat", &said);
             return;
         }
+        if name == "attention" {
+            let query =
+                rook_core::attention::Query { after: (!rest.is_empty()).then(|| rest.into()), limit: None };
+            let page = if let Some(rook) = self.source.here() {
+                let mut live = std::collections::BTreeMap::new();
+                if let Some(id) = self.chat.session.filter(|_| self.chat.busy) {
+                    live.insert(
+                        id,
+                        rook_core::attention::Live {
+                            generation: format!("local-{}", self.connection_epoch),
+                            questions: self.asker.pending_count(),
+                            approvals: self.approver.pending_count(),
+                            secrets: self.asker.private_input().map_or(0, |input| input.pending_count()),
+                        },
+                    );
+                }
+                rook.live_attention_page(&query, &live).map_err(anyhow::Error::from)
+            } else {
+                self.source.attention(&query)
+            };
+            let said =
+                page.map(|page| rook_core::attention::describe(&page)).unwrap_or_else(|e| e.to_string());
+            self.chat.push("stat", &said);
+            return;
+        }
+        if name == "export-preview" {
+            let Some(session) = self.chat.session else {
+                return self.chat.push("err", "start or resume a session first");
+            };
+            if self.history.export_preview(session, rest) {
+                self.chat.push("stat", "Preparing export content preview…");
+            } else {
+                self.chat.push("err", "History reader is busy or preview arguments exceed 4096 bytes.");
+            }
+            return;
+        }
         if name == "export-html" {
             let Some(session) = self.chat.session else {
                 return self.chat.push("err", "start or resume a session first");
             };
             match crate::commands::html_export::slash_arguments(rest) {
-                Ok((from, through, path)) => {
-                    if self.history.export(session, from, through, path) {
+                Ok((from, through, path, profile)) => {
+                    if self.history.export(session, from, through, path, profile) {
                         self.chat
                             .push("stat", "Preparing a bounded local HTML export in the history reader…");
                     } else {
@@ -4182,10 +4239,34 @@ impl App {
     /// from the list the engine gave, so there is nothing to check that the
     /// engine has not already checked.
     fn run_on(&mut self, name: &str) {
+        if let Some(session) = self.chat.session {
+            let receipt = self.source.model_selection(session).and_then(|view| {
+                self.source.select_model(
+                    session,
+                    &rook_core::model_selection::Request {
+                        id: rook_store::format_session_id(rook_store::new_session_id()),
+                        expected_revision: view.revision,
+                        model: name.into(),
+                    },
+                )
+            });
+            match receipt {
+                Ok(receipt) => {
+                    self.endpoint_note =
+                        format!("{} saved, revision {}; next turn", receipt.model, receipt.revision);
+                }
+                Err(error) => {
+                    self.endpoint_note = error.to_string();
+                    self.chat.push("err", &self.endpoint_note);
+                    return;
+                }
+            }
+        } else {
+            self.tell_the_daemon("model", name);
+            self.endpoint_note = format!("the next new session uses {name}");
+        }
         *self.shared.model.borrow_mut() = Some(name.to_string());
-        self.tell_the_daemon("model", name);
-        self.endpoint_note = format!("the next turn runs on {name}");
-        self.chat.push("stat", &format!("  the next turn runs on {name}"));
+        self.chat.push("stat", &self.endpoint_note);
     }
 
     /// Put every endpoint back in the rotation and ask each one.
@@ -4223,6 +4304,7 @@ impl App {
     }
 
     fn offer_private(&mut self, prompt: rook_proto::SecretPrompt) {
+        crate::notify::status(crate::notify::Status::Secret);
         if self.chat.private.len() >= 32 || self.chat.private.iter().any(|d| d.prompt.id == prompt.id) {
             return;
         }
@@ -4512,7 +4594,12 @@ impl App {
                 },
             };
 
-            let provider = match rook_core::models::chosen(&rook.config, named.as_deref()) {
+            let resolved = if aside.is_some() {
+                rook_core::models::chosen(&rook.config, named.as_deref()).map_err(rook_core::CoreError::from)
+            } else {
+                rook.provider_for_turn(session, named.as_deref())
+            };
+            let provider = match resolved {
                 Ok(provider) => provider,
                 Err(e) => return fail(&to_loop, e.to_string()),
             };

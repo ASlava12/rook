@@ -307,6 +307,9 @@ impl Watching {
     ) -> Option<Ended> {
         use std::io::Write;
         let mut out = std::io::stdout();
+        if !self.json {
+            crate::notify::event(&event);
+        }
         match event {
             ChatEvent::Activity { state } => {
                 if !self.json {

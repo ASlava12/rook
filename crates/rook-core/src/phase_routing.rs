@@ -80,8 +80,11 @@ impl Provider for Selected {
     fn dispatch_identity(&self) -> Option<rook_llm::Dispatch> {
         self.inner.dispatch_identity()
     }
+    fn configured_source(&self) -> Option<&str> {
+        Some(&self.selected)
+    }
     fn phase_routing(&self) -> Option<(&str, &str)> {
-        Some((&self.selected, &self.target))
+        (!self.target.is_empty()).then_some((&self.selected, &self.target))
     }
     fn context_window(&self) -> usize {
         self.inner.context_window()

@@ -21,7 +21,7 @@ pub fn provider_for(config: &Config, vault: &Vault, name: &str) -> Result<Box<dy
     let name = name.trim();
     validate_route(config, name)?;
     let inner = built(config, vault, name, rook_llm::Prefer::AsConfigured)?;
-    let Some(source) = config.models.get(name).filter(|s| !s.implementation_model.is_empty()) else {
+    let Some(source) = config.models.get(name) else {
         return Ok(inner);
     };
     Ok(Box::new(crate::phase_routing::Selected::new(name, &source.implementation_model, inner)))
@@ -51,7 +51,11 @@ pub fn errand_provider_for(
     vault: &Vault,
     name: &str,
 ) -> Result<Box<dyn Provider>, LlmError> {
-    built(config, vault, name, rook_llm::Prefer::WhicheverIsFree)
+    let inner = built(config, vault, name, rook_llm::Prefer::WhicheverIsFree)?;
+    Ok(match config.models.get(name.trim()) {
+        Some(_) => Box::new(crate::phase_routing::Selected::new(name.trim(), "", inner)),
+        None => inner,
+    })
 }
 
 fn built(

@@ -122,6 +122,19 @@ impl<'a> AgentLoop<'a> {
     where
         'a: 'f,
     {
+        let effective =
+            self.tools.get(&call.name).map(|tool| tool.invocation(&call.arguments).0).unwrap_or(&call.name);
+        if !self.equipment.allows(&call.name) || !self.equipment.allows(effective) {
+            let text = format!("{} is unavailable under the selected recipe equipment", call.name);
+            self.rook.log(
+                self.session,
+                EventKind::ToolCall,
+                &call.name,
+                &self.vault.redact(&call.arguments.to_string()),
+            )?;
+            let seq = self.rook.log(self.session, EventKind::ToolResult, &call.name, &text)?;
+            return Ok(Recorded { text, failed: true, seq: Some(seq), job: None });
+        }
         let effects = !self.hooks.is_empty()
             || self
                 .tools

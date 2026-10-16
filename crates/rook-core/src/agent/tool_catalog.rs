@@ -342,6 +342,7 @@ impl<'a> AgentLoop<'a> {
         }
         // Sorted so the rendered prefix is byte-identical between turns:
         // tools render first, and a reordered list invalidates everything.
+        specs.retain(|spec| self.equipment.allows(&spec.name));
         specs.sort_by(|a, b| a.name.cmp(&b.name));
         specs
     }

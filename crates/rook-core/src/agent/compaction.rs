@@ -221,7 +221,7 @@ impl<'a> AgentLoop<'a> {
         }
 
         // Keep the recent tail live; only what falls before it is summarised.
-        let keep = self.budget.threshold() / 3;
+        let keep = self.budget.keep_recent_tokens.unwrap_or_else(|| self.budget.threshold() / 3);
         let mut kept = 0;
         let mut split = entries.len();
         for entry in entries.iter().rev() {

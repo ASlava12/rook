@@ -86,7 +86,7 @@ fn size(value: &impl Serialize, limit: usize) -> Option<usize> {
 
 impl ToolBox {
     /// Install a stable bounded advertisement and a paged route to its overflow.
-    pub fn register_mcp_catalog(
+    pub(crate) fn install_mcp_catalog(
         &mut self,
         servers: impl IntoIterator<Item = (Arc<Server>, Vec<ToolDescriptor>)>,
         limits: CatalogLimits,

@@ -9,6 +9,78 @@ use crate::{CoreError, Result, Rook};
 const MAX_BYTES: usize = 64 * 1024;
 const MAX_PARAMETERS: usize = 32;
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct Equipment {
+    pub(crate) tools: Option<std::collections::BTreeSet<String>>,
+    pub(crate) mcp: Option<std::collections::BTreeSet<String>>,
+    require_tools: std::collections::BTreeSet<String>,
+    require_mcp: std::collections::BTreeSet<String>,
+}
+impl Equipment {
+    fn validate(&self) -> Result<()> {
+        for names in
+            [self.tools.as_ref(), self.mcp.as_ref(), Some(&self.require_tools), Some(&self.require_mcp)]
+                .into_iter()
+                .flatten()
+        {
+            if names.len() > 128
+                || names
+                    .iter()
+                    .any(|name| name.is_empty() || name.len() > 256 || name.chars().any(char::is_control))
+            {
+                return Err(bad("recipe equipment accepts at most 128 bounded configured names per set"));
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn restricted(&self) -> bool {
+        self.tools.is_some()
+            || self.mcp.is_some()
+            || !self.require_tools.is_empty()
+            || !self.require_mcp.is_empty()
+    }
+    pub(crate) fn allows(&self, name: &str) -> bool {
+        self.tools.as_ref().is_none_or(|allowed| allowed.contains(name))
+    }
+    pub(crate) fn intersect(&self, child: &Self) -> Self {
+        fn intersect(
+            left: &Option<std::collections::BTreeSet<String>>,
+            right: &Option<std::collections::BTreeSet<String>>,
+        ) -> Option<std::collections::BTreeSet<String>> {
+            match (left, right) {
+                (Some(left), Some(right)) => Some(left.intersection(right).cloned().collect()),
+                (left, right) => left.clone().or_else(|| right.clone()),
+            }
+        }
+        // Requirements describe this stage, while authority is inherited and can only narrow.
+        Self {
+            tools: intersect(&self.tools, &child.tools),
+            mcp: intersect(&self.mcp, &child.mcp),
+            require_tools: child.require_tools.clone(),
+            require_mcp: child.require_mcp.clone(),
+        }
+    }
+    pub(crate) fn preflight(
+        &self,
+        tools: &[rook_llm::ToolSpec],
+        mcp: &std::collections::BTreeSet<String>,
+    ) -> Result<()> {
+        let missing_tools: Vec<_> = self
+            .require_tools
+            .iter()
+            .filter(|name| !self.allows(name) || !tools.iter().any(|tool| &tool.name == *name))
+            .collect();
+        let missing_mcp: Vec<_> = self.require_mcp.difference(mcp).collect();
+        if missing_tools.is_empty() && missing_mcp.is_empty() {
+            return Ok(());
+        }
+        Err(bad(format!(
+            "recipe equipment unavailable: tools {missing_tools:?}; MCP {missing_mcp:?}. Configure/authorize it explicitly, or skip this recipe; no server is installed or credential requested by preflight."
+        )))
+    }
+}
+
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct Parameter {
@@ -37,6 +109,8 @@ struct Recipe {
     model: Option<String>,
     #[serde(default)]
     limits: Limits,
+    #[serde(default)]
+    equipment: Equipment,
     output: Option<String>,
     output_schema: Option<serde_json::Value>,
     #[serde(default)]
@@ -67,6 +141,7 @@ pub(crate) struct Prepared {
     pub(crate) model: Option<String>,
     pub(crate) skill: Option<String>,
     pub(crate) limits: Limits,
+    pub(crate) equipment: Equipment,
     /// A recipe file is not the same as a user explicitly naming --output.
     pub(crate) output_needs_approval: bool,
     pub(crate) definition: Arc<Frozen>,
@@ -169,6 +244,7 @@ pub(crate) fn prepare_frozen(
     }
     let relative = std::path::Path::new(&frozen.path);
     let recipe = &frozen.recipe;
+    recipe.equipment.validate()?;
     if recipe.version != 1 {
         return Err(bad("only recipe version 1 is supported"));
     }
@@ -227,7 +303,7 @@ pub(crate) fn prepare_frozen(
     // Reject schema/path mistakes before any hooks, model request or operation can run.
     crate::output::Contract::compile(&merged, &rook.workspace)?;
     let subrecipes:Vec<_>=frozen.children.iter().map(|(name,child)|serde_json::json!({"name":name,"path":child.definition.path,"parameters":child.definition.recipe.parameters,"fixed_values":child.values})).collect();
-    let mut data = serde_json::json!({"description":recipe.description,"procedure":procedure,"parameters":values,"skill":recipe.skill});
+    let mut data = serde_json::json!({"description":recipe.description,"procedure":procedure,"parameters":values,"skill":recipe.skill,"equipment":recipe.equipment});
     if !subrecipes.is_empty() {
         data["subrecipes"] = serde_json::json!(subrecipes);
     }
@@ -249,6 +325,7 @@ pub(crate) fn prepare_frozen(
         model: recipe.model.clone(),
         skill: recipe.skill.clone(),
         limits: recipe.limits.clone(),
+        equipment: recipe.equipment.clone(),
         output_needs_approval,
         definition: frozen,
         values,
@@ -355,6 +432,25 @@ impl Frozen {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nested_equipment_cannot_restore_parent_denied_tools_or_servers() {
+        let parent: Equipment = toml::from_str("tools=['read_file']\nmcp=['allowed']").unwrap();
+        let child: Equipment = toml::from_str(
+            "tools=['read_file','write_file']\nmcp=['allowed','denied']\nrequire_tools=['write_file']\nrequire_mcp=['denied']",
+        ).unwrap();
+        let effective = parent.intersect(&child);
+        assert!(effective.allows("read_file"));
+        assert!(!effective.allows("write_file"));
+        assert_eq!(effective.mcp.as_ref().unwrap().len(), 1);
+        assert!(effective.preflight(&[], effective.mcp.as_ref().unwrap()).is_err());
+        let inherited = effective.intersect(&Equipment::default());
+        assert!(!inherited.allows("write_file"));
+        let none: Equipment = toml::from_str("tools=[]\nmcp=[]").unwrap();
+        let closed = none.intersect(&child);
+        assert!(!closed.allows("read_file"));
+        assert!(closed.mcp.as_ref().unwrap().is_empty());
+    }
 
     fn fixture(recipe: &str) -> (tempfile::TempDir, Rook) {
         let dir = tempfile::tempdir().unwrap();

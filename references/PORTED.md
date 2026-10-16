@@ -9,6 +9,14 @@ Add a row when you implement something after reading a reference. Add it to
 
 | what | from | read at | where it landed |
 |---|---|---|---|
+| Durable session model selection with queued/effective status and idempotent retained receipts | Hermes deferred busy-session picks and mutation receipts; independently implemented transactional KV/CAS and root-boundary application | Hermes `34e8635cb9cf`; incoming `51357f428393`, `4dcad0e701a9`, route binding `c473d338dc33` | `rook-core/src/model_selection.rs`, store transaction, ordinary CLI/REPL/TUI/API/browser model controls; [contracts and checks](../docs/reference-r16-adoption.md) |
+| Cross-session attention inbox with current-owner counts and parent/child navigation | OpenResearch branch waiting indicators; shared bounded projection, no saved answer authority | OpenResearch `8fc90cf355cd`; incoming `0165a286d81a` | `rook-core/src/attention.rs`, daemon live registry and CLI/REPL/TUI/browser |
+| Optional scheduler, admission and blocking-work observations | OpenClaw bounded synchronous-stall observations; adapted to Tokio with an independent coalescing probe | OpenClaw `51042e8c1a27`; incoming `8e234e5a43b3` | `rook-core/src/runtime_diagnostics.rs`, daemon boundary instrumentation and existing diagnostics views |
+| Share-export profiles, bounded preview and omission manifest | OpenCode explicit sanitized export policy; independently implemented shared core rendering | OpenCode `50d4280dbdb2`; incoming `706a688994c2` | `rook-core/src/conversation_export.rs`, CLI/TUI/API and browser prepared-artifact preview/download |
+| Configured-model compaction overrides | Pi durable harness field-wise model policy, adapted to Rook provider source and dynamic window bounds | Pi `0fbdbd3f8ab1`, `packages/durable/src/harness/compaction.ts`; aggregate reviewed range | `rook-core/src/compaction_policy.rs`, agent budgets, routing, overflow recovery and context inspection |
+| Recipe equipment requirements and inherited intersections | Goose caller-restricted recipe extensions; independently implemented preflight and dispatch enforcement | Goose `ea4ad800d12c`; incoming `21d873eec92a` | `rook-core/src/recipes.rs`, ordinary child execution and scoped MCP catalog helpers |
+| Opt-in terminal lifecycle and waiting states | Goose OSC 7501 status idea; literal frames and current root/input events | Goose `ea4ad800d12c`; incoming `5eca486214c8` | `rook-cli/src/notify.rs`, terminal CLI/chat/TUI inputs and root outcomes |
+| Chunked source-certified SSH file transfer with staged publication | Codex streaming filesystem idea; adapted to Rook owned resources, bounded framing and recovery | Codex `6ae8b8aa7c60`; incoming `a45b8ccb016f` | `rook-tools/src/environments/{sync,transport,ssh}.rs`, embedded worker and filesystem failure probes; live SSH verification limit in [adoption record](../docs/reference-r16-adoption.md) |
 | Practical workflow skills: GitHub, native browser QA, skill authoring; optional XLSX, DOCX, PPTX, PDF, diagrams, source-cited actions and experiment reporting | OpenClaw GitHub/skill-creator/diagram-maker; Hermes dogfood, office and document-action-items; OpenResearch results/figures. Independently written self-contained Rook instructions and executable recipes, not copied upstream helpers | OpenClaw `4ba08fadfd`; Hermes `525dbcad8d`; OpenResearch `c28897716b`; pinned local `skills/` and `agent-skills/` sources | `skills/{github-workflow,browser-qa,skill-authoring}` and `optional-skills/`; existing discovery/install/load path; [collection and dependencies](../optional-skills/README.md) |
 | Additional operator workflows from observed local tasks: cache cleanup, model API setup and long-document translation | Rook user's concrete cleanup, Z.ai setup and LPIC translation scenarios; independent workflows, no automatic prompt translation or model downloads | Session requirements, October 15, 2026 | `optional-skills/{workspace-cleanup,provider-setup,document-translation}` |
 | SSH-native file authority with direct remote reads/edits/search/list/foreground execution, session-owned preimages, exact-source undo and no ambiguous replay | Hermes SSH environment selection and remote file-access ideas; independently extended with Rook session receipts | Hermes `525dbcad8d7`, `tools/environments/ssh.py`; selected snapshot above | `rook-tools/src/environments/native.rs`, `native_worker.py`, `native/receipts.rs`, ordinary engine and explicit session environment controls; [configuration and limits](../docs/ssh-native-workspaces.md) |
@@ -103,6 +111,29 @@ Add a row when you implement something after reading a reference. Add it to
 `cargo xtask refs advance` prints what landed upstream since the pointer was last
 moved; what follows is what was done with it, so a dismissal is a decision rather
 than an omission.
+
+**2026-10-16 (R16 implementation after v0.15.0).** Implemented all eight
+additional candidates from the review below, independently against its ten
+advanced pins. Shared-core delivery, command/config contracts, bounded failure
+behavior and verification evidence are recorded in the
+[October 16 adoption record](../docs/reference-r16-adoption.md). The dated review
+remains historical. The native SSH endpoint was unreachable; local production
+worker/transport tests do not establish a live SSH deployment result. No commit,
+release, installation or restart of the user's agent is part of this pass.
+
+**2026-10-16 (new review after v0.15.0; no runtime port).** Advanced all
+ten clean reference worktrees to fetched branch tips and staged the gitlinks.
+Eight previous pins are proven ancestors; Hermes/OpenClaw remain bounded by the
+shallow fetch (255/200 reachable fetched commits respectively, not exhaustive
+incoming ranges). Screened fetched subjects and inspected selected source/tests.
+Exact old/new SHAs, per-reference dispositions and evidence are in the
+[new review](../docs/research/reference-review-20261016.md). Recorded eight
+additional candidates in [roadmap Next](../docs/roadmap.md#next): durable model
+selection, a cross-session attention inbox, daemon delay attribution, share-export
+profiles, per-model compaction policy, recipe equipment requirements, terminal
+program status and streaming SSH payloads. Existing v0.15 capabilities are not
+counted again. This pass changes documentation and reference pointers only;
+no implementation, commit, release or local-agent restart was performed.
 
 **2026-10-16 (authorized follow-up implementation).** All eight candidates from
 that review were implemented independently against the advanced snapshots:

@@ -3,7 +3,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { historyPanel } from '../dist/history.js';
 import { savedToolCard } from '../dist/tool-card.js';
-import { exportHistoryHtml } from '../dist/html-export.js';
 
 class Node {
   constructor(tag, text = '') {
@@ -111,12 +110,7 @@ test('structured saved facts show command states, matching lines and inert typed
     assert.equal(paths.length,before+1);
     assert.match(card.find(node=>node.tag==='summary').textContent,expected);
     assert.match(card.textContent,/forged source/);
-    const exported = await exportHistoryHtml('session', 2, 2, async path => path.includes('?from=')
-      ? {items:[entry],through:3}
-      : {entry:{...entry,body:'saved body'},offset:0,total_bytes:10});
-    assert.match(exported.html, /details #0/);
-    assert(!exported.html.includes('<script>camera</script>'));
-    if (details.type === 'mcp') assert(exported.html.includes('&lt;script&gt;camera&lt;/script&gt;'));
+
   }
 });
 

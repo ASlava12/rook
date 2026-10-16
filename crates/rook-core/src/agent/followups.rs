@@ -6,6 +6,7 @@ impl<'a> AgentLoop<'a> {
     pub(super) fn continuation(&self, provider: std::sync::Arc<dyn rook_llm::Provider>) -> Self {
         let mut next = Self::new(self.rook, provider, self.session);
         next.tools = self.tools.clone();
+        next.equipment = self.equipment.clone();
         next.tool_ctx = self.tool_ctx.clone();
         next.tool_ctx.secrets = Some(next.vault.clone());
         next.policy = self.policy.clone();

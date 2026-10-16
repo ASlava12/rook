@@ -31,6 +31,10 @@ impl PrivateInput {
         }
     }
 
+    pub fn pending_count(&self) -> usize {
+        self.pending.count()
+    }
+
     pub fn current(&self) -> Vec<SecretPrompt> {
         self.pending.current()
     }

@@ -287,7 +287,15 @@ fn saved_tool_measurements_match_in_local_cli_daemon_history_and_html_export() {
         let text = rook.ok(&["session", "history", &id]);
         assert!(text.contains("saved failure") && text.contains("dispatch 42 ms"), "{text}");
         let destination = rook.home.path().join(filename);
-        rook.ok(&["session", "export-html", &id, "--output", destination.to_str().unwrap()]);
+        rook.ok(&[
+            "session",
+            "export-html",
+            &id,
+            "--profile",
+            "share-tools",
+            "--output",
+            destination.to_str().unwrap(),
+        ]);
         let html = std::fs::read_to_string(destination).unwrap();
         assert!(html.contains("saved failure") && html.contains("timing #1"), "{html}");
         page
@@ -448,7 +456,15 @@ fn typed_tool_details_match_in_local_cli_daemon_history_and_escaped_html_export(
             assert_eq!(page["items"][result_index]["tool_details"], expected);
         }
         let output = rook.home.path().join(filename);
-        rook.ok(&["session", "export-html", &id, "--output", output.to_str().unwrap()]);
+        rook.ok(&[
+            "session",
+            "export-html",
+            &id,
+            "--profile",
+            "share-tools",
+            "--output",
+            output.to_str().unwrap(),
+        ]);
         let html = std::fs::read_to_string(output).unwrap();
         assert!(
             html.contains("command exit 7")
@@ -2996,6 +3012,8 @@ fn html_export_scopes_and_escapes_history_locally_and_through_the_daemon() {
         rook.run(&[
             "session",
             "export-html",
+            "--profile",
+            "archive",
             named.as_str(),
             "--from",
             "1",
@@ -3016,7 +3034,7 @@ fn html_export_scopes_and_escapes_history_locally_and_through_the_daemon() {
     assert!(!export(&local).status.success(), "existing export must not be replaced");
     assert_eq!(std::fs::read_to_string(&local).unwrap(), html);
     let repl_local = rook.home.path().join("REPL local.html");
-    let lines = format!("/export-html 1..2 {}\n/quit\n", repl_local.display());
+    let lines = format!("/export-html archive 1..2 {}\n/quit\n", repl_local.display());
     let result = rook.chat_in_session(&named, &lines);
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     assert_eq!(std::fs::read_to_string(&repl_local).unwrap(), html);
@@ -3025,7 +3043,7 @@ fn html_export_scopes_and_escapes_history_locally_and_through_the_daemon() {
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     assert_eq!(std::fs::read_to_string(&remote).unwrap(), html);
     let repl_remote = rook.home.path().join("REPL daemon.html");
-    let lines = format!("/export-html 1..2 {}\n/quit\n", repl_remote.display());
+    let lines = format!("/export-html archive 1..2 {}\n/quit\n", repl_remote.display());
     let result = rook.chat_in_session(&named, &lines);
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     assert_eq!(std::fs::read_to_string(&repl_remote).unwrap(), html);
@@ -3033,6 +3051,8 @@ fn html_export_scopes_and_escapes_history_locally_and_through_the_daemon() {
     let result = rook.run(&[
         "session",
         "export-html",
+        "--profile",
+        "archive",
         &named,
         "--from",
         "2",
@@ -3047,6 +3067,8 @@ fn html_export_scopes_and_escapes_history_locally_and_through_the_daemon() {
     let result = rook.run(&[
         "session",
         "export-html",
+        "--profile",
+        "archive",
         &named,
         "--from",
         "4",

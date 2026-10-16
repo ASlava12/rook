@@ -48,6 +48,13 @@ fn main() -> Result<()> {
     // desktop launcher that does not should not behave differently.
     rook_core::config::load_env_file();
     let cli = parse_cli()?;
+    let _terminal_status = notify::Session::start(
+        !cli.json
+            && matches!(
+                cli.command,
+                None | Some(Command::Tui { .. } | Command::Chat { .. } | Command::Run { .. })
+            ),
+    );
     // Defaults if the config is unreadable: logging must not be what reports a
     // broken config, and the command about to run will report it properly.
     rook_core::telemetry::init(

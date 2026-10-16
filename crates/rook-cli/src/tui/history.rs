@@ -47,6 +47,7 @@ struct SummaryReview {
     through: u64,
 }
 enum Command {
+    ExportPreview(u128, String),
     Recall(rook_core::session_recall::Request),
     Worktree(u128, String),
     Review(u128, String),
@@ -57,7 +58,7 @@ enum Command {
     Events(String),
     Recipes(u128, String),
     Environment(u128, String),
-    Export(u128, u64, Option<u64>, PathBuf),
+    Export(u128, u64, Option<u64>, PathBuf, rook_core::conversation_export::Profile),
     Draft(u128, u128),
     Suggest(u128, u128),
     Carry(SummaryReview, String),
@@ -73,6 +74,7 @@ enum Command {
     Quote(u128, u64, u64),
 }
 enum Update {
+    ExportPreview(Result<String, String>),
     Recall(Result<rook_core::session_recall::Response, String>),
     Worktree(u128, Result<String, String>),
     Review(u128, Result<String, String>),
@@ -99,6 +101,9 @@ enum Update {
 impl Command {
     fn read(self, source: &crate::source::Source) -> Result<Update> {
         Ok(match self {
+            Self::ExportPreview(session, text) => {
+                Update::ExportPreview(source.export_preview(session, &text).map_err(|e| e.to_string()))
+            }
             Self::Recall(request) => {
                 Update::Recall(source.session_recall(&request).map_err(|error| error.to_string()))
             }
@@ -128,8 +133,8 @@ impl Command {
             Self::Review(owner, args) => {
                 Update::Review(owner, source.review_command(owner, &args).map_err(|error| error.to_string()))
             }
-            Self::Export(session, from, through, path) => Update::Exported(
-                crate::commands::html_export::save(source, session, from, through, &path)
+            Self::Export(session, from, through, path, profile) => Update::Exported(
+                crate::commands::html_export::save(source, session, from, through, &path, profile)
                     .map(|report| (path, report))
                     .map_err(|error| error.to_string()),
             ),
@@ -295,6 +300,13 @@ impl History {
         self.epoch = self.epoch.wrapping_add(1);
         self.ask(Command::Recall(request))
     }
+    pub(super) fn export_preview(&mut self, session: u128, text: &str) -> bool {
+        if self.pending || text.len() > 4096 {
+            return false;
+        }
+        self.epoch = self.epoch.wrapping_add(1);
+        self.ask(Command::ExportPreview(session, text.into()))
+    }
     pub(super) fn take_recall(&mut self) -> Option<String> {
         self.recall_result.take()
     }
@@ -305,12 +317,19 @@ impl History {
         self.epoch = self.epoch.wrapping_add(1);
         self.ask(Command::Suggest(source, target))
     }
-    pub(super) fn export(&mut self, session: u128, from: u64, through: Option<u64>, path: PathBuf) -> bool {
+    pub(super) fn export(
+        &mut self,
+        session: u128,
+        from: u64,
+        through: Option<u64>,
+        path: PathBuf,
+        profile: rook_core::conversation_export::Profile,
+    ) -> bool {
         if self.pending {
             return false;
         }
         self.epoch = self.epoch.wrapping_add(1);
-        self.ask(Command::Export(session, from, through, path))
+        self.ask(Command::Export(session, from, through, path, profile))
     }
     pub(super) fn worktree(&mut self, parent: u128, arguments: &str) -> bool {
         if self.pending || arguments.len() > 256 {
@@ -507,6 +526,10 @@ impl History {
                     unreachable!("Telegram inspection handled before stale read filtering")
                 }
                 Ok(Update::Events(_)) => unreachable!("event inspection handled before stale read filtering"),
+                Ok(Update::ExportPreview(result)) => {
+                    self.recall_result =
+                        Some(result.unwrap_or_else(|error| format!("Export preview failed: {error}")));
+                }
                 Ok(Update::Recall(response)) => {
                     self.recall_result = Some(match response {
                         Ok(response) => rook_core::session_recall::describe(&response),

@@ -281,6 +281,10 @@ impl ChannelAsker {
     }
 
     /// Current unanswered requests for a reconnecting view.
+    pub fn pending_count(&self) -> usize {
+        self.0.count()
+    }
+
     pub fn current(&self) -> Vec<AskRequest> {
         self.0.current()
     }

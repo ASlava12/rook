@@ -109,6 +109,65 @@ impl Source {
         }
     }
 
+    pub fn model_selection(&self, session: u128) -> Result<rook_core::model_selection::View> {
+        match self {
+            Self::Local(rook) => Ok(rook.model_selection(session)?),
+            Self::Daemon(d) => d.request_bounded(
+                &format!("/api/sessions/{}/model-selection", rook_store::format_session_id(session)),
+                None,
+                8192,
+            ),
+        }
+    }
+    pub fn select_model(
+        &self,
+        session: u128,
+        request: &rook_core::model_selection::Request,
+    ) -> Result<rook_core::model_selection::Receipt> {
+        match self {
+            Self::Local(rook) => Ok(rook.select_model(session, request)?),
+            Self::Daemon(d) => d.request_bounded(
+                &format!("/api/sessions/{}/model-selection", rook_store::format_session_id(session)),
+                Some(&serde_json::to_value(request)?),
+                8192,
+            ),
+        }
+    }
+    pub fn attention(&self, query: &rook_core::attention::Query) -> Result<rook_core::attention::Page> {
+        match self {
+            Self::Local(rook) => Ok(rook.attention_page(query, false, |_| None)?),
+            Self::Daemon(d) => d.request_bounded(
+                &format!(
+                    "/api/attention?limit={}{}",
+                    query.count(),
+                    query.after.as_ref().map(|id| format!("&after={}", escaped(id))).unwrap_or_default()
+                ),
+                None,
+                262144,
+            ),
+        }
+    }
+
+    pub fn export_preview(&self, session: u128, text: &str) -> Result<String> {
+        let request = rook_core::conversation_export::arguments(text)?;
+        Ok(self.conversation_export(session, &request)?.preview_json()?)
+    }
+
+    pub fn conversation_export(
+        &self,
+        session: u128,
+        request: &rook_core::conversation_export::Request,
+    ) -> Result<rook_core::conversation_export::Export> {
+        match self {
+            Self::Local(rook) => Ok(rook.conversation_export(session, request)?),
+            Self::Daemon(d) => d.request_bounded(
+                &format!("/api/sessions/{}/export", rook_store::format_session_id(session)),
+                Some(&serde_json::to_value(request)?),
+                32 * 1024 * 1024,
+            ),
+        }
+    }
+
     pub fn session_recall(
         &self,
         request: &rook_core::session_recall::Request,

@@ -17,12 +17,31 @@ pub(super) struct Output {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
 }
-pub(super) fn run(
+pub(super) fn run(command: Command, input: Option<Arc<Vec<u8>>>, cap: usize, timeout: u64) -> Result<Output> {
+    let input = input.map(|bytes| {
+        Box::new(move |out: &mut dyn Write| out.write_all(&bytes).map_err(|e| invalid(e.to_string())))
+            as Input
+    });
+    let output = run_parsed(command, input, cap, timeout, |reader| {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).map_err(|e| invalid(e.to_string()))?;
+        Ok(bytes)
+    })?;
+    Ok(Output { code: output.code, stdout: output.stdout?, stderr: output.stderr })
+}
+pub(super) type Input = Box<dyn FnOnce(&mut dyn Write) -> Result<()> + Send>;
+pub(super) struct ParsedOutput<T> {
+    pub code: i32,
+    pub stdout: Result<T>,
+    pub stderr: Vec<u8>,
+}
+pub(super) fn run_parsed<T: Send + 'static>(
     mut command: Command,
-    input: Option<Arc<Vec<u8>>>,
+    input: Option<Input>,
     cap: usize,
     timeout: u64,
-) -> Result<Output> {
+    parse: impl FnOnce(&mut dyn Read) -> Result<T> + Send + 'static,
+) -> Result<ParsedOutput<T>> {
     let deadline = Instant::now() + Duration::from_secs(timeout);
     loop {
         // try_update is newer than the supported Rust 1.90 toolchain.
@@ -52,15 +71,21 @@ pub(super) fn run(
         .spawn()
         .map_err(|e| invalid(format!("SSH launcher unavailable: {e}")))?;
     let group = rook_contain::Group::holding(Some(child.id()));
-    let out = reader(child.stdout.take(), cap, admission.clone());
+    let out = parsed_reader(child.stdout.take(), cap, admission.clone(), parse);
     let err = reader(child.stderr.take(), 8192, admission.clone());
-    if let (Some(mut stdin), Some(input)) = (child.stdin.take(), input) {
+    let input_done = if let (Some(mut stdin), Some(input)) = (child.stdin.take(), input) {
         let held = admission.clone();
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
         std::thread::spawn(move || {
             let _held = held;
-            let _ = stdin.write_all(&input);
+            let result = input(&mut stdin);
+            drop(stdin);
+            let _ = send.send(result);
         });
-    }
+        Some(receive)
+    } else {
+        None
+    };
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -92,7 +117,16 @@ pub(super) fn run(
         }
         Ok(bytes)
     };
-    Ok(Output { code: status.code().unwrap_or(-1), stdout: receive(out)?, stderr: receive(err)? })
+    let stdout = out.recv_timeout(deadline.saturating_duration_since(Instant::now())).map_err(|_| {
+        ToolError::ExecutionUnknown("SSH control stream did not close; inspect its resource".into())
+    })?;
+    let stderr = receive(err)?;
+    if let Some(input_done) = input_done {
+        input_done.recv_timeout(deadline.saturating_duration_since(Instant::now())).map_err(|_| {
+            ToolError::ExecutionUnknown("SSH source writer did not close; inspect its resource".into())
+        })??;
+    }
+    Ok(ParsedOutput { code: status.code().unwrap_or(-1), stdout, stderr })
 }
 
 #[cfg(all(test, unix))]
@@ -154,4 +188,37 @@ fn reader<T: Read + Send + 'static>(
         let _ = tx.send((bytes, overflow));
     });
     rx
+}
+
+// A parser never receives more than cap+1 bytes. Errors still drain the owned pipe,
+// so a producer cannot deadlock cleanup by filling stdout after a rejected frame.
+fn parsed_reader<T: Send + 'static, R: Read + Send + 'static>(
+    stream: Option<R>,
+    cap: usize,
+    held: Arc<Admission>,
+    parse: impl FnOnce(&mut dyn Read) -> Result<T> + Send + 'static,
+) -> std::sync::mpsc::Receiver<Result<T>> {
+    let (send, receive) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _held = held;
+        let result = match stream {
+            Some(mut stream) => {
+                let mut limited = (&mut stream).take((cap as u64).saturating_add(1));
+                let parsed = parse(&mut limited);
+                let drained = std::io::copy(&mut limited, &mut std::io::sink());
+                let overflow = limited.limit() == 0;
+                let rest = std::io::copy(&mut stream, &mut std::io::sink());
+                if overflow {
+                    Err(invalid("SSH control response exceeded its byte limit"))
+                } else if drained.is_err() || rest.is_err() {
+                    Err(invalid("SSH control stream read failed"))
+                } else {
+                    parsed
+                }
+            }
+            None => Err(invalid("SSH control stdout unavailable")),
+        };
+        let _ = send.send(result);
+    });
+    receive
 }

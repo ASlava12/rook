@@ -2,7 +2,7 @@
 // durable cursor belongs to the server; DOM positions never address history.
 import { el, api } from './lib.js';
 import { savedToolCard } from './tool-card.js';
-import { downloadHistoryHtml } from './html-export.js';
+import { downloadHistoryHtml, exportHistoryHtml } from './html-export.js';
 
 export function historyPanel(session, quote, rewind, branch) {
   const base = `/api/sessions/${encodeURIComponent(session)}/history`;
@@ -166,6 +166,19 @@ export function historyPanel(session, quote, rewind, branch) {
   const number = el('input', { placeholder: 'Event number', 'aria-label': 'Jump to event', inputmode: 'numeric', pattern: '[0-9]+', maxlength: 20 });
   const exportFrom = el('input', { placeholder: 'First shown', 'aria-label': 'First event to export', inputmode: 'numeric', pattern: '[0-9]+', maxlength: 16 });
   const exportThrough = el('input', { placeholder: 'Last shown', 'aria-label': 'Last event to export', inputmode: 'numeric', pattern: '[0-9]+', maxlength: 16 });
+  let preparedExport = null, exportRevision = 0;
+  const exportPreview = el('div');
+  const exportProfile = el('select', { 'aria-label': 'Export content profile' },
+    el('option', { value: 'share' }, 'Conversation'),
+    el('option', { value: 'share-tools' }, 'Conversation and tools'),
+    el('option', { value: 'archive' }, 'Readable archive including internals'));
+  const downloadPrepared = el('button', { type: 'button', disabled: true, onclick: async () => {
+    if (!preparedExport) return;
+    try { await downloadHistoryHtml(session, preparedExport.from, preparedExport.through, preparedExport.profile, preparedExport); }
+    catch (error) { notice.textContent = error.error || error.message || String(error); }
+  } }, 'Download previewed HTML');
+  const resetExport = () => { exportRevision++; preparedExport = null; downloadPrepared.disabled = true; exportPreview.replaceChildren(); };
+  for (const field of [exportProfile, exportFrom, exportThrough]) field.addEventListener('input', resetExport);
   async function download(event) {
     event.preventDefault();
     if (pending) return;
@@ -182,8 +195,14 @@ export function historyPanel(session, quote, rewind, branch) {
       pending = true;
       root.setAttribute('aria-busy', 'true');
       notice.textContent = 'Preparing a bounded local HTML download…';
-      const result = await downloadHistoryHtml(session, from, through);
-      if (root.isConnected) notice.textContent = `Downloaded ${result.events} event(s); ${result.shortened} shortened bodies.`;
+      const revision = exportRevision;
+      const result = await exportHistoryHtml(session, from, through, api, exportProfile.value);
+      if (revision !== exportRevision) return;
+      if (root.isConnected) {
+        preparedExport = result; downloadPrepared.disabled = false;
+        notice.textContent = `Preview: ${result.events} event(s); ${result.shortened} shortened bodies. Omitted: ${Object.entries(result.omitted).map(([kind, count]) => `${kind}: ${count}`).join(', ') || 'none'}. Retained text may contain private information.`;
+        exportPreview.replaceChildren(el('iframe', { sandbox: '', title: 'Selected export preview', srcdoc: result.html, style: 'width:100%;height:22rem;border:1px solid currentColor' }));
+      }
     } catch (error) {
       if (root.isConnected) notice.textContent = error.error || error.message || String(error);
     } finally { pending = false; root.removeAttribute('aria-busy'); }
@@ -202,7 +221,7 @@ export function historyPanel(session, quote, rewind, branch) {
     if (/^[0-9]{1,20}$/.test(number.value)) open(number.value);
   } }, number, el('button', { type: 'submit' }, 'Jump')),
   el('form', { class: 'row', onsubmit: download },
-    exportFrom, exportThrough, el('button', { type: 'submit' }, 'Download selected HTML')),
+    exportFrom, exportThrough, exportProfile, el('button', { type: 'submit' }, 'Preview selected HTML'), downloadPrepared), exportPreview,
   bookmarkPanel, notice, totals, paging, rows, detail, bookmarkEditor);
   // Let the caller attach the panel before even a cached request can finish.
   queueMicrotask(() => { if (root.isConnected) load(); });

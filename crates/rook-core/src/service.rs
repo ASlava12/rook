@@ -1159,15 +1159,19 @@ impl Rook {
     /// for asking how the same session would sit in a different model.
     pub fn context_usage(&self, session: u128, window: Option<usize>) -> Result<ContextUsage> {
         let replay = crate::agent::history::replay(self, session)?;
+        let mut policy_name = self
+            .store
+            .get_session(session)?
+            .map(|meta| meta.model)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| self.config.agent.model.clone());
+        if let Some(selected) = self.model_selection(session)?.selected {
+            policy_name = selected;
+        }
         let window = match window {
             Some(window) => window,
             None => {
-                let name = self
-                    .store
-                    .get_session(session)?
-                    .map(|meta| meta.model)
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| self.config.agent.model.clone());
+                let name = policy_name.clone();
                 let target = self.config.models.get(&name).filter(|s| !s.implementation_model.is_empty());
                 if let Some(source) = target
                     && crate::phase_routing::implementing(self, session, &name, &source.implementation_model)?
@@ -1181,13 +1185,14 @@ impl Rook {
                     )
                     .is_none()
                 {
+                    policy_name = source.implementation_model.clone();
                     self.window_to_budget(provider.as_ref())
                 } else {
                     self.window_for_model(&name)
                 }
             }
         };
-        let budget = crate::context::ContextBudget::new(window, self.config.agent.compact_at);
+        let budget = crate::compaction_policy::budget(&self.config, Some(&policy_name), window);
         let mut by_kind: BTreeMap<String, KindUsage> = BTreeMap::new();
         let mut compactions = 0;
         let mut request_record = None;

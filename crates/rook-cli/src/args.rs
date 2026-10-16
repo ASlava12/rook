@@ -461,6 +461,23 @@ pub(crate) enum StoreCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum SessionCmd {
+    /// Inspect or durably queue a session model for its next turn.
+    Model {
+        id: String,
+        model: Option<String>,
+        /// Reuse this ID and revision for an exact retry after an uncertain response.
+        #[arg(long)]
+        request_id: Option<String>,
+        #[arg(long, requires = "request_id")]
+        revision: Option<u64>,
+    },
+    /// List sessions needing an answer; saved observations are marked as unverified.
+    Attention {
+        #[arg(long)]
+        after: Option<String>,
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     /// Diagnose a delegated checkout; restore only with a reviewed source token.
     Worktree {
         parent: String,
@@ -616,8 +633,14 @@ pub(crate) enum SessionCmd {
         #[arg(long)]
         through: Option<u64>,
         /// New file to create; an existing file is never replaced.
+        #[arg(long, required_unless_present = "preview")]
+        output: Option<std::path::PathBuf>,
+        /// share omits internal events; share-tools includes tools; archive includes readable internals.
+        #[arg(long, default_value = "share", value_parser = ["share", "share-tools", "archive"])]
+        profile: String,
+        /// Print the omission manifest and bounded HTML preview without creating a file.
         #[arg(long)]
-        output: std::path::PathBuf,
+        preview: bool,
     },
     /// Search literal text within one transcript; follow the returned cursor.
     Find {

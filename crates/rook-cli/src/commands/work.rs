@@ -186,7 +186,7 @@ pub(crate) fn cmd_work(
                 let prompt = if rook.store.get_session(session).ok().flatten().is_some_and(|meta| meta.next_seq > 0) {
                     format!("{prompt}\n\nResume this existing iteration from its recorded history. Inspect completed operations and current files; do not repeat completed actions just because the process restarted.")
                 } else { prompt };
-                let provider = match rook_core::models::configured(&rook.config) {
+                let provider = match rook.provider_for_turn(session, None) {
                     Ok(provider) => provider,
                     Err(why) => break format!("no model to run on: {why}"),
                 };

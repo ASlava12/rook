@@ -46,6 +46,7 @@ pub(super) struct Crew<'a> {
     provider: std::sync::Arc<dyn Provider>,
     vault: std::sync::Arc<crate::secrets::Vault>,
     tools: ToolBox,
+    equipment: crate::recipes::Equipment,
     tool_ctx: ToolContext,
     policy: std::sync::Arc<Policy>,
     approver: std::sync::Arc<dyn Approver>,
@@ -301,6 +302,12 @@ impl Crew<'_> {
             }
             child.tool_ctx.secrets = Some(self.vault.clone());
             child.depth = self.depth + 1;
+            child.equipment = self.equipment.clone();
+            if bounds.executor.is_some() && child.equipment.restricted() {
+                return Err(CoreError::Other(
+                    "recipe equipment cannot be delegated to an external ACP executor".into(),
+                ));
+            }
             if tree.is_none() {
                 child.tools = self.tools.without(&["ask"]);
                 child.tool_ctx = self.tool_ctx.clone();
@@ -824,6 +831,7 @@ impl<'a> AgentLoop<'a> {
             provider: self.provider.clone(),
             vault: self.vault.clone(),
             tools: self.tools.clone(),
+            equipment: self.equipment.clone(),
             // What tells a child from the turn that started it, everywhere a
             // tool can see. The policy is shared on purpose — an approval given
             // for the run is given for the run — so this is where "and it is a

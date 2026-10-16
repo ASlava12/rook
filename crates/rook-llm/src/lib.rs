@@ -560,6 +560,11 @@ pub trait Provider: Send + Sync {
     /// `provider/model`, as written in config.
     fn id(&self) -> &str;
 
+    /// The configured source selected by the host, independent of its display model ID.
+    fn configured_source(&self) -> Option<&str> {
+        None
+    }
+
     /// An explicitly selected analysis source and its implementation source.
     /// The engine owns phase changes; transport adapters never infer them from
     /// prompt text. Ordinary providers and independent errands have no policy.

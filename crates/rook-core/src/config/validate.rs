@@ -7,6 +7,7 @@ impl Config {
     /// so a broken file can still be inspected and repaired.
     pub fn validation_errors(&self) -> Vec<String> {
         let mut errors = Vec::new();
+        errors.extend(self.telemetry.runtime_diagnostics.errors());
         if let Err(error) = self.sandbox.network_policy.validate() {
             errors.push(error);
         }
@@ -171,6 +172,9 @@ impl Config {
         }
         errors.extend(self.branches.errors());
         errors.extend(crate::models::source_errors(self));
+        for (name, source) in &self.models {
+            errors.extend(crate::compaction_policy::errors(name, source));
+        }
         let mut names = std::collections::BTreeSet::new();
         for (index, server) in self.mcp.iter().enumerate() {
             if !(1..=1024).contains(&server.stdio_max_processes) {

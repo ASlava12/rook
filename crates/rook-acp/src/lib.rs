@@ -869,7 +869,7 @@ async fn prompt(
     };
     let PreparedPrompt { session, session_id, text, attachments } = request;
 
-    let provider = match rook_core::models::configured(&rook.config) {
+    let provider = match rook.provider_for_turn(session, None) {
         Ok(provider) => provider,
         Err(e) => return answer(Err(Error::internal(e.to_string()))),
     };

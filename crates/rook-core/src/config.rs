@@ -265,6 +265,8 @@ pub struct ModelSource {
     /// Overrides what the api assumes. Guesswork for anything self-hosted: a
     /// local model may serve 8k or a million.
     pub context_window: Option<usize>,
+    /// Optional compaction overrides for this configured source.
+    pub compaction: crate::compaction_policy::Overrides,
     /// How many agents may be asking this endpoint at once. One unless it says
     /// otherwise, and 0 lifts the limit.
     ///
@@ -985,6 +987,8 @@ pub struct TelemetryConfig {
     pub diagnostic_log_bytes: usize,
     /// Inactivity notice threshold, 30..86400 seconds; zero disables notices.
     pub stall_after_secs: u64,
+    /// Optional process-local daemon probes; startup settings apply after restart.
+    pub runtime_diagnostics: crate::runtime_diagnostics::Settings,
 }
 
 impl Default for AgentConfig {
@@ -1262,6 +1266,7 @@ impl Default for TelemetryConfig {
             diagnostic_events: 256,
             diagnostic_log_bytes: 64 * 1024,
             stall_after_secs: 300,
+            runtime_diagnostics: Default::default(),
         }
     }
 }

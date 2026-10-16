@@ -1,5 +1,8 @@
 use super::*;
 use base64::{Engine, engine::general_purpose::STANDARD};
+use std::io::{BufRead, Read, Write};
+const CHUNK: usize = 64 * 1024;
+const FRAME: usize = CHUNK + 8192;
 use rook_contain::files::{RecoveryFiles, file_mode};
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -73,101 +76,175 @@ impl Snapshot {
             hash.update(path.as_bytes());
         }
         for (path, file) in &self.files {
-            let data = STANDARD.decode(&file.data).map_err(|e| invalid(e.to_string()))?;
+            let (digest, _) = file_digest(file)?;
             hash.update(b"f");
             hash.update((path.len() as u32).to_be_bytes());
             hash.update(path.as_bytes());
             hash.update(file.mode.to_be_bytes());
-            hash.update(Sha256::digest(data));
+            hash.update(digest);
         }
         Ok(format!("{:x}", hash.finalize()))
     }
-    pub fn frames(&self, s: &Settings) -> Result<Vec<u8>> {
-        let mut bytes = Vec::new();
+    pub fn stream(
+        &self,
+        out: &mut dyn Write,
+        s: &Settings,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<()> {
+        self.validate(s)?;
+        let mut writer = Frames { out, remaining: response_cap(s), cancelled };
+        writer.line(&serde_json::json!({"type":"stream","version":2}))?;
         for path in &self.dirs {
-            line(&mut bytes, &serde_json::json!({"type":"dir","path":path}), s)?;
+            writer.line(&serde_json::json!({"type":"dir","path":path}))?;
         }
         for (path, file) in &self.files {
-            line(
-                &mut bytes,
-                &serde_json::json!({"type":"file","path":path,"mode":file.mode,"data":file.data}),
-                s,
-            )?;
+            let (digest, bytes) = file_digest(file)?;
+            let digest = format!("{digest:x}");
+            writer.line(&serde_json::json!({"type":"file_start","path":path,"mode":file.mode,"bytes":bytes,"sha256":digest}))?;
+            let mut offset = 0usize;
+            for chunk in file.data.as_bytes().chunks(CHUNK) {
+                let data = std::str::from_utf8(chunk).map_err(|e| invalid(e.to_string()))?;
+                writer.line(&serde_json::json!({"type":"chunk","offset":offset,"data":data}))?;
+                offset += chunk.len() / 4 * 3 - chunk.iter().rev().take_while(|&&b| b == b'=').count();
+            }
+            writer.line(&serde_json::json!({"type":"file_end","sha256":digest}))?;
         }
-        line(&mut bytes, &serde_json::json!({"type":"end","hash":self.hash()?}), s)?;
-        Ok(bytes)
+        writer.line(&serde_json::json!({"type":"end","hash":self.hash()?}))
     }
-    pub fn parse(bytes: &[u8], s: &Settings) -> Result<(serde_json::Value, Self)> {
+    pub fn parse_reader(reader: &mut dyn Read, s: &Settings) -> Result<(serde_json::Value, Self)> {
+        struct Open {
+            path: String,
+            mode: u32,
+            data: String,
+            bytes: usize,
+            expected: usize,
+            hash: String,
+            digest: Sha256,
+            padded: bool,
+        }
+        let mut reader = std::io::BufReader::new(reader);
         let mut snapshot = Self { dirs: Vec::new(), files: BTreeMap::new() };
         let mut metadata = None;
         let mut ended = None;
+        let mut version = false;
+        let mut open: Option<Open> = None;
         let mut total = 0usize;
         let mut entries = 0usize;
-        for raw in bytes.split(|b| *b == b'\n').filter(|line| !line.is_empty()) {
-            if raw.len() > s.file_bytes.div_ceil(3) * 4 + 8192 {
-                return Err(invalid("SSH file frame exceeded its byte limit"));
+        loop {
+            let mut raw = Vec::new();
+            let read = (&mut reader)
+                .take((FRAME + 1) as u64)
+                .read_until(b'\n', &mut raw)
+                .map_err(|e| invalid(e.to_string()))?;
+            if read == 0 {
+                break;
+            }
+            if raw.len() > FRAME {
+                return Err(invalid("SSH chunk frame exceeded its byte limit"));
+            }
+            if raw.iter().all(|b| b.is_ascii_whitespace()) {
+                continue;
             }
             if ended.is_some() {
                 return Err(invalid("SSH returned frames after its terminal certificate"));
             }
-            let frame: serde_json::Value = serde_json::from_slice(raw).map_err(|e| invalid(e.to_string()))?;
+            let frame: serde_json::Value =
+                serde_json::from_slice(&raw).map_err(|e| invalid(e.to_string()))?;
             match frame["type"].as_str() {
-                Some("meta") if metadata.is_none() && entries == 0 => {
-                    if raw.len() > 8192 {
-                        return Err(invalid("SSH metadata exceeds 8 KiB"));
+                Some("meta") if metadata.is_none() && !version && entries == 0 => {
+                    if raw.len() > 8192 || frame["stream_version"] != 2 {
+                        return Err(invalid("SSH worker does not certify streaming transfer version 2"));
                     }
                     metadata = Some(frame);
                 }
-                Some("dir") => {
-                    entries += 1;
-                    let path = frame["path"]
-                        .as_str()
-                        .filter(|p| valid(p) && !excluded(p, s))
-                        .ok_or_else(|| invalid("invalid remote directory path"))?;
-                    if snapshot.dirs.iter().any(|p| p == path) {
-                        return Err(invalid("duplicate remote directory"));
-                    }
-                    snapshot.dirs.push(path.into());
+                Some("stream") if !version && frame["version"] == 2 && entries == 0 => {
+                    version = true;
                 }
-                Some("file") => {
+                Some("dir" | "file_start") if version && open.is_none() => {
                     entries += 1;
+                    if entries > s.max_entries {
+                        return Err(invalid("remote entries exceed max_entries"));
+                    }
                     let path = frame["path"]
                         .as_str()
-                        .filter(|p| valid(p) && !excluded(p, s))
-                        .ok_or_else(|| invalid("invalid remote file path"))?;
+                        .filter(|path| valid(path) && !excluded(path, s))
+                        .ok_or_else(|| invalid("invalid remote transfer path"))?;
+                    if snapshot.files.contains_key(path) || snapshot.dirs.iter().any(|p| p == path) {
+                        return Err(invalid("duplicate remote transfer path"));
+                    }
+                    if frame["type"] == "dir" {
+                        snapshot.dirs.push(path.into());
+                        continue;
+                    }
                     let mode = frame["mode"]
                         .as_u64()
-                        .filter(|m| *m <= 0o777)
+                        .filter(|&m| m <= 0o777)
                         .ok_or_else(|| invalid("invalid remote file mode"))?
                         as u32;
-                    let text = frame["data"].as_str().ok_or_else(|| invalid("missing remote file bytes"))?;
-                    if text.len() > s.file_bytes.div_ceil(3) * 4 {
-                        return Err(invalid("remote encoded file exceeds file_bytes"));
+                    let expected = frame["bytes"]
+                        .as_u64()
+                        .and_then(|n| usize::try_from(n).ok())
+                        .filter(|&n| n <= s.file_bytes && n <= s.total_bytes.saturating_sub(total))
+                        .ok_or_else(|| invalid("remote file bytes exceed configured limits"))?;
+                    let hash = frame["sha256"]
+                        .as_str()
+                        .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+                        .ok_or_else(|| invalid("invalid remote file hash"))?;
+                    if snapshot.files.len() >= s.max_files {
+                        return Err(invalid("remote files exceed max_files"));
                     }
-                    let data = STANDARD.decode(text).map_err(|e| invalid(e.to_string()))?;
-                    if data.len() > s.file_bytes
-                        || data.len() > s.total_bytes.saturating_sub(total)
-                        || snapshot.files.len() >= s.max_files
-                    {
-                        return Err(invalid("remote files exceed configured transfer bounds"));
-                    }
-                    total += data.len();
-                    if snapshot.files.insert(path.into(), File { mode, data: text.into() }).is_some() {
-                        return Err(invalid("duplicate remote file"));
-                    }
+                    open = Some(Open {
+                        path: path.into(),
+                        mode,
+                        data: String::new(),
+                        bytes: 0,
+                        expected,
+                        hash: hash.into(),
+                        digest: Sha256::new(),
+                        padded: false,
+                    });
                 }
-                Some("end") => {
+                Some("chunk") if open.is_some() => {
+                    let file = open.as_mut().ok_or_else(|| invalid("missing SSH file start"))?;
+                    if file.padded || frame["offset"].as_u64() != Some(file.bytes as u64) {
+                        return Err(invalid("SSH file chunk offset changed or follows padded data"));
+                    }
+                    let text = frame["data"]
+                        .as_str()
+                        .filter(|s| !s.is_empty() && s.len() <= CHUNK)
+                        .ok_or_else(|| invalid("SSH chunk bytes exceeded their limit"))?;
+                    let data = STANDARD.decode(text).map_err(|e| invalid(e.to_string()))?;
+                    if data.len() > file.expected.saturating_sub(file.bytes) {
+                        return Err(invalid("SSH file grew beyond its admitted size"));
+                    }
+                    file.digest.update(&data);
+                    file.bytes += data.len();
+                    file.data.push_str(text);
+                    file.padded = text.ends_with('=');
+                }
+                Some("file_end") if open.is_some() => {
+                    let file = open.take().ok_or_else(|| invalid("missing SSH file start"))?;
+                    if file.bytes != file.expected
+                        || format!("{:x}", file.digest.finalize()) != file.hash
+                        || frame["sha256"].as_str() != Some(file.hash.as_str())
+                    {
+                        return Err(invalid("SSH streamed file certificate mismatch"));
+                    }
+                    total += file.bytes;
+                    snapshot.files.insert(file.path, File { mode: file.mode, data: file.data });
+                }
+                Some("end") if version && open.is_none() => {
                     ended = frame["hash"].as_str().map(str::to_owned);
                 }
-                _ => return Err(invalid("invalid SSH transfer frame")),
+                _ => return Err(invalid("unsupported SSH transfer frame; streaming version 2 is required")),
             }
-            if entries > s.max_entries {
-                return Err(invalid("remote entries exceed max_entries"));
-            }
+        }
+        if open.is_some() {
+            return Err(invalid("SSH file stream ended before its certificate"));
         }
         snapshot.dirs.sort();
         snapshot.validate(s)?;
-        if ended.as_deref() != Some(&snapshot.hash()?) {
+        if !version || ended.as_deref() != Some(&snapshot.hash()?) {
             return Err(invalid("SSH snapshot did not end with its matching source certificate"));
         }
         Ok((metadata.ok_or_else(|| invalid("SSH response omitted metadata"))?, snapshot))
@@ -198,11 +275,11 @@ impl Snapshot {
             if file.mode > 0o777 || file.data.len() > s.file_bytes.div_ceil(3) * 4 {
                 return Err(invalid("SSH source exceeds its file byte/mode limits"));
             }
-            let data = STANDARD.decode(&file.data).map_err(|e| invalid(e.to_string()))?;
-            if data.len() > s.file_bytes || data.len() > s.total_bytes.saturating_sub(total) {
+            let (_, bytes) = file_digest(file)?;
+            if bytes > s.file_bytes || bytes > s.total_bytes.saturating_sub(total) {
                 return Err(invalid("SSH source exceeds its total byte limit"));
             }
-            total += data.len();
+            total += bytes;
         }
         Ok(())
     }
@@ -332,22 +409,110 @@ pub(super) fn valid(path: &str) -> bool {
 fn excluded(path: &str, s: &Settings) -> bool {
     path.split('/').any(|part| s.exclude.iter().any(|n| n == part))
 }
-fn line(bytes: &mut Vec<u8>, value: &serde_json::Value, s: &Settings) -> Result<()> {
-    let data = serde_json::to_vec(value).map_err(|e| invalid(e.to_string()))?;
-    if data.len() > response_cap(s).saturating_sub(bytes.len()) {
-        return Err(invalid("SSH encoded source exceeded transfer bounds"));
+fn file_digest(file: &File) -> Result<(sha2::digest::Output<Sha256>, usize)> {
+    let mut reader = base64::read::DecoderReader::new(file.data.as_bytes(), &STANDARD);
+    let mut digest = Sha256::new();
+    let mut bytes = 0usize;
+    let mut chunk = [0u8; 16384];
+    loop {
+        let n = reader.read(&mut chunk).map_err(|e| invalid(e.to_string()))?;
+        if n == 0 {
+            break;
+        }
+        bytes += n;
+        digest.update(&chunk[..n]);
     }
-    bytes.extend(data);
-    bytes.push(b'\n');
-    Ok(())
+    Ok((digest.finalize(), bytes))
+}
+struct Frames<'a> {
+    out: &'a mut dyn Write,
+    remaining: usize,
+    cancelled: &'a std::sync::atomic::AtomicBool,
+}
+impl Write for Frames<'_> {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(std::io::Error::other("SSH transfer cancelled"));
+        }
+        if data.len() > self.remaining {
+            return Err(std::io::Error::other("SSH encoded source exceeded transfer bounds"));
+        }
+        self.out.write_all(data)?;
+        self.remaining -= data.len();
+        Ok(data.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.out.flush()
+    }
+}
+impl Frames<'_> {
+    fn line(&mut self, value: &serde_json::Value) -> Result<()> {
+        serde_json::to_writer(&mut *self, value).map_err(|e| invalid(e.to_string()))?;
+        self.write_all(b"\n").map_err(|e| invalid(e.to_string()))
+    }
 }
 pub(super) fn response_cap(s: &Settings) -> usize {
-    s.total_bytes.div_ceil(3) * 4 + s.max_entries * 8192 + 16384
+    s.total_bytes.div_ceil(3) * 4
+        + s.max_entries * 8192
+        + (s.total_bytes.div_ceil(CHUNK / 4 * 3) + s.max_files) * 256
+        + 16384
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn chunked_snapshots_round_trip_binary_and_empty_files_and_reject_partial_or_reordered_payloads() {
+        let settings = Settings::default();
+        let bytes: Vec<u8> = (0..200000).map(|n| (n % 251) as u8).collect();
+        let source = Snapshot {
+            dirs: vec!["dir".into()],
+            files: BTreeMap::from([
+                ("dir/binary".into(), File { mode: 0o600, data: STANDARD.encode(&bytes) }),
+                ("empty".into(), File { mode: 0o644, data: String::new() }),
+            ]),
+        };
+        let mut wire = b"{\"type\":\"meta\",\"stream_version\":2}\n".to_vec();
+        source.stream(&mut wire, &settings, &std::sync::atomic::AtomicBool::new(false)).unwrap();
+        assert!(wire.len() > CHUNK * 3, "fixture must reach multiple chunks");
+        assert!(wire.split(|&b| b == b'\n').all(|line| line.len() <= FRAME));
+        let (_, restored) = Snapshot::parse_reader(&mut wire.as_slice(), &settings).unwrap();
+        assert_eq!(restored.hash().unwrap(), source.hash().unwrap());
+        assert_eq!(STANDARD.decode(&restored.files["dir/binary"].data).unwrap(), bytes);
+        assert!(restored.files["empty"].data.is_empty());
+        let mut rows: Vec<serde_json::Value> = wire
+            .split(|&b| b == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect();
+        let original = rows.clone();
+        let chunk = rows.iter().position(|row| row["type"] == "chunk").unwrap();
+        rows[chunk]["offset"] = serde_json::json!(1);
+        let encode = |rows: &[serde_json::Value]| {
+            rows.iter()
+                .flat_map(|row| {
+                    let mut line = serde_json::to_vec(row).unwrap();
+                    line.push(b'\n');
+                    line
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(Snapshot::parse_reader(&mut encode(&rows).as_slice(), &settings).is_err());
+        assert!(Snapshot::parse_reader(&mut encode(&original[..chunk + 1]).as_slice(), &settings).is_err());
+        let mut hash_mismatch = original.clone();
+        hash_mismatch[chunk]["data"] = serde_json::json!(STANDARD.encode(vec![42u8; CHUNK / 4 * 3]));
+        assert!(Snapshot::parse_reader(&mut encode(&hash_mismatch).as_slice(), &settings).is_err());
+        let mut old_worker = original.clone();
+        old_worker[0]["stream_version"] = serde_json::json!(1);
+        assert!(Snapshot::parse_reader(&mut encode(&old_worker).as_slice(), &settings).is_err());
+        let mut over = settings.clone();
+        over.file_bytes = bytes.len() - 1;
+        assert!(Snapshot::parse_reader(&mut wire.as_slice(), &over).is_err());
+        let cancelled = std::sync::atomic::AtomicBool::new(true);
+        let mut no_bytes = Vec::new();
+        assert!(source.stream(&mut no_bytes, &settings, &cancelled).is_err());
+        assert!(no_bytes.is_empty());
+    }
     #[test]
     fn directory_deletion_recovery_accepts_already_removed_paths_after_progress_persistence_failed() {
         let root = tempfile::tempdir().unwrap();

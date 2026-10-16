@@ -54,6 +54,37 @@ pub(crate) fn diagnostic_arguments(arguments: &str) -> Result<(bool, std::path::
 }
 
 pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, json: bool) -> Result<()> {
+    if let SessionCmd::Model { id, model, request_id, revision } = &cmd {
+        let session = source.session_named(id, workspace)?;
+        if let Some(model) = model {
+            let revision = match revision {
+                Some(value) => *value,
+                None => source.model_selection(session)?.revision,
+            };
+            let receipt = source.select_model(
+                session,
+                &rook_core::model_selection::Request {
+                    id: request_id
+                        .clone()
+                        .unwrap_or_else(|| rook_store::format_session_id(rook_store::new_session_id())),
+                    expected_revision: revision,
+                    model: model.clone(),
+                },
+            )?;
+            println!("{}", serde_json::to_string_pretty(&receipt)?);
+        } else {
+            println!("{}", serde_json::to_string_pretty(&source.model_selection(session)?)?);
+        }
+        return Ok(());
+    }
+    if let SessionCmd::Attention { after, limit } = &cmd {
+        let page = source.attention(&rook_core::attention::Query { after: after.clone(), limit: *limit })?;
+        println!(
+            "{}",
+            if json { serde_json::to_string_pretty(&page)? } else { rook_core::attention::describe(&page) }
+        );
+        return Ok(());
+    }
     if let SessionCmd::Recipes { id, request } = &cmd {
         let session = source.session_named(id, workspace)?;
         println!("{}", source.recipes_command(session, request)?);
@@ -225,14 +256,24 @@ pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, js
         }
         return Ok(());
     }
-    if let SessionCmd::ExportHtml { id, from, through, output } = &cmd {
+    if let SessionCmd::ExportHtml { id, from, through, output, profile, preview } = &cmd {
         let session = source.session_named(id, workspace)?;
-        let report = super::html_export::save(source, session, *from, *through, output)?;
+        let profile = rook_core::conversation_export::Profile::parse(profile).map_err(anyhow::Error::msg)?;
+        if *preview {
+            let report = source.conversation_export(
+                session,
+                &rook_core::conversation_export::Request { from: *from, through: *through, profile },
+            )?;
+            println!("{}", report.preview_json()?);
+            return Ok(());
+        }
+        let output = output.as_deref().ok_or_else(|| anyhow::anyhow!("choose --output or --preview"))?;
+        let report = super::html_export::save(source, session, *from, *through, output, profile)?;
         if json {
             println!(
                 "{}",
                 serde_json::json!({"path":output,"events":report.events,
-                "shortened":report.shortened,"from":report.from,"through":report.through})
+                "shortened":report.shortened,"from":report.from,"through":report.through,"omitted":report.omitted,"profile":report.profile})
             );
         } else {
             println!(
@@ -432,6 +473,8 @@ pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, js
         | SessionCmd::Environment { .. }
         | SessionCmd::Learning { .. }
         | SessionCmd::ExportHtml { .. }
+        | SessionCmd::Attention { .. }
+        | SessionCmd::Model { .. }
         | SessionCmd::Find { .. }
         | SessionCmd::Entry { .. }
         | SessionCmd::Image { .. }

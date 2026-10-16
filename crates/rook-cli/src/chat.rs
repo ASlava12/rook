@@ -79,7 +79,11 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("review", "[JSON action]", "capture/inspect a frozen review or add source-bound comments"),
     ("diagnostics", "[--logs] [new-file-path]", "export local diagnostics; logs are opt-in"),
     ("worktree", "CHILD [restore REVIEW_TOKEN]", "diagnose/restore a missing registered child checkout"),
-    ("export-html", "[FROM..THROUGH] NEW_FILE", "download bounded saved history as local HTML"),
+    (
+        "export-html",
+        "[share|share-tools|archive] [FROM..THROUGH] NEW_FILE",
+        "download bounded saved history as local HTML",
+    ),
     (
         "recovery",
         "[operation-id inspection note]",
@@ -113,6 +117,12 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("goal", "[text]", "start a lasting goal in this session (shared daemon), or show its goal"),
     ("stance", "[name]", "how much latitude: readonly, assist or autonomous"),
     ("effort", "[name]", "how much the model may think: low … max"),
+    (
+        "export-preview",
+        "[JSON request]",
+        "preview selected export content and omissions without creating a file",
+    ),
+    ("attention", "[cursor]", "sessions with live waiting requests; saved observations are marked"),
     ("model", "[name]", "which endpoint from `[models]` the next turn runs on"),
     ("memory", "[query]", "what it remembers, or what matches"),
     ("docs", "[topic]", "documentation kept here, or gather a topic's"),
@@ -337,7 +347,7 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
                 }
                 branch_offer.pair = None;
                 let named = shared.model.borrow().clone();
-                let provider = rook_core::models::chosen(&rook.config, named.as_deref())?;
+                let provider = rook.provider_for_turn(session, named.as_deref())?;
                 runtime.block_on(turn(&rook, provider, session, &shared, &line));
             }
             // Ctrl-C at the prompt clears the line rather than leaving; the
@@ -945,22 +955,55 @@ async fn through_the_daemon(
                         eprintln!("start or resume a session first");
                     }
                 }
+                "attention" => {
+                    let here = workspace.to_path_buf();
+                    let query = rook_core::attention::Query {
+                        after: (!rest.is_empty()).then(|| rest.into()),
+                        limit: None,
+                    };
+                    let result = tokio::task::spawn_blocking(move || -> Result<String> {
+                        let source = crate::source::Source::open(Some(here))?;
+                        Ok(rook_core::attention::describe(&source.attention(&query)?))
+                    })
+                    .await?;
+                    match result {
+                        Ok(text) => println!("{text}"),
+                        Err(error) => eprintln!("{error}"),
+                    }
+                }
+                "export-preview" => {
+                    let Some(owner) = session.as_deref().and_then(rook_store::parse_session_id) else {
+                        continue;
+                    };
+                    let here = workspace.to_path_buf();
+                    let text = rest.to_owned();
+                    let result = tokio::task::spawn_blocking(move || -> Result<String> {
+                        crate::source::Source::open(Some(here))?.export_preview(owner, &text)
+                    })
+                    .await?;
+                    match result {
+                        Ok(text) => println!("{text}"),
+                        Err(error) => eprintln!("{error}"),
+                    }
+                }
                 "export-html" => {
                     let Some(id) = session.as_deref().and_then(rook_store::parse_session_id) else {
                         eprintln!("start or resume a session first");
                         continue;
                     };
-                    let (from, through, output) = match crate::commands::html_export::slash_arguments(rest) {
-                        Ok(arguments) => arguments,
-                        Err(error) => {
-                            eprintln!("{error}");
-                            continue;
-                        }
-                    };
+                    let (from, through, output, profile) =
+                        match crate::commands::html_export::slash_arguments(rest) {
+                            Ok(arguments) => arguments,
+                            Err(error) => {
+                                eprintln!("{error}");
+                                continue;
+                            }
+                        };
                     let here = workspace.to_path_buf();
                     let result = tokio::task::spawn_blocking(move || -> Result<String> {
                         let source = crate::source::Source::open(Some(here))?;
-                        let report = crate::commands::html_export::save(&source, id, from, through, &output)?;
+                        let report =
+                            crate::commands::html_export::save(&source, id, from, through, &output, profile)?;
                         Ok(format!(
                             "Saved {} event(s) to {} ({} shortened bodies).",
                             report.events,
@@ -1050,6 +1093,34 @@ async fn through_the_daemon(
                 // The three the engine keeps per connection. Sent rather than
                 // set here: the turn runs there, and a setting kept on this
                 // side would be one the turn never reads.
+                "model" if session.is_some() => {
+                    let Some(owner) = session.as_deref().and_then(rook_store::parse_session_id) else {
+                        continue;
+                    };
+                    let here = workspace.to_path_buf();
+                    let model = rest.trim().to_owned();
+                    let result = tokio::task::spawn_blocking(move || -> Result<String> {
+                        let source = crate::source::Source::open(Some(here))?;
+                        let view = source.model_selection(owner)?;
+                        if model.is_empty() {
+                            return Ok(serde_json::to_string_pretty(&view)?);
+                        }
+                        let receipt = source.select_model(
+                            owner,
+                            &rook_core::model_selection::Request {
+                                id: rook_store::format_session_id(rook_store::new_session_id()),
+                                expected_revision: view.revision,
+                                model,
+                            },
+                        )?;
+                        Ok(serde_json::to_string_pretty(&receipt)?)
+                    })
+                    .await?;
+                    match result {
+                        Ok(text) => println!("{text}"),
+                        Err(error) => eprintln!("{error}"),
+                    }
+                }
                 "model" | "stance" | "mode" | "effort" if !rest.trim().is_empty() => {
                     let name = match name {
                         "stance" => "mode",
@@ -1201,6 +1272,7 @@ async fn turn(
     // Before the loop borrows the agent, for the phrase a call is named by.
     let here = rook.workspace.clone();
     let mut last_effort = None;
+    crate::notify::status(crate::notify::Status::Working);
     let running = agent.run_with(prompt, |progress| match progress {
         Progress::Delta(Delta::Effort(report)) => {
             let report = report.describe();
@@ -1246,6 +1318,7 @@ async fn turn(
     tokio::select! {
         result = running => match result {
             Ok(outcome) => {
+                crate::notify::status(if rook_core::agent::finished(&outcome.stopped) { crate::notify::Status::Done } else { crate::notify::Status::Idle });
                 if let Some(note) = outcome.memory_note() {
                     println!("\x1b[2m  {}\x1b[0m", note.replace('\n', "\n  "));
                 }
@@ -1265,9 +1338,10 @@ async fn turn(
                 if outcome.compactions > 0 { format!(" · {} compactions", outcome.compactions) } else { String::new() }
                 )
             }
-            Err(e) => println!("\n{e}"),
+            Err(e) => { crate::notify::status(crate::notify::Status::Error); println!("\n{e}"); },
         },
         _ = tokio::signal::ctrl_c() => {
+            crate::notify::status(crate::notify::Status::Idle);
             rook.log(session, EventKind::Note, "interrupted", "the user stopped this turn").ok();
             println!("\n\x1b[2m[stopped]\x1b[0m");
         }
@@ -1323,6 +1397,15 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
     match name {
         "quit" | "exit" | "q" => return Ok(Said { text: String::new(), quit: true }),
         "help" | "?" => say!("{}", help_text()),
+        "export-preview" => {
+            let request = rook_core::conversation_export::arguments(rest)?;
+            say!("{}", rook.conversation_export(*session, &request)?.preview_json()?);
+        }
+        "attention" => {
+            let query =
+                rook_core::attention::Query { after: (!rest.is_empty()).then(|| rest.into()), limit: None };
+            say!("{}", rook_core::attention::describe(&rook.attention_page(&query, false, |_| None)?));
+        }
         "followup" => {
             let page = rook_core::message_queue::view::page(rook, *session, &Default::default())?;
             let target =
@@ -1401,8 +1484,8 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
             say!("Diagnostics saved to {}", report.save(&path)?.display());
         }
         "export-html" => {
-            let (from, through, output) = crate::commands::html_export::slash_arguments(rest)?;
-            let report = crate::commands::html_export::save(rook, *session, from, through, &output)?;
+            let (from, through, output, profile) = crate::commands::html_export::slash_arguments(rest)?;
+            let report = crate::commands::html_export::save(rook, *session, from, through, &output, profile)?;
             say!(
                 "Saved {} event(s) to {} ({} shortened bodies).",
                 report.events,
@@ -1508,7 +1591,7 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
         // Says what it is running on and what else there is, because the
         // names are in a file and nobody keeps a file in their head.
         "model" if rest.is_empty() => {
-            let now = shared.model.borrow().clone();
+            let now = rook.model_selection(*session)?.selected.or_else(|| shared.model.borrow().clone());
             say!("{}", now.as_deref().unwrap_or(&rook.config.agent.model));
             let named: Vec<&str> = rook.config.models.keys().map(String::as_str).collect();
             if !named.is_empty() {
@@ -1520,8 +1603,21 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
         // say so while somebody is still looking at what they typed.
         "model" => match rook_core::models::usable(&rook.config, rest) {
             Ok(()) => {
-                *shared.model.borrow_mut() = Some(rest.to_string());
-                say!("the next turn runs on {rest}");
+                let view = rook.model_selection(*session)?;
+                let receipt = rook.select_model(
+                    *session,
+                    &rook_core::model_selection::Request {
+                        id: rook_store::format_session_id(rook_store::new_session_id()),
+                        expected_revision: view.revision,
+                        model: rest.into(),
+                    },
+                )?;
+                *shared.model.borrow_mut() = Some(receipt.model.clone());
+                say!(
+                    "{} saved as revision {}; applies at the next turn boundary",
+                    receipt.model,
+                    receipt.revision
+                );
             }
             Err(why) => say!("{why}"),
         },

@@ -236,6 +236,9 @@ impl Watching {
         if self.quiet {
             return;
         }
+        if matches!(progress, Progress::Turn { .. } | Progress::Step { .. } | Progress::FollowUp { .. }) {
+            crate::notify::status(crate::notify::Status::Working);
+        }
         let written = match progress {
             Progress::ExtensionUi(rook_proto::ChatEvent::Agent { text, .. }) if !text.is_empty() => {
                 format!("\n{text}\n")

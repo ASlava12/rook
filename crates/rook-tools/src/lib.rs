@@ -639,6 +639,8 @@ pub trait Tool: Send + Sync {
 pub struct ToolBox {
     tools: Vec<Arc<dyn Tool>>,
     mcp_catalog: mcp::CatalogSummary,
+    mcp_sources: Arc<Vec<(Arc<rook_mcp::Server>, Vec<rook_mcp::ToolDescriptor>)>>,
+    mcp_names: Arc<std::collections::BTreeSet<String>>,
 }
 
 impl ToolBox {
@@ -670,7 +672,30 @@ impl ToolBox {
         Self {
             tools: self.tools.iter().filter(|t| !dropped.contains(&t.name())).cloned().collect(),
             mcp_catalog: self.mcp_catalog.clone(),
+            mcp_sources: self.mcp_sources.clone(),
+            mcp_names: self.mcp_names.clone(),
         }
+    }
+
+    pub fn register_mcp_catalog(
+        &mut self,
+        servers: impl IntoIterator<Item = (Arc<rook_mcp::Server>, Vec<rook_mcp::ToolDescriptor>)>,
+        limits: mcp::CatalogLimits,
+    ) {
+        self.tools.retain(|tool| !self.mcp_names.contains(tool.name()));
+        let sources: Vec<_> = servers.into_iter().collect();
+        let before = self.tools.len();
+        self.install_mcp_catalog(sources.iter().cloned(), limits);
+        self.mcp_names = Arc::new(self.tools[before..].iter().map(|tool| tool.name().to_owned()).collect());
+        self.mcp_sources = Arc::new(sources);
+    }
+    pub fn restrict_mcp(&mut self, allowed: &std::collections::BTreeSet<String>, limits: mcp::CatalogLimits) {
+        let sources: Vec<_> =
+            self.mcp_sources.iter().filter(|(server, _)| allowed.contains(server.name())).cloned().collect();
+        self.register_mcp_catalog(sources, limits);
+    }
+    pub fn mcp_server_names(&self) -> std::collections::BTreeSet<String> {
+        self.mcp_sources.iter().map(|(server, _)| server.name().to_owned()).collect()
     }
 
     pub fn mcp_catalog_summary(&self) -> &mcp::CatalogSummary {
