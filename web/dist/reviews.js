@@ -1,4 +1,5 @@
 import { el, api, state, jsonWithin } from './lib.js';
+import {diffViewer} from './diff-view.js';
 
 // Source IDs and the owner are captured by this panel; navigation never
 // retargets a comment or an in-flight response to another conversation.
@@ -58,6 +59,7 @@ export function reviewPanel(owner, putDraft) {
     const text = el('textarea', { maxlength: 4096, placeholder: 'Comment on this exact saved source…' });
     render(el('p', { class: 'sub' }, `${review.id} · ${review.state} · source ${source}`),
       review.error ? el('p', {}, review.error) : null,
+      diffViewer(owner,review,(path,sourceSide,number)=>{files.value=path;side.value=sourceSide;line.value=number;text.focus();}),
       el('button', { onclick: () => prepare(`Run review_changes with ${JSON.stringify({ review: review.id })} for this exact saved source in session ${owner}.`) }, 'Prepare independent review'),
       ...review.findings.map(finding => el('div', { class: 'entry' },
         el('strong', {}, `${finding.severity} · ${finding.path}:${finding.line} (${finding.side}) · ${finding.title}`),

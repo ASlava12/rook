@@ -14,6 +14,16 @@ pub(crate) fn cmd_skills(source: &Source, cmd: SkillCmd, workspace: &Path, json:
     if let SkillCmd::Show { name } = &cmd {
         return show_skill(&source.skill(name, workspace)?, json);
     }
+    if let SkillCmd::Resource { name, path, offset, identity } = &cmd {
+        let page = source.skill_resource(name, path, *offset, identity.as_deref(), workspace)?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&page)?);
+        } else {
+            println!("{}", page["text"].as_str().unwrap_or_default());
+            println!("identity: {} · next byte: {}", page["identity"], page["next"]);
+        }
+        return Ok(());
+    }
     if let SkillCmd::Why { name } = &cmd {
         let why = source.why_skill(name, workspace)?;
         if json {
@@ -129,6 +139,7 @@ pub(crate) fn cmd_skills(source: &Source, cmd: SkillCmd, workspace: &Path, json:
     match cmd {
         SkillCmd::Ls { .. }
         | SkillCmd::Show { .. }
+        | SkillCmd::Resource { .. }
         | SkillCmd::Why { .. }
         | SkillCmd::Sources
         | SkillCmd::Search { .. }
@@ -166,8 +177,8 @@ pub(crate) fn cmd_skills(source: &Source, cmd: SkillCmd, workspace: &Path, json:
                 }
             }
         }
-        SkillCmd::Install { name } => {
-            let path = source.install_skill(&name)?;
+        SkillCmd::Install { name, source: origin } => {
+            let path = source.install_skill(&name, origin.as_deref())?;
             println!("installed {}", path.display());
             println!("read it before trusting it: {}", path.join("SKILL.md").display());
         }

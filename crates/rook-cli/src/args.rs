@@ -30,6 +30,17 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
+    /// Inspect optional MCP Apps; interactive views are available in the browser.
+    McpApps {
+        session: String,
+        #[arg(default_value = "")]
+        request: String,
+    },
+    /// List, save, inspect or delete reusable prompts; accepts a bounded JSON action.
+    Presets {
+        #[arg(default_value = "")]
+        request: String,
+    },
     /// Create the store and the config file, and say where skills go.
     Init,
     /// Report what Rook detected about this machine and what it means for skills.
@@ -754,6 +765,15 @@ pub(crate) enum SkillCmd {
     },
     /// Print a skill's resolved body for this environment.
     Show { name: String },
+    /// Read a page of a bundled text resource without broadening workspace access.
+    Resource {
+        name: String,
+        path: String,
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        #[arg(long)]
+        identity: Option<String>,
+    },
     /// Explain which version was chosen and why the others were not.
     Why { name: String },
     /// What the configured sources offer, best match first.
@@ -766,7 +786,11 @@ pub(crate) enum SkillCmd {
         refresh: bool,
     },
     /// Install a skill a source offers, by name.
-    Install { name: String },
+    Install {
+        name: String,
+        #[arg(long)]
+        source: Option<String>,
+    },
     /// Where `search` and `install` look.
     Sources,
     /// Bring skills installed from a source up to what it offers now. Skills

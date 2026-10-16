@@ -383,10 +383,16 @@ impl Rook {
     /// Linux machine, which is the whole point of `requires`.
     pub fn capture_skill(&self, name: &str, note: Option<String>) -> Result<(FileSet, ObjectId)> {
         let skills = self.skills();
-        let skill = *skills
-            .versions_of(name)
-            .first()
-            .ok_or_else(|| CoreError::Other(format!("no skill named {name:?}")))?;
+        // Installer receipts describe the personal installation even when a
+        // project override currently wins resolution. Ordinary captures still
+        // follow the selected skill.
+        let versions = skills.versions_of(name);
+        let skill = *if came_from_a_source(note.as_deref()).is_some() {
+            versions.iter().find(|skill| skill.source == SkillSource::User)
+        } else {
+            versions.first()
+        }
+        .ok_or_else(|| CoreError::Other(format!("no skill named {name:?}")))?;
         let version = skill.version().to_string();
         let (set, id) = FileSet::capture(
             &self.store,
@@ -570,8 +576,26 @@ impl Rook {
 
     /// Install one by name, and prove it loads before saying so.
     pub fn install_skill(&self, name: &str) -> Result<PathBuf> {
+        self.install_skill_from(name, None)
+    }
+
+    /// Explicitly select an origin, including an intentional source migration.
+    pub fn install_skill_from(&self, name: &str, source: Option<&str>) -> Result<PathBuf> {
+        let recorded_origin = if source.is_none() {
+            self.skill_history(name)?
+                .into_iter()
+                .find_map(|record| came_from_a_source(record.note.as_deref()).map(str::to_owned))
+        } else {
+            None
+        };
+        let source = source.or(recorded_origin.as_deref());
         let (offered, errors) = crate::catalog::offered(&self.config.skill_sources, false);
-        let Some(skill) = offered.iter().find(|o| o.name == name) else {
+        let Some(skill) = offered.iter().find(|o| {
+            o.name == name
+                && source.is_none_or(|source| {
+                    crate::catalog::source_identity(source) == crate::catalog::source_identity(&o.source)
+                })
+        }) else {
             let near = crate::catalog::matching(&offered, name);
             let suggestion = match near.first() {
                 Some(o) => format!(" — closest is {:?} from {}", o.name, o.source),
@@ -652,8 +676,12 @@ impl Rook {
         };
         let source = came_from_a_source(installed.note.as_deref()).unwrap_or_default().to_string();
 
-        let Some(offer) = offered.iter().find(|o| o.name == name) else {
-            return Ok(match errors.is_empty() {
+        let Some(offer) = offered.iter().find(|o| {
+            o.name == name
+                && crate::catalog::source_identity(&o.source) == crate::catalog::source_identity(&source)
+        }) else {
+            let origin_failed = errors.iter().any(|error| error.starts_with(&format!("{source}:")));
+            return Ok(match !origin_failed {
                 true => Refreshed::Gone { source },
                 // A source that would not answer is not a source that dropped
                 // the skill, and deleting on that reading would be a network
@@ -669,7 +697,8 @@ impl Rook {
             let skills = self.skills();
             let skill = *skills
                 .versions_of(name)
-                .first()
+                .iter()
+                .find(|skill| skill.source == SkillSource::User)
                 .ok_or_else(|| CoreError::Other(format!("no skill named {name:?}")))?;
             skill.dir.clone()
         };

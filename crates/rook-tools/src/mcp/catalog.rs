@@ -97,6 +97,14 @@ impl ToolBox {
         let mut ordered = Vec::new();
         for (server, tools) in servers {
             for descriptor in tools {
+                if descriptor
+                    .meta
+                    .pointer("/ui/visibility")
+                    .and_then(Value::as_array)
+                    .is_some_and(|v| !v.iter().any(|item| item.as_str() == Some("model")))
+                {
+                    continue;
+                }
                 ordered.push(McpTool::new(server.clone(), descriptor));
             }
         }

@@ -67,6 +67,9 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
         "[JSON action]",
         "inspect shell changes, prepare selected restore, or recover an interrupted capture",
     ),
+    ("mcp-apps", "[JSON action]", "inspect optional apps; interactive views are in the browser"),
+    ("presets", "[JSON action]", "list/save/delete reusable prompts with revision checks"),
+    ("preset", "<name>", "inspect a saved prompt and its settings"),
     ("recipes", "[JSON action]", "inspect composite recipe stages and sources"),
     ("telegram", "[JSON action]", "inspect bot routing and outbound deliveries"),
     ("events", "[JSON action]", "inspect durable inbound deliveries and their task sources"),
@@ -714,6 +717,40 @@ async fn through_the_daemon(
                     }
                     if saved {
                         summary_boundary = None;
+                    }
+                }
+                "mcp-apps" => {
+                    let Some(owner) = session.as_deref().and_then(rook_store::parse_session_id) else {
+                        eprintln!("open a conversation first");
+                        continue;
+                    };
+                    let text = rest.to_owned();
+                    let workspace = workspace.to_path_buf();
+                    match tokio::task::spawn_blocking(move || {
+                        crate::source::Source::open(Some(workspace))?.mcp_apps_command(owner, &text)
+                    })
+                    .await
+                    {
+                        Ok(Ok(reply)) => println!("{reply}"),
+                        Ok(Err(error)) => eprintln!("{error}"),
+                        Err(error) => eprintln!("MCP Apps operation failed: {error}"),
+                    }
+                }
+                "presets" | "preset" => {
+                    let text = if name == "preset" {
+                        serde_json::json!({"action":"get","name":rest.trim()}).to_string()
+                    } else {
+                        rest.into()
+                    };
+                    let workspace = workspace.to_path_buf();
+                    match tokio::task::spawn_blocking(move || {
+                        crate::source::Source::open(Some(workspace))?.presets_command(&text)
+                    })
+                    .await
+                    {
+                        Ok(Ok(reply)) => println!("{reply}"),
+                        Ok(Err(e)) => eprintln!("{e}"),
+                        Err(e) => eprintln!("preset operation failed: {e}"),
                     }
                 }
                 "telegram" => {
@@ -1376,6 +1413,24 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
         "recall" => {
             let request = rook_core::session_recall::arguments(rest)?;
             say!("{}", rook_core::session_recall::describe(&rook.session_recall(&request)?));
+        }
+        "mcp-apps" => {
+            let request = rook_core::mcp_apps::arguments(rest)?;
+            if !matches!(request, rook_core::mcp_apps::Request::List) {
+                anyhow::bail!("Interactive MCP Apps require the daemon browser frontend");
+            }
+            let vault = rook_core::Vault::load()?;
+            let report = rook.mcp_app_request(*session, mcp, &shared.policy, &vault, request).await?;
+            say!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        "presets" => {
+            let report = rook.preset_request(rook_core::presets::arguments(rest)?)?;
+            say!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        "preset" => {
+            let report =
+                rook.preset_request(rook_core::presets::Request::Get { name: rest.trim().into() })?;
+            say!("{}", serde_json::to_string_pretty(&report)?);
         }
         "telegram" => {
             let report = rook.telegram_request(rook_core::telegram::arguments(rest)?)?;

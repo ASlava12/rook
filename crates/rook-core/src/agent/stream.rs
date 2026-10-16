@@ -124,7 +124,18 @@ impl AgentLoop<'_> {
             // its first word said something, and it is not the error.
             let reasoning = assembler.reasoning().to_string();
             if !reasoning.is_empty() {
-                self.rook.log(self.session, EventKind::Reasoning, "", &reasoning).ok();
+                self.rook
+                    .log(
+                        self.session,
+                        EventKind::Reasoning,
+                        &super::history::reasoning_identity(
+                            self.rook,
+                            self.provider.id(),
+                            assembler.dispatch().or(self.provider.dispatch_identity().as_ref()),
+                        ),
+                        &self.vault.redact(&reasoning),
+                    )
+                    .ok();
             }
             let partial = assembler.finish();
             if !partial.message.content.is_empty() {

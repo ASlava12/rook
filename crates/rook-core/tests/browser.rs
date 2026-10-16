@@ -175,7 +175,8 @@ async fn browser_denial_precedes_startup_and_is_saved_as_an_ordinary_tool_result
         .iter()
         .map(|t| (t.name.len() + t.description.len() + t.parameters.to_string().len()).div_ceil(4))
         .sum::<usize>();
-    assert!(cost < 2800, "enabled browser catalog costs {cost} tokens");
+    // Resource paging and browser diagnostics add bounded schema fields, not another tool catalog.
+    assert!(cost < 3000, "enabled browser catalog costs {cost} tokens");
     let result = agent.run("Inspect the local page using browser navigation").await.unwrap();
     assert!(result.tools_called.contains(&"browser".into()));
     let observed = provider.observed.lock().unwrap().join("\n");

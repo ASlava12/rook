@@ -122,6 +122,16 @@ fn main() -> Result<()> {
             println!("{}", Source::open(cli.workspace)?.telegram_command(&request)?);
             Ok(())
         }
+        Some(Command::McpApps { session, request }) => {
+            let source = Source::open(cli.workspace.clone())?;
+            let owner = source.session_named(&session, &workspace_of(&cli.workspace))?;
+            println!("{}", source.mcp_apps_command(owner, &request)?);
+            Ok(())
+        }
+        Some(Command::Presets { request }) => {
+            println!("{}", Source::open(cli.workspace)?.presets_command(&request)?);
+            Ok(())
+        }
         Some(Command::Events { request }) => {
             println!("{}", Source::open(cli.workspace)?.events_command(&request)?);
             Ok(())

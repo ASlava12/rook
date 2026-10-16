@@ -3936,3 +3936,36 @@ fn mcp_forms_require_review_and_support_refusal_in_native_cli_and_both_tuis() {
         }
     }
 }
+
+#[test]
+fn preset_picker_loads_without_submitting_and_restores_the_original_draft() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let saved=Command::new(env!("CARGO_BIN_EXE_rook")).env("ROOK_HOME",home.path()).args(["--workspace",workspace.path().to_str().unwrap(),"presets",r#"{"action":"save","name":"native","preset":{"prompt":"NATIVE_PRESET_TEXT","model":null,"effort":"low"},"expected":null}"#]).output().unwrap();
+    assert!(saved.status.success(), "{}", String::from_utf8_lossy(&saved.stderr));
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+    pty.send("ORIGINAL_UNSENT_DRAFT");
+    pty.screen_showing(100, 30, "ORIGINAL_UNSENT_DRAFT");
+    pty.send("\u{1b}[19~");
+    pty.screen_showing(100, 30, "saved request");
+    pty.send("\r");
+    let screen = pty.screen_showing(100, 30, "Preset loaded into the draft").join("\n");
+    assert!(screen.contains("NATIVE_PRESET_TEXT"));
+    pty.send("\u{1a}");
+    let screen = pty.screen_showing(100, 30, "ORIGINAL_UNSENT_DRAFT").join("\n");
+    assert!(!screen.contains("NATIVE_PRESET_TEXT"), "{screen}");
+    drop(pty);
+    let sessions = Command::new(env!("CARGO_BIN_EXE_rook"))
+        .env("ROOK_HOME", home.path())
+        .args(["--json", "session", "ls"])
+        .output()
+        .unwrap();
+    assert!(sessions.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&sessions.stdout).unwrap(),
+        serde_json::json!([]),
+        "no prompt or model call was submitted"
+    );
+}

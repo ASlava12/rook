@@ -153,3 +153,86 @@ fn checking_for_updates_does_not_store_a_copy_of_everything_a_source_offers() {
     let after = rook.stats().unwrap().objects;
     assert_eq!(after, before, "a check that changed nothing stored nothing: {before} → {after}");
 }
+
+#[test]
+fn reordering_sources_never_substitutes_a_same_named_skill() {
+    let _alone = alone();
+    let original = source_with("greeting", "Original source.");
+    let other = source_with("greeting", "Foreign source.");
+    let (_home, _workspace, mut rook) = rook_with(original.path());
+    rook.install_skill("greeting").unwrap();
+    rook.config.skill_sources.insert(0, other.path().display().to_string());
+    std::fs::write(original.path().join("greeting/SKILL.md"), card("greeting", "Original source updated."))
+        .unwrap();
+    assert!(
+        matches!(rook.update_skills().unwrap().as_slice(), [(_, Refreshed::Updated { source })] if source == &original.path().display().to_string())
+    );
+    let installed = rook_core::paths::user_skills_dir().join("greeting/SKILL.md");
+    assert!(std::fs::read_to_string(&installed).unwrap().contains("Original source updated"));
+    rook.config.skill_sources.remove(1);
+    assert!(matches!(rook.update_skills().unwrap().as_slice(), [(_, Refreshed::Gone { .. })]));
+    assert!(std::fs::read_to_string(&installed).unwrap().contains("Original source updated"));
+    rook.install_skill_from("greeting", Some(&other.path().display().to_string())).unwrap();
+    assert!(std::fs::read_to_string(installed).unwrap().contains("Foreign source"));
+}
+
+#[test]
+fn a_failed_preparation_keeps_the_last_installed_copy() {
+    let _alone = alone();
+    let source = source_with("greeting", "Last good body.");
+    let (_home, _workspace, rook) = rook_with(source.path());
+    let target = rook.install_skill("greeting").unwrap();
+    let missing = tempfile::tempdir().unwrap();
+    let offer = rook_core::catalog::Offered {
+        name: "greeting".into(),
+        description: "broken".into(),
+        source: "test".into(),
+        dir: missing.path().into(),
+    };
+    assert!(rook_core::catalog::install(&offer, &rook_core::paths::user_skills_dir()).is_err());
+    assert!(std::fs::read_to_string(target.join("SKILL.md")).unwrap().contains("Last good body"));
+}
+
+#[test]
+fn resource_pages_are_scoped_versioned_and_do_not_execute_scripts() {
+    let _alone = alone();
+    let source = source_with("greeting", "Read references/data.txt.");
+    let (_home, _workspace, rook) = rook_with(source.path());
+    let target = rook.install_skill("greeting").unwrap();
+    std::fs::create_dir(target.join("references")).unwrap();
+    std::fs::write(target.join("references/data.txt"), "Привет 🦀".repeat(3000)).unwrap();
+    rook.reload_skills();
+    let catalog = rook.skill_resources("greeting").unwrap();
+    let page =
+        rook.read_skill_resource("greeting", &catalog.identity, "references/data.txt", 0, 512).unwrap();
+    assert!(page.text.len() <= 512 && page.next.is_some());
+    for path in ["../secrets.toml", "/etc/passwd", "references/../../secrets.toml"] {
+        assert!(rook.read_skill_resource("greeting", &catalog.identity, path, 0, 512).is_err());
+    }
+    std::fs::write(target.join("references/data.txt"), "Changed under same manifest version").unwrap();
+    assert!(rook.read_skill_resource("greeting", &catalog.identity, "references/data.txt", 0, 512).is_err());
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("/etc/passwd", target.join("escape")).unwrap();
+        let current = rook.skill_resources("greeting").unwrap();
+        assert!(rook.read_skill_resource("greeting", &current.identity, "escape", 0, 512).is_err());
+    }
+}
+
+#[test]
+fn updates_capture_the_personal_installation_when_a_project_override_masks_it() {
+    let _alone = alone();
+    let source = source_with("greeting", "Original personal body.");
+    let (_home, workspace, rook) = rook_with(source.path());
+    rook.install_skill("greeting").unwrap();
+    let project = rook_core::paths::project_skills_dir(workspace.path()).join("greeting");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("SKILL.md"), card("greeting", "Project override.")).unwrap();
+    rook.reload_skills();
+    assert!(rook.skills().resolve("greeting", rook.env()).unwrap().body.contains("Project override"));
+    std::fs::write(source.path().join("greeting/SKILL.md"), card("greeting", "Updated personal body."))
+        .unwrap();
+    assert!(matches!(rook.update_skills().unwrap().as_slice(), [(_, Refreshed::Updated { .. })]));
+    assert!(matches!(rook.update_skills().unwrap().as_slice(), [(_, Refreshed::Current)]));
+    assert!(std::fs::read_to_string(project.join("SKILL.md")).unwrap().contains("Project override"));
+}

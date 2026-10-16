@@ -133,6 +133,45 @@ impl Source {
         };
         Ok(serde_json::to_string_pretty(&result)?)
     }
+    pub fn mcp_apps_command(&self, session: u128, text: &str) -> Result<String> {
+        let request = rook_core::mcp_apps::arguments(text)?;
+        let reply = match self {
+            Self::Local(rook) => {
+                if !matches!(request, rook_core::mcp_apps::Request::List) {
+                    anyhow::bail!(
+                        "Stateful MCP Apps require the daemon; open the browser frontend or attach to rookd"
+                    );
+                }
+                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+                runtime.block_on(async {
+                    let manager = rook.connect_mcp().await;
+                    let policy = rook_core::agent::policy_for(&rook.config);
+                    let vault = rook_core::Vault::load().unwrap_or_else(|_| rook_core::Vault::empty());
+                    let reply = rook.mcp_app_request(session, &manager, &policy, &vault, request).await;
+                    manager.shutdown().await;
+                    reply
+                })?
+            }
+            Self::Daemon(d) => d.request_bounded(
+                &format!("/api/sessions/{}/mcp-apps", rook_store::format_session_id(session)),
+                Some(&serde_json::to_value(request)?),
+                524288,
+            )?,
+        };
+        Ok(serde_json::to_string_pretty(&reply)?)
+    }
+
+    pub fn presets_command(&self, text: &str) -> Result<String> {
+        let request = rook_core::presets::arguments(text)?;
+        let reply = match self {
+            Self::Local(rook) => rook.preset_request(request)?,
+            Self::Daemon(daemon) => {
+                daemon.request_bounded("/api/presets", Some(&serde_json::to_value(request)?), 524288)?
+            }
+        };
+        Ok(serde_json::to_string_pretty(&reply)?)
+    }
+
     pub fn events_command(&self, text: &str) -> Result<String> {
         let request = rook_core::inbound::arguments(text)?;
         let result = match self {
@@ -341,6 +380,32 @@ impl Source {
             Self::Daemon(d) => {
                 Ok(d.get::<Page<SkillCard>>(&format!("/api/skills?workspace={}", here(workspace)))?.items)
             }
+        }
+    }
+
+    pub fn skill_resource(
+        &self,
+        name: &str,
+        path: &str,
+        offset: usize,
+        identity: Option<&str>,
+        workspace: &std::path::Path,
+    ) -> Result<serde_json::Value> {
+        match self {
+            Self::Local(rook) => {
+                let catalog = rook.skill_resources(name)?;
+                Ok(serde_json::to_value(rook.read_skill_resource(
+                    name,
+                    identity.unwrap_or(&catalog.identity),
+                    path,
+                    offset,
+                    8000,
+                )?)?)
+            }
+            Self::Daemon(d) => Ok(d.post(
+                &format!("/api/skills/{}/resource?workspace={}", escaped(name), here(workspace)),
+                &serde_json::json!({"path":path,"offset":offset,"identity":identity}),
+            )?),
         }
     }
 
@@ -873,12 +938,12 @@ impl Source {
         }
     }
 
-    pub fn install_skill(&self, name: &str) -> Result<std::path::PathBuf> {
+    pub fn install_skill(&self, name: &str, origin: Option<&str>) -> Result<std::path::PathBuf> {
         match self {
-            Self::Local(rook) => Ok(rook.install_skill(name)?),
+            Self::Local(rook) => Ok(rook.install_skill_from(name, origin)?),
             Self::Daemon(d) => {
                 let said: serde_json::Value =
-                    d.post("/api/skills/install", &serde_json::json!({ "name": name }))?;
+                    d.post("/api/skills/install", &serde_json::json!({ "name": name, "source": origin }))?;
                 Ok(serde_json::from_value(said["path"].clone())?)
             }
         }

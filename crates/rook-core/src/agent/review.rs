@@ -29,6 +29,9 @@ impl<'a> AgentLoop<'a> {
                 let selection = serde_json::from_slice::<review::Selection>(&encoded)?;
                 self.rook.review_capture(self.session, selection, &self.vault).await?
             };
+            if source.snapshot.files.iter().any(|file|file.binary()) {
+                return Err(CoreError::Other("binary entries retain hashes only; select text paths for an independent content review".into()));
+            }
             if source.snapshot.files.is_empty() {
                 return review::finish(self.rook, self.session, &source.id, Ok(Vec::new()));
             }

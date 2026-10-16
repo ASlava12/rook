@@ -104,6 +104,37 @@ Add a row when you implement something after reading a reference. Add it to
 moved; what follows is what was done with it, so a dismissal is a decision rather
 than an omission.
 
+**2026-10-16 (authorized follow-up implementation).** All eight candidates from
+that review were implemented independently against the advanced snapshots:
+
+| what | source idea / snapshot | implementation |
+|---|---|---|
+| Source-bound skill refresh and staged replacement | Hermes skill-update ownership/recovery, `60f56a6b13c8` | `rook-core/{catalog,service}.rs`; explicit origin migration and retained personal-installation receipts |
+| Scoped, receipt-bound bundled resource reads | Hermes `skill_view`, `60f56a6b13c8`; Pi skill resource conventions, `4954d760504c` | `rook-core/skill_resources.rs`, existing `load_skill`, CLI/API/Skills browser panel |
+| Producer-scoped readable reasoning | Pi `transformMessages`, `4954d760504c`, incoming `911309429175` | Existing reasoning event labels, replay/compaction filtering; ordinary text/tool history retained |
+| Auxiliary context-window admission | OpenCode `fitOutput`, `412b2b1d8563`, incoming `ae8d59f8b56c` | Actual summarizer request measured with envelope and reserved output |
+| Reusable prompt/model/effort presets | Codex quick dials, `97ebf2d94d62`, incoming `dcd9e954598c` / `36803b18` | `rook-core/presets.rs`, CLI/REPL, F8 terminal picker, browser draft restoration |
+| Responsive frozen-source diffs | OpenCode diff presentation, `412b2b1d8563`, incoming `0478ba64` / `09a075d9` | Existing review source extended with paged diff actions, terminal/browser split/unified views and binary hash notices |
+| Browser diagnostics and viewport controls | OpenClaw browser control, `0ee67b8da382` | Existing conversation browser actions, bounded/redacted observations, unchanged approval/lifetime handling |
+| Opt-in MCP Apps host | Goose app renderer/resource ownership, `0df818175bc8`; primary MCP Apps protocol 2026-01-26 | Session/generation-bound leases, explicit one-call consent, opaque sandboxed browser frames and static terminal discovery |
+
+Detailed contracts, native probe instructions, acceptance evidence and deliberate
+host limits are in the [follow-up adoption record](../docs/reference-followup-adoption.md).
+The historical review below describes the state before this implementation.
+
+**2026-10-15 (follow-up after v0.14.0).** Refreshed and advanced all ten
+gitlinks again, using the configured branches and a depth of 200. Exact old/new
+SHAs, bounded-history limitations, per-reference triage and unimplemented
+candidates are in the [follow-up review](../docs/research/reference-review-20261015.md).
+Nine previous pointers are proven ancestors; OpenClaw's incoming history exceeds
+the fetched depth and was sampled, not exhaustively audited. Checked reference
+worktrees before checkout and retained detached fetched snapshots. No runtime
+feature was ported in this pass. Previous candidates below are historical; their
+completed adoption is recorded above and in the adoption tracker. New priorities
+are source-bound skill updates/resource access, reasoning replay identity and
+auxiliary compaction budgeting, followed by presets, diff/browser UI improvements
+and an optional MCP Apps host.
+
 **2026-10-15 (all-reference refresh and candidate review).** User requested
 another functionality review and explicitly asked to advance the pointers.
 Fetched each configured branch with `--no-tags --depth=100`, checked out its

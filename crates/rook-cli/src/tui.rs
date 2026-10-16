@@ -32,6 +32,7 @@ use tokio::sync::mpsc;
 use crate::fmt;
 
 mod context;
+mod diff;
 mod draft;
 mod editor;
 mod history;
@@ -65,6 +66,7 @@ enum Overlay {
     History,
     Mcp,
     Queue,
+    Presets,
     Memory,
     Skills,
     Store,
@@ -76,7 +78,7 @@ enum Overlay {
 
 impl Overlay {
     /// The panes the palette offers, in the order somebody reaches for them.
-    const PANES: [Overlay; 14] = [
+    const PANES: [Overlay; 15] = [
         Overlay::Calls,
         Overlay::Context,
         Overlay::Tasks,
@@ -84,6 +86,7 @@ impl Overlay {
         Overlay::History,
         Overlay::Mcp,
         Overlay::Queue,
+        Overlay::Presets,
         Overlay::Models,
         Overlay::Docs,
         Overlay::Memory,
@@ -103,6 +106,7 @@ impl Overlay {
             Overlay::History => "history",
             Overlay::Mcp => "mcp connections",
             Overlay::Queue => "message queue",
+            Overlay::Presets => "prompt presets",
             Overlay::Memory => "memory",
             Overlay::Skills => "skills",
             Overlay::Store => "store",
@@ -124,6 +128,7 @@ impl Overlay {
             Overlay::History => "find, jump and quote messages in this conversation",
             Overlay::Mcp => "tool server status and reconnect",
             Overlay::Queue => "edit or withdraw pending messages, or return one to the draft",
+            Overlay::Presets => "load a reusable request and explicit model settings into the draft",
             Overlay::Memory => "what the agent believes, and how to correct it",
             Overlay::Skills => "what applies in this workspace, and why",
             Overlay::Store => "what memory costs, per kind of object",
@@ -139,6 +144,9 @@ impl Overlay {
     /// has stopped responding.
     fn keys(self) -> &'static [(&'static str, &'static str)] {
         match self {
+            Overlay::Presets => {
+                &[("↑↓ ", "choose  "), ("Enter ", "load draft  "), ("r ", "refresh  "), ("Esc ", "close")]
+            }
             Overlay::Palette => &[("↑↓ ", "choose  "), ("⏎ ", "open  "), ("esc ", "close  ")],
             Overlay::Calls => {
                 &[("j/k ", "move  "), ("c ", "saved changes  "), ("r ", "reload  "), ("esc ", "close  ")]
@@ -1479,6 +1487,8 @@ struct App {
     /// implementation rather than two that drift.
     shared: crate::chat::Session,
     history: history::History,
+    preset_items: Vec<serde_json::Value>,
+    preset_state: ListState,
     context: context::ContextPane,
     extension_changes: Option<tokio::sync::watch::Receiver<u64>>,
     /// Source boundary of the model draft currently offered for review.
@@ -1648,6 +1658,8 @@ impl App {
             queue,
             tasks,
             history,
+            preset_items: Vec::new(),
+            preset_state: ListState::default(),
             context,
             summary_boundary: None,
             editor: None,
@@ -1906,6 +1918,11 @@ impl App {
             self.history.poll();
             if let Some(result) = self.history.take_recall() {
                 self.chat.push("stat", &result);
+            }
+            if let Some(owner) = self.history.take_diff_ready()
+                && self.chat.session == Some(owner)
+            {
+                self.overlay = Some(Overlay::History);
             }
             if let Some(result) = self.history.take_worktree() {
                 self.chat.push("stat", &result);
@@ -2679,6 +2696,61 @@ impl App {
     }
 
     fn on_overlay_key(&mut self, overlay: Overlay, key: crossterm::event::KeyEvent) {
+        if overlay == Overlay::Presets {
+            match key.code {
+                KeyCode::Esc => self.overlay = None,
+                KeyCode::Char('r') => self.open_presets(),
+                KeyCode::Up => {
+                    self.preset_state
+                        .select(Some(self.preset_state.selected().unwrap_or(0).saturating_sub(1)));
+                }
+                KeyCode::Down => {
+                    self.preset_state.select(Some(
+                        (self.preset_state.selected().unwrap_or(0) + 1)
+                            .min(self.preset_items.len().saturating_sub(1)),
+                    ));
+                }
+                KeyCode::Enter => {
+                    if self.chat.busy || self.chat.prompt_retry.pending() {
+                        self.chat.push(
+                            "err",
+                            "Finish the active turn or saved submission before applying preset settings.",
+                        );
+                        return;
+                    }
+                    let name = self
+                        .preset_state
+                        .selected()
+                        .and_then(|at| self.preset_items.get(at))
+                        .and_then(|p| p["name"].as_str())
+                        .map(str::to_owned);
+                    if let Some(name) = name {
+                        let request = serde_json::json!({"action":"get","name":name}).to_string();
+                        let loaded = self.source.presets_command(&request).and_then(|text| {
+                            let value: serde_json::Value = serde_json::from_str(&text)?;
+                            Ok(serde_json::from_value::<rook_core::presets::Preset>(value["preset"].clone())?)
+                        });
+                        match loaded {
+                            Ok(preset) => {
+                                if let Some(model) = preset.model {
+                                    self.run_on(&model);
+                                }
+                                if let Some(effort) = preset.effort {
+                                    self.shared.effort.set(effort);
+                                    self.tell_the_daemon("effort", effort.as_str());
+                                }
+                                self.chat.input.set(&preset.prompt);
+                                self.overlay = None;
+                                self.chat.push("stat","Preset loaded into the draft; Ctrl+Z restores the previous draft. Review before submitting.");
+                            }
+                            Err(error) => self.chat.push("err", &error.to_string()),
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         if overlay == Overlay::Queue {
             if self.queue.key(key) {
                 self.overlay = None;
@@ -2916,6 +2988,8 @@ impl App {
                             self.context.open(&self.source, self.chat.session, None);
                         } else if self.overlay == Some(Overlay::Queue) {
                             self.queue.open(self.chat.session);
+                        } else if self.overlay == Some(Overlay::Presets) {
+                            self.open_presets();
                         } else if self.overlay == Some(Overlay::Mcp) {
                             self.mcp.request(None);
                         } else if self.overlay == Some(Overlay::Help) {
@@ -3049,6 +3123,7 @@ impl App {
             Action::Stance => self.cycle_stance(),
             Action::Effort => self.cycle_effort(),
             Action::Tasks => self.overlay = Some(Overlay::Tasks),
+            Action::Presets => self.open_presets(),
             Action::Home => self.chat.input.home(),
             Action::End if self.chat.input.is_empty() => self.chat.scroll = 0,
             Action::End => self.chat.input.end(),
@@ -3384,6 +3459,64 @@ impl App {
 
     /// One question per Enter. The input line is the answer field, so typing
     /// past the choices works here exactly as it does in the plain CLI.
+    fn open_presets(&mut self) {
+        match self
+            .source
+            .presets_command("")
+            .and_then(|text| Ok(serde_json::from_str::<serde_json::Value>(&text)?))
+        {
+            Ok(reply) => {
+                self.preset_items = reply["items"].as_array().cloned().unwrap_or_default();
+                self.preset_state.select((!self.preset_items.is_empty()).then_some(0));
+                self.overlay = Some(Overlay::Presets);
+            }
+            Err(error) => self.chat.push("err", &error.to_string()),
+        }
+    }
+    fn draw_presets(&mut self, f: &mut Frame, area: Rect) {
+        let [list, detail] =
+            Layout::vertical([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(area);
+        let items: Vec<_> = self
+            .preset_items
+            .iter()
+            .map(|item| {
+                ListItem::new(format!(
+                    "{} · {}",
+                    item["name"].as_str().unwrap_or_default(),
+                    item["preset"]["model"].as_str().unwrap_or("current model")
+                ))
+            })
+            .collect();
+        f.render_stateful_widget(
+            List::new(items)
+                .block(bordered("prompt presets · Enter loads draft · Esc cancels"))
+                .highlight_style(Style::default().fg(Color::Cyan)),
+            list,
+            &mut self.preset_state,
+        );
+        let text = self
+            .preset_state
+            .selected()
+            .and_then(|at| self.preset_items.get(at))
+            .map(|item| {
+                format!(
+                    "model: {} · effort: {}\n\n{}",
+                    item["preset"]["model"],
+                    item["preset"]["effort"],
+                    item["preset"]["prompt"].as_str().unwrap_or_default()
+                )
+            })
+            .unwrap_or_else(|| {
+                "No saved presets. Save one with rook presets or the browser's Prompt presets panel.".into()
+            });
+        f.render_widget(
+            Paragraph::new(text)
+                .wrap(Wrap { trim: false })
+                .block(bordered("saved request · existing permissions remain")),
+            detail,
+        );
+    }
+
     fn command(&mut self, command: &str) {
         let (name, rest) = command.split_once(' ').unwrap_or((command, ""));
         if self.source.daemon_base().is_none()
@@ -3504,6 +3637,54 @@ impl App {
                 self.chat.push("stat", "Reading inbound events…");
             } else {
                 self.chat.push("err", "History worker is busy; retry when it finishes.");
+            }
+            return;
+        }
+        if name == "mcp-apps" {
+            let Some(owner) = self.chat.session else {
+                return self.chat.push("err", "Start or resume a session first.");
+            };
+            let reply = self.source.mcp_apps_command(owner, rest).unwrap_or_else(|e| e.to_string());
+            self.chat.push("stat", &reply);
+            return;
+        }
+        if name == "presets" {
+            let result = self.source.presets_command(rest);
+            self.chat.push("stat", &result.unwrap_or_else(|e| e.to_string()));
+            return;
+        }
+        if name == "preset" {
+            if self.chat.busy || self.chat.prompt_retry.pending() {
+                return self.chat.push(
+                    "err",
+                    "Finish the active turn or saved submission before applying preset settings.",
+                );
+            }
+            let request = serde_json::json!({"action":"get","name":rest.trim()}).to_string();
+            let result = self
+                .source
+                .presets_command(&request)
+                .and_then(|text| Ok(serde_json::from_str::<serde_json::Value>(&text)?));
+            match result {
+                Ok(reply) => {
+                    let preset: Result<rook_core::presets::Preset, _> =
+                        serde_json::from_value(reply["preset"].clone());
+                    match preset {
+                        Ok(preset) => {
+                            if let Some(model) = &preset.model {
+                                self.run_on(model);
+                            }
+                            if let Some(effort) = preset.effort {
+                                self.shared.effort.set(effort);
+                                self.tell_the_daemon("effort", effort.as_str());
+                            }
+                            self.chat.input.set(&preset.prompt);
+                            self.chat.push("stat", "Preset loaded into the draft. Review settings and press Enter to submit. F8 loads presets while retaining an existing draft.");
+                        }
+                        Err(e) => self.chat.push("err", &e.to_string()),
+                    }
+                }
+                Err(e) => self.chat.push("err", &e.to_string()),
             }
             return;
         }
@@ -4651,6 +4832,7 @@ impl App {
                 Overlay::History => self.history.draw(f, area),
                 Overlay::Mcp => self.mcp.draw(f, area),
                 Overlay::Queue => self.queue.draw(f, area),
+                Overlay::Presets => self.draw_presets(f, area),
                 Overlay::Sessions => self.draw_sessions(f, area),
                 Overlay::Memory => self.draw_memory(f, area),
                 Overlay::Skills => self.draw_skills(f, area),
@@ -8492,5 +8674,48 @@ mod final_reply_tests {
         chat.began();
         chat.final_reply("answer");
         assert_eq!(chat.log.iter().filter(|(kind, _)| *kind == "text").count(), 2);
+    }
+}
+
+#[cfg(test)]
+mod preset_picker_tests {
+    use super::*;
+    #[test]
+    fn loading_from_the_picker_keeps_the_existing_draft_undoable_and_changes_no_permissions() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = rook_core::Config::default();
+        config.agent.install_servers = false;
+        let rook = Arc::new(rook_core::Rook::from_parts(
+            rook_store::Store::open(root.path()).unwrap(),
+            config,
+            rook_skills::Environment::bare("linux", "x86_64", "1"),
+            Default::default(),
+            root.path().into(),
+        ));
+        rook.preset_request(rook_core::presets::Request::Save {
+            name: "review".into(),
+            preset: rook_core::presets::Preset {
+                prompt: "Saved request".into(),
+                model: None,
+                effort: Some(rook_llm::Effort::Low),
+            },
+            expected: None,
+        })
+        .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let mut app = App::new(crate::source::Source::Local(rook), runtime, true);
+        app.chat.input.set("Unsent original draft");
+        let stance = app.shared.policy.stance();
+        app.open_presets();
+        assert!(app.overlay == Some(Overlay::Presets));
+        app.on_overlay_key(
+            Overlay::Presets,
+            crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert_eq!(app.chat.input.text, "Saved request");
+        assert!(!app.chat.busy);
+        assert_eq!(app.shared.policy.stance(), stance);
+        app.chat.input.undo();
+        assert_eq!(app.chat.input.text, "Unsent original draft");
     }
 }

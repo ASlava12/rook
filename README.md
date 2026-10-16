@@ -1760,6 +1760,10 @@ not fetched automatically.
 
 ### Skills
 
+The [October reference follow-up](docs/reference-followup-adoption.md) explains
+source-bound skill updates and bundled resource reads, prompt presets (F8 in the
+TUI), responsive saved-source diffs, browser diagnostics and optional MCP Apps.
+
 ```sh
 rook skills ls                 # what applies here, and what loading each would cost
 rook skills why deploy         # which version was chosen, and why the others were not

@@ -607,6 +607,7 @@
   },
   "mcp_connections": {"kind":"table", "help":"Session-owned MCP connections: startup concurrency, retained declarations and private OAuth credential storage limits."},
   "mcp.*.oauth": {"kind":"table", "help":"OAuth public-client sign-in, issuer selection, native callback and network limits."},
+  "mcp_connections.apps_enabled": {"kind":"boolean", "help":"Enable optional self-contained MCP Apps in the browser. Views are sandboxed; tool requests require explicit one-call consent and remain bound to their session/connection. Default false. Reconnect MCP servers after changing extension negotiation."},
   "mcp_connections.max_servers": {
     "kind": "integer",
     "help": "Maximum configured and plugin MCP servers per session (1..=256; default 32), including disabled entries. Too many declarations fail before any server starts. Restart to apply a changed limit."

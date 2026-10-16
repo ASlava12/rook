@@ -100,6 +100,7 @@ fn descriptors(tools: &ToolBox) -> Vec<ToolDescriptor> {
         .specs()
         .into_iter()
         .map(|spec| ToolDescriptor {
+            meta: serde_json::Value::Null,
             name: spec.name,
             description: spec.description,
             input_schema: spec.parameters,

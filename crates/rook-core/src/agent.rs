@@ -1443,7 +1443,18 @@ impl<'a> AgentLoop<'a> {
             let assembler = assembler?;
             let thinking = assembler.reasoning().to_string();
             if !thinking.is_empty() {
-                self.rook.log(self.session, EventKind::Reasoning, "", &self.vault.redact(&thinking)).ok();
+                self.rook
+                    .log(
+                        self.session,
+                        EventKind::Reasoning,
+                        &history::reasoning_identity(
+                            self.rook,
+                            self.provider.id(),
+                            assembler.dispatch().or(self.provider.dispatch_identity().as_ref()),
+                        ),
+                        &self.vault.redact(&thinking),
+                    )
+                    .ok();
             }
             let dispatch = assembler.dispatch().cloned();
             let route_complete = assembler.completion_confirmed();
@@ -1895,7 +1906,9 @@ impl<'a> AgentLoop<'a> {
                             && e.record.body == recorded_body
                     });
                 let result_seq = recorded.as_ref().map(|event| event.seq);
-                let shown = if call.name == LOAD_SKILL && !failed {
+                let loaded_body =
+                    call.name == LOAD_SKILL && call.arguments.get("resource").is_none() && !failed;
+                let shown = if loaded_body {
                     result
                 } else {
                     match recorded.as_ref() {
@@ -1903,7 +1916,7 @@ impl<'a> AgentLoop<'a> {
                         None => crate::sources::tool_result(&call.name, &result),
                     }
                 };
-                if call.name == LOAD_SKILL && !failed {
+                if loaded_body {
                     let name = outcome.skills_loaded.last().map(String::as_str).unwrap_or(LOAD_SKILL);
                     source_manifest.add_loaded_skill(name, &shown);
                 }

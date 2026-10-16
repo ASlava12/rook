@@ -12,7 +12,7 @@ pub fn summary(review: &Review) -> serde_json::Value {
     serde_json::json!({"id":review.id,"source":review.source,"selection":review.snapshot.selection,
         "state":review.state,"reviewer":review.reviewer,"findings":review.findings,"error":review.error,
         "comments":review.comments,"files":review.snapshot.files.iter().map(|file|
-            serde_json::json!({"path":file.path,"diff_bytes":file.diff.len(),"before_hash":file.before_hash,"after_hash":file.after_hash})).collect::<Vec<_>>()})
+            serde_json::json!({"path":file.path,"diff_bytes":file.diff.len(),"before_hash":file.before_hash,"after_hash":file.after_hash,"binary":file.binary()})).collect::<Vec<_>>()})
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -99,6 +99,12 @@ pub enum Request {
         #[serde(default)]
         offset: usize,
     },
+    Diff {
+        review: String,
+        path: String,
+        #[serde(default)]
+        offset: usize,
+    },
     Comment {
         review: String,
         comment: CommentRequest,
@@ -133,6 +139,16 @@ pub struct File {
     pub before_hash: Option<String>,
     pub after_hash: Option<String>,
 }
+impl File {
+    /// Hashes without retained text identify omitted binary content while keeping
+    /// the stored snapshot shape readable by previous versions.
+    pub fn binary(&self) -> bool {
+        self.before.is_none()
+            && self.after.is_none()
+            && (self.before_hash.is_some() || self.after_hash.is_some())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
     pub selection: Selection,
@@ -340,6 +356,9 @@ fn file_text<'a>(snapshot: &'a Snapshot, path: &str, side: Side) -> Result<&'a s
         .iter()
         .find(|file| file.path == path)
         .ok_or_else(|| bad("file is outside reviewed source"))?;
+    if file.binary() {
+        return Err(bad("binary content is not retained as text; inspect the frozen hash metadata"));
+    }
     match side {
         Side::Before => file.before.as_deref(),
         Side::After => file.after.as_deref(),
@@ -384,6 +403,25 @@ impl Rook {
                 offset,
                 self.config.review.page_bytes,
             )?)?),
+            Request::Diff { review, path, offset } => {
+                let saved = self.review_get(session, &review)?;
+                let file = saved
+                    .snapshot
+                    .files
+                    .iter()
+                    .find(|file| file.path == path)
+                    .ok_or_else(|| bad("file is not part of this saved source"))?;
+                if offset > file.diff.len() || !file.diff.is_char_boundary(offset) {
+                    return Err(bad("invalid diff byte offset"));
+                }
+                let mut end = offset.saturating_add(self.config.review.page_bytes).min(file.diff.len());
+                while !file.diff.is_char_boundary(end) {
+                    end -= 1;
+                }
+                Ok(
+                    serde_json::json!({"review":review,"source":saved.source,"path":path,"offset":offset,"next":(end<file.diff.len()).then_some(end),"diff": &file.diff[offset..end],"files":saved.snapshot.files.iter().map(|file|file.path.as_str()).collect::<Vec<_>>(),"before_hash":file.before_hash,"after_hash":file.after_hash,"binary":file.binary()}),
+                )
+            }
             Request::Comment { review, comment } => {
                 Ok(summary(&self.review_comment(session, &review, comment, vault)?))
             }
@@ -609,17 +647,20 @@ async fn git(rook: &Rook, args: &[&str]) -> Result<String> {
     git_limit(rook, args, 256 * 1024).await
 }
 async fn git_limit(rook: &Rook, args: &[&str], maximum: usize) -> Result<String> {
+    String::from_utf8(git_data(rook, args, maximum).await?)
+        .map_err(|_| bad("review requires UTF-8 file names"))
+}
+async fn git_data(rook: &Rook, args: &[&str], maximum: usize) -> Result<Vec<u8>> {
     let mut safe =
         vec!["--literal-pathspecs", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"];
     safe.extend_from_slice(args);
-    String::from_utf8(crate::worktrees::git_bytes(&rook.workspace, &safe, maximum).await?)
-        .map_err(|_| bad("review requires UTF-8 source files and names"))
+    crate::worktrees::git_bytes(&rook.workspace, &safe, maximum).await
 }
 async fn revision(rook: &Rook, value: &str) -> Result<String> {
     let spec = format!("{value}^{{commit}}");
     Ok(git(rook, &["rev-parse", "--verify", &spec]).await?.trim().into())
 }
-async fn blob(rook: &Rook, revision: Option<&str>, path: &str) -> Result<Option<String>> {
+async fn blob(rook: &Rook, revision: Option<&str>, path: &str) -> Result<Option<Vec<u8>>> {
     let Some(revision) = revision else { return Ok(None) };
     let name = format!("{revision}:{path}");
     let exists = git(rook, &["ls-tree", "-z", revision, "--", path]).await?;
@@ -629,13 +670,10 @@ async fn blob(rook: &Rook, revision: Option<&str>, path: &str) -> Result<Option<
     if !exists.starts_with("100644 ") && !exists.starts_with("100755 ") {
         return Err(bad(format!("review supports regular source files; {path} is a link or submodule")));
     }
-    let text =
-        git_limit(rook, &["show", "--no-ext-diff", "--no-textconv", &name], rook.config.review.file_bytes)
-            .await?;
-    if text.contains('\0') {
-        return Err(bad(format!("{path} is binary or exceeds review.file_bytes; narrow the review")));
-    }
-    Ok(Some(text))
+    Ok(Some(
+        git_data(rook, &["show", "--no-ext-diff", "--no-textconv", &name], rook.config.review.file_bytes)
+            .await?,
+    ))
 }
 async fn capture(rook: &Rook, selection: Selection, vault: &crate::Vault) -> Result<Snapshot> {
     let root = git(rook, &["rev-parse", "--show-toplevel"]).await?;
@@ -740,29 +778,34 @@ async fn capture(rook: &Rook, selection: Selection, vault: &crate::Vault) -> Res
             match rook_contain::files::RecoveryFiles::open(&rook.workspace, std::path::Path::new("."), false)
                 .and_then(|files| files.read(std::path::Path::new(&path), rook.config.review.file_bytes))
             {
-                Ok(bytes) => {
-                    Some(String::from_utf8(bytes).map_err(|_| bad(format!("{path} is not UTF-8 source")))?)
-                }
+                Ok(bytes) => Some(bytes),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
                 Err(error) => {
                     return Err(bad(format!("cannot freeze {path} within review.file_bytes: {error}")));
                 }
             }
         };
-        if after.as_ref().is_some_and(|text| text.contains('\0')) {
-            return Err(bad(format!("{path} is binary")));
-        }
         bytes = bytes
-            .saturating_add(before.as_ref().map_or(0, String::len))
-            .saturating_add(after.as_ref().map_or(0, String::len));
+            .saturating_add(before.as_ref().map_or(0, Vec::len))
+            .saturating_add(after.as_ref().map_or(0, Vec::len));
         if bytes > rook.config.review.snapshot_bytes / 2 {
             return Err(bad("review snapshot source budget reached; select fewer files"));
         }
-        let redact = |text: String| vault.redact_source(&text);
-        let before_hash = before.as_ref().map(|text| identity(text.as_bytes()));
-        let after_hash = after.as_ref().map(|text| identity(text.as_bytes()));
-        let before = before.map(redact);
-        let after = after.map(redact);
+        let binary = before
+            .iter()
+            .chain(after.iter())
+            .any(|bytes| bytes.contains(&0) || std::str::from_utf8(bytes).is_err());
+        let before_hash = before.as_ref().map(|bytes| identity(bytes));
+        let after_hash = after.as_ref().map(|bytes| identity(bytes));
+        let readable = |bytes: Option<Vec<u8>>| {
+            if binary {
+                None
+            } else {
+                bytes.and_then(|bytes| String::from_utf8(bytes).ok()).map(|text| vault.redact_source(&text))
+            }
+        };
+        let before = readable(before);
+        let after = readable(after);
         let text_diff = similar::TextDiff::from_lines(
             before.as_deref().unwrap_or_default(),
             after.as_deref().unwrap_or_default(),
@@ -771,6 +814,15 @@ async fn capture(rook: &Rook, selection: Selection, vault: &crate::Vault) -> Res
         .context_radius(3)
         .header("before", "after")
         .to_string();
+        let text_diff = if binary {
+            format!(
+                "Binary content omitted; hashes retained only. Before: {} · After: {}. Content has not been independently reviewed.\n",
+                before_hash.as_deref().unwrap_or("absent"),
+                after_hash.as_deref().unwrap_or("absent")
+            )
+        } else {
+            text_diff
+        };
         let diff = format!(
             "Git metadata: {}\n{text_diff}",
             metadata.get(&path).map(String::as_str).unwrap_or("untracked regular source file")
@@ -809,7 +861,7 @@ impl rook_tools::Tool for Reader {
                     serde_json::json!({"source":self.source,"files":self.snapshot.files.iter().map(|file|
                     serde_json::json!({"path":file.path,"diff_bytes":file.diff.len(),
                         "before_lines":file.before.as_deref().map(|text|text.lines().count()),
-                        "after_lines":file.after.as_deref().map(|text|text.lines().count())})).collect::<Vec<_>>() }),
+                        "after_lines":file.after.as_deref().map(|text|text.lines().count()),"binary":file.binary()})).collect::<Vec<_>>() }),
                 );
             };
             let offset = args.get("offset").and_then(|value| value.as_u64()).unwrap_or(0);

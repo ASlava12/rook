@@ -11,6 +11,8 @@ import { promptRetry } from './prompt-retry.js';
 import { stopRetry } from './stop-retry.js';
 import { admitDraftFiles, imageFile } from './draft-files.js';
 import { extensionPanel, readExtension } from './extension-ui.js';
+import { appsPanel } from './mcp-apps.js';
+import { presetPanel } from './presets.js';
 import { streamedMarkdown } from './streamed-markdown.js';
 
 // Scrollback, not the record: the session holds every word of this and the
@@ -776,7 +778,8 @@ function renderPicker() {
   if (mcp && mcp.dataset.session !== (state.chat.session || '')) {
     mcp.dataset.session = state.chat.session || '';
     mcp.querySelector('section')?.remove();
-    if (mcp.open) mcp.append(mcpPanel(state.chat.session));
+    mcp.querySelectorAll(':scope > details').forEach(node=>node.remove());
+    if (mcp.open) { mcp.append(mcpPanel(state.chat.session)); if(state.chat.session) mcp.append(appsPanel(state.chat.session,text=>{const input=$("#chat-input");if(input){input.value=input.value?input.value+"\n\n"+text:text;input.dispatchEvent(new Event("input"));}})); }
   }
   const box = $('#picker');
   if (!box) return;
@@ -1053,7 +1056,11 @@ export async function renderChat() {
     say('you', `› ${text}`);
     working();
   } }, input, sendButton, followupButton, retryButton, discardButton,
-  retryStopButton, discardStopButton, stopButton, reconnectButton);
+  retryStopButton, discardStopButton, stopButton, reconnectButton,
+  presetPanel(input,preset=>{
+    if(preset.model) send({type:'setting',name:'model',value:preset.model});
+    if(preset.effort) send({type:'setting',name:'effort',value:preset.effort});
+  }));
   // Naming a file meant knowing the path and typing it, which in a browser
   // means leaving the page to go and look. The ranking is the daemon's, so the
   // page offers the same list the terminal does.
@@ -1097,7 +1104,8 @@ export async function renderChat() {
   });
   mcp.addEventListener('toggle', () => {
     mcp.querySelector('section')?.remove();
-    if (mcp.open) mcp.append(mcpPanel(state.chat.session));
+    mcp.querySelectorAll(':scope > details').forEach(node=>node.remove());
+    if (mcp.open) { mcp.append(mcpPanel(state.chat.session)); if(state.chat.session) mcp.append(appsPanel(state.chat.session,text=>{const input=$("#chat-input");if(input){input.value=input.value?input.value+"\n\n"+text:text;input.dispatchEvent(new Event("input"));}})); }
   });
   const queue = el('details', { id: 'queue-controls' }, el('summary', {}, 'Message queue'));
   queue.addEventListener('toggle', () => {

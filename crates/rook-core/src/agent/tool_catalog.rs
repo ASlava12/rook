@@ -95,10 +95,9 @@ impl<'a> AgentLoop<'a> {
         }
         push(ToolSpec {
             name: DOCS.into(),
-            description: "Read local documentation. Fetch missing technology documentation. \
-                          Consult it before explaining library or protocol behavior; \
-                          results cite source pages."
-                .into(),
+            description:
+                "Read local docs; fetch missing ones. Consult before explaining APIs; results cite pages."
+                    .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -113,20 +112,20 @@ impl<'a> AgentLoop<'a> {
         });
         push(ToolSpec {
             name: LOAD_SKILL.into(),
-            description: "Load a skill by name; unknown names return matching skills.".into(),
+            description: "Load a skill or one of its bundled resources.".into(),
             parameters: json!({
                 "type": "object",
-                "properties": { "name": { "type": "string" } },
+                "properties": { "name": { "type": "string" }, "resource": {"type":"object", "properties":{"path":{"type":"string"}, "identity":{"type":"string"}, "offset":{"type":"integer","minimum":0}, "limit":{"type":"integer","maximum":16384}}, "required":["path","identity"], "additionalProperties":false} },
                 "required": ["name"]
             }),
         });
         push(ToolSpec {
             name: FIND_SKILL.into(),
-            description: "Find or install a skill from configured sources. Search before installing; installation requires write approval.".into(),
+            description: "Search configured skill sources. Install a result with write approval.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string", "description": "words to match against a name or description" },
+                    "query": { "type": "string", "description": "Match name or description" },
                     "install": { "type": "string", "description": "Exact search result name." }
                 }
             }),

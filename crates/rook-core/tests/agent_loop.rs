@@ -5337,7 +5337,10 @@ async fn what_the_model_worked_out_is_carried_back_to_it_shortened() {
     // from what it has in hand.
     let next = ScriptedProvider::new(vec![reply("still here")]);
     let seen = next.share();
-    AgentLoop::new(&f.rook, Arc::new(next), session).run("and now?").await.unwrap();
+    AgentLoop::new(&f.rook, Arc::new(ThinksAtLength(next, String::new())), session)
+        .run("and now?")
+        .await
+        .unwrap();
 
     let replayed: String =
         seen.lock().unwrap().last().cloned().unwrap().messages.iter().map(|m| m.content.clone()).collect();
@@ -10293,4 +10296,85 @@ async fn external_acp_terminals_reach_the_selected_output_bound_and_reject_bad_l
             assert!(terminal["result"]["output"].as_str().unwrap().len() <= 8);
         }
     }
+}
+
+#[tokio::test]
+async fn switching_models_keeps_tool_history_but_excludes_foreign_and_unlabelled_thoughts() {
+    let f = fixture();
+    std::fs::write(f.workspace.path().join("payload.txt"), "ordinary result").unwrap();
+    let session = f.rook.start_session("model switch").unwrap();
+    f.rook.log(session, rook_store::EventKind::Reasoning, "", "UNLABELLED_PRIVATE_WORKING").unwrap();
+    let first = ScriptedProvider::new(vec![
+        call("read_file", serde_json::json!({"path":"payload.txt"})),
+        reply("Original answer"),
+    ]);
+    AgentLoop::new(&f.rook, Arc::new(ThinksAtLength(first, "FOREIGN_MODEL_WORKING".into())), session)
+        .run("Read payload")
+        .await
+        .unwrap();
+    let second = ScriptedProvider::new(vec![reply("New model answer")]);
+    let observed = second.share();
+    AgentLoop::new(&f.rook, Arc::new(second), session).run("Continue with another model").await.unwrap();
+    let request = observed.lock().unwrap()[0].clone();
+    let text = request.messages.iter().map(|m| m.content.as_str()).collect::<String>();
+    assert!(text.contains("ordinary result") && text.contains("Original answer"));
+    assert!(!text.contains("FOREIGN_MODEL_WORKING") && !text.contains("UNLABELLED_PRIVATE_WORKING"));
+    assert!(request.messages.iter().any(|m| !m.tool_calls.is_empty()));
+    assert!(
+        f.rook
+            .transcript(session, 0, 200, 10000)
+            .unwrap()
+            .iter()
+            .any(|entry| entry.body.contains("FOREIGN_MODEL_WORKING")),
+        "the original transcript remains inspectable"
+    );
+}
+
+#[tokio::test]
+async fn bundled_skill_reads_are_data_with_durable_results_instead_of_reloaded_instructions() {
+    let f = fixture();
+    let dir = f.rook.skills().resolve("greeting", f.rook.env()).unwrap().skill.dir.clone();
+    std::fs::write(dir.join("reference.txt"), "RESOURCE_DATA_OBSERVED").unwrap();
+    let identity = f.rook.skill_resources("greeting").unwrap().identity;
+    let session = f.rook.start_session("skill resource").unwrap();
+    let provider = ScriptedProvider::new(vec![
+        call("load_skill", serde_json::json!({"name":"greeting"})),
+        call(
+            "load_skill",
+            serde_json::json!({"name":"greeting","resource":{"path":"reference.txt","identity":identity}}),
+        ),
+        reply("Resource read"),
+    ]);
+    let observed = provider.share();
+    AgentLoop::new(&f.rook, Arc::new(provider), session).run("Read greeting's reference").await.unwrap();
+    {
+        let requests = observed.lock().unwrap();
+        assert!(
+            requests
+                .last()
+                .unwrap()
+                .messages
+                .iter()
+                .any(|message| message.content.contains("RESOURCE_DATA_OBSERVED"))
+        );
+    }
+    let next = ScriptedProvider::new(vec![reply("Continued")]);
+    let requests = next.share();
+    AgentLoop::new(&f.rook, Arc::new(next), session).run("Continue").await.unwrap();
+    assert!(
+        requests.lock().unwrap()[0]
+            .messages
+            .iter()
+            .any(|message| message.content.contains("RESOURCE_DATA_OBSERVED")),
+        "resource result survives process-style replay"
+    );
+    let entries = f.rook.transcript(session, 0, 200, 20000).unwrap();
+    assert_eq!(
+        entries.iter().filter(|entry| entry.kind == "skill").count(),
+        1,
+        "resource data must not create another SkillLoaded instruction event"
+    );
+    assert!(entries.iter().any(|entry| entry.kind == "tool-result"
+        && entry.label == "load_skill"
+        && entry.body.contains("RESOURCE_DATA_OBSERVED")));
 }

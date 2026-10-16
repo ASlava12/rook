@@ -538,3 +538,57 @@ async fn wrapped_and_narrative_reviewer_findings_complete_only_with_valid_retain
         assert_eq!(std::fs::read_to_string(rook.workspace.join("sum.txt")).unwrap(), changed);
     }
 }
+
+#[tokio::test]
+async fn diff_pages_keep_the_frozen_source_identity_after_live_files_change() {
+    let _serial = TESTS.lock().await;
+    let root = tempfile::tempdir().unwrap();
+    let rook = open(root.path(), Config::default());
+    let session = rook.start_session("saved diff").unwrap();
+    let vault = Vault::empty();
+    std::fs::write(rook.workspace.join("sum.txt"), "changed saved line\n").unwrap();
+    let review = rook.review_capture(session, Selection::default(), &vault).await.unwrap();
+    let request =
+        || rook_core::review::Request::Diff { review: review.id.clone(), path: "sum.txt".into(), offset: 0 };
+    let before = rook.review_request(session, request(), &vault).await.unwrap();
+    std::fs::write(rook.workspace.join("sum.txt"), "unrelated newer workspace\n").unwrap();
+    assert_eq!(before, rook.review_request(session, request(), &vault).await.unwrap());
+    assert_eq!(before["source"], review.source);
+    assert!(before["diff"].as_str().unwrap().contains("changed saved line"));
+    let foreign = rook.start_session("foreign").unwrap();
+    assert!(rook.review_request(foreign, request(), &vault).await.is_err());
+}
+
+#[tokio::test]
+async fn binary_changes_keep_original_hashes_without_inventing_text() {
+    let _serial = TESTS.lock().await;
+    let root = tempfile::tempdir().unwrap();
+    let rook = open(root.path(), Config::default());
+    let before = [0u8, 255, 1, 2];
+    std::fs::write(rook.workspace.join("data.bin"), before).unwrap();
+    git(&rook.workspace, &["add", "data.bin"]);
+    git(&rook.workspace, &["commit", "-qm", "binary baseline"]);
+    let after = [0u8, 254, 9];
+    std::fs::write(rook.workspace.join("data.bin"), after).unwrap();
+    let owner = rook.start_session("binary changes").unwrap();
+    let captured = rook
+        .review_capture(
+            owner,
+            Selection { paths: vec!["data.bin".into()], ..Default::default() },
+            &Vault::empty(),
+        )
+        .await
+        .unwrap();
+    let file = &captured.snapshot.files[0];
+    assert!(file.binary());
+    assert!(file.before.is_none() && file.after.is_none());
+    use sha2::Digest;
+    assert_eq!(file.before_hash.as_deref(), Some(hex::encode(sha2::Sha256::digest(before)).as_str()));
+    assert_eq!(file.after_hash.as_deref(), Some(hex::encode(sha2::Sha256::digest(after)).as_str()));
+    assert!(
+        file.diff.contains("Binary content omitted") && file.diff.contains("not been independently reviewed")
+    );
+    assert!(rook.review_source(owner, &captured.id, "data.bin", Side::After, 0, 1024).is_err());
+    let result = rook.review_get(owner, &captured.id).unwrap();
+    assert!(result.snapshot.files[0].binary());
+}

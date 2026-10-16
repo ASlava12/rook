@@ -114,6 +114,8 @@ pub type Result<T> = std::result::Result<T, McpError>;
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ServerConfig {
+    #[serde(skip)]
+    pub apps: bool,
     pub name: String,
     /// A subprocess to speak to over its pipes.
     pub command: String,
@@ -144,6 +146,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             name: String::new(),
+            apps: false,
             command: String::new(),
             args: Vec::new(),
             env: HashMap::new(),
@@ -249,12 +252,14 @@ impl Server {
     async fn handshake(transport: &dyn Transport, config: &ServerConfig) -> Result<ServerInfo> {
         let timeout = Duration::from_secs(config.startup_timeout_secs);
         tokio::time::timeout(timeout, async {
+            let mut capabilities = serde_json::json!({ "tools": {}, "elicitation":{"form":{},"url":{}} });
+            if config.apps { capabilities["extensions"] = serde_json::json!({"io.modelcontextprotocol/ui":{"mimeTypes":["text/html;profile=mcp-app"]}}); }
             let message = transport
                 .request(
                     "initialize",
                     Some(serde_json::json!({
                         "protocolVersion": protocol::PROTOCOL_VERSION,
-                        "capabilities": { "tools": {}, "elicitation":{"form":{},"url":{}} },
+                        "capabilities": capabilities,
                         "clientInfo": { "name": "rook", "version": env!("CARGO_PKG_VERSION") },
                     })),
                     Duration::from_secs(config.startup_timeout_secs),

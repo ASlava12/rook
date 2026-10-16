@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    /// Advertise and host optional sandboxed MCP Apps.
+    pub apps_enabled: bool,
     pub max_servers: usize,
     pub parallel_connects: usize,
     pub oauth_max_entries: usize,
@@ -19,6 +21,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            apps_enabled: false,
             max_servers: 32,
             parallel_connects: 4,
             oauth_max_entries: 64,
@@ -109,6 +112,7 @@ pub struct Status {
 
 #[derive(Default)]
 pub struct McpSession {
+    pub(crate) apps: crate::mcp_apps::Pool,
     state: RwLock<State>,
     operation: tokio::sync::Mutex<()>,
     limits: Settings,
@@ -145,7 +149,7 @@ impl McpSession {
                 .await;
             }
         }
-        Self { state: RwLock::new(state), operation: Default::default(), limits }
+        Self { state: RwLock::new(state), operation: Default::default(), apps: Default::default(), limits }
     }
 
     /// A fixed snapshot for one turn: swapping the manager cannot move an
@@ -356,6 +360,9 @@ async fn candidate(
     proxy: &rook_llm::Proxy,
     limits: Settings,
 ) -> Result<Connection, &'static str> {
+    let mut declared = config.clone();
+    declared.apps = limits.apps_enabled;
+    let config = &declared;
     let token = crate::mcp_auth::credentials(config, proxy, limits)?;
     let server = Arc::new(
         match token {

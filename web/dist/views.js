@@ -367,6 +367,18 @@ export async function renderSkills() {
       const full = await api(`/api/skills/${encodeURIComponent(state.skill)}`);
       right.append(el('h2', { style: 'margin-top:1rem' }, full.variant ? `body — variant ${full.variant}` : 'body'));
       right.append(el('pre', { class: 'body' }, full.body));
+      const skillName=state.skill;
+      const resources=await api(`/api/skills/${encodeURIComponent(skillName)}/resources`);
+      const page=el('div');
+      const read=async(path,offset=0)=>{
+        try {
+          const reply=await api(`/api/skills/${encodeURIComponent(skillName)}/resource`,{path,offset,identity:resources.identity});
+          if(!right.isConnected || state.skill!==skillName) return;
+          page.replaceChildren(el('p',{class:'sub'},`${path} · byte ${reply.offset} · ${reply.identity}`),el('pre',{},reply.text),reply.next!==null?el('button',{onclick:()=>read(path,reply.next)},'Next page'):null);
+        }catch(error){page.replaceChildren(el('p',{class:'warn'},error.error||String(error)));}
+      };
+      right.append(el('details',{},el('summary',{},'Bundled resources'),resources.files.map(path=>el('button',{onclick:()=>read(path)},path)),page));
+
     } catch { /* the card is still worth showing */ }
   }
   $('#view').replaceChildren(el('div', { class: 'grid' },

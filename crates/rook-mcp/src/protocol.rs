@@ -70,6 +70,8 @@ pub struct Implementation {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ToolDescriptor {
+    #[serde(default, rename = "_meta", skip_serializing_if = "serde_json::Value::is_null")]
+    pub meta: serde_json::Value,
     pub name: String,
     #[serde(default)]
     pub description: String,

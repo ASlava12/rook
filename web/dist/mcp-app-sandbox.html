@@ -1,0 +1,25 @@
+<!doctype html><html><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<style>html,body,iframe{margin:0;border:0;width:100%;height:100%;background:transparent}</style></head><body><script>
+// The outer opaque-origin frame constrains inner-frame navigation as well as
+// subresources. The application cannot reach this document or the host DOM.
+let child=null;
+window.addEventListener('message',event=>{
+ if(event.source===parent){
+  const value=event.data;
+  if(value?.method==='ui/notifications/sandbox-resource-ready'){
+   if(child || typeof value.params?.html!=='string' || value.params.html.length>262144)return;
+   child=document.createElement('iframe');child.setAttribute('sandbox','allow-scripts');
+   child.setAttribute('allow',"camera 'none'; microphone 'none'; geolocation 'none'; clipboard-write 'none'");
+   child.setAttribute('referrerpolicy','no-referrer');
+   const policy="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; worker-src 'none'";
+   child.srcdoc='<meta http-equiv="Content-Security-Policy" content="'+policy+'">'+value.params.html;
+   document.body.append(child);
+  }else if(child)child.contentWindow.postMessage(value,'*');
+ }else if(child && event.source===child.contentWindow && event.origin==='null'){
+  if(event.data?.method==='ui/notifications/sandbox-proxy-ready'||event.data?.method==='ui/notifications/sandbox-resource-ready')return;
+  parent.postMessage(event.data,'*');
+ }
+});
+parent.postMessage({jsonrpc:'2.0',method:'ui/notifications/sandbox-proxy-ready',params:{}},'*');
+</script></body></html>

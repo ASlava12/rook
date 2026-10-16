@@ -442,6 +442,20 @@ impl<'a> AgentLoop<'a> {
 
         if call.name == LOAD_SKILL {
             let name = call.arguments.get("name").and_then(|v| v.as_str()).unwrap_or_default();
+            if let Some(resource) = call.arguments.get("resource") {
+                let file = resource.get("path").and_then(|v| v.as_str()).unwrap_or_default();
+                let identity = resource.get("identity").and_then(|v| v.as_str()).unwrap_or_default();
+                let offset = resource.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let limit = resource.get("limit").and_then(|v| v.as_u64()).unwrap_or(8000) as usize;
+                let (text, failed) = match self.rook.read_skill_resource(name, identity, file, offset, limit)
+                {
+                    Ok(page) => (serde_json::to_string(&page).unwrap_or_default(), false),
+                    Err(error) => (error.to_string(), true),
+                };
+                let text = self.vault.redact(&text);
+                self.rook.log(self.session, EventKind::ToolResult, LOAD_SKILL, &text).ok();
+                return (text, failed);
+            }
             return match self.rook.skills().resolve(name, self.rook.env()) {
                 Ok(resolved) => {
                     outcome.skills_loaded.push(resolved.skill.id());

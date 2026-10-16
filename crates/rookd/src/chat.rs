@@ -1514,6 +1514,9 @@ fn fan_out(
 const BROADCAST: usize = 4_096;
 
 impl Live {
+    pub(crate) fn app_policy(&self) -> Arc<rook_tools::policy::Policy> {
+        self.settings.policy.clone()
+    }
     pub(crate) fn activity(&self) -> Option<rook_proto::activity::Snapshot> {
         self.activity.as_ref().map(|activity| activity.snapshot(self.running()))
     }

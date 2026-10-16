@@ -21,6 +21,9 @@ const ACTIONS: &[(&str, &str)] = &[
     ("type", "browser_type"),
     ("wait", "browser_wait_for"),
     ("screenshot", "browser_take_screenshot"),
+    ("console", "browser_console_messages"),
+    ("requests", "browser_network_requests"),
+    ("resize", "browser_resize"),
 ];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -199,7 +202,12 @@ fn remote(action: &str) -> Option<&'static str> {
 fn arguments(args: &Value) -> Result<(&str, Value), &'static str> {
     let object = args.as_object().ok_or("browser expects an object")?;
     if object.len() > 5
-        || object.keys().any(|k| !matches!(k.as_str(), "action" | "url" | "ref" | "text" | "seconds"))
+        || object.keys().any(|k| {
+            !matches!(
+                k.as_str(),
+                "action" | "url" | "ref" | "text" | "seconds" | "width" | "height" | "level"
+            )
+        })
     {
         return Err("browser arguments: action, url, ref, text or seconds only");
     }
@@ -209,7 +217,9 @@ fn arguments(args: &Value) -> Result<(&str, Value), &'static str> {
         "click" => &["action", "ref"],
         "type" => &["action", "ref", "text"],
         "wait" => &["action", "text", "seconds"],
-        "snapshot" | "screenshot" | "status" | "close" => &["action"],
+        "snapshot" | "screenshot" | "status" | "close" | "requests" => &["action"],
+        "console" => &["action", "level"],
+        "resize" => &["action", "width", "height"],
         _ => return Err("unknown browser action"),
     };
     if object.keys().any(|k| !allowed.contains(&k.as_str())) {
@@ -268,6 +278,23 @@ fn arguments(args: &Value) -> Result<(&str, Value), &'static str> {
             }
             _ => return Err("wait needs either text or seconds"),
         },
+        "console" => {
+            let level = args.get("level").and_then(Value::as_str).unwrap_or("error");
+            if !matches!(level, "error" | "warning" | "info" | "debug") {
+                return Err("console level must be error, warning, info or debug");
+            }
+            json!({"level":level})
+        }
+        "requests" => json!({"includeStatic":false}),
+        "resize" => {
+            let size = |key| {
+                args.get(key)
+                    .and_then(Value::as_u64)
+                    .filter(|n| (240..=3840).contains(n))
+                    .ok_or("viewport dimensions must be integers in 240..=3840")
+            };
+            json!({"width":size("width")?,"height":size("height")?})
+        }
         "screenshot" => json!({"type":"png","fullPage":false}),
         _ => json!({}),
     };
@@ -323,7 +350,7 @@ async fn connect(settings: &Settings) -> Result<Arc<Connected>, String> {
         _directory: directory,
     });
     let tools = connected.server.list_tools().await.map_err(|e| e.to_string())?;
-    if ACTIONS.iter().any(|(_, name)| !tools.iter().any(|tool| tool.name == *name)) {
+    if ACTIONS.iter().take(6).any(|(_, name)| !tools.iter().any(|tool| tool.name == *name)) {
         return Err(
             "configured browser server lacks required Playwright tools; check pinned package and arguments"
                 .into(),
@@ -363,6 +390,31 @@ fn namespaced(text: &str, prefix: &str, budget: usize) -> (String, usize) {
     (output, total)
 }
 
+// Diagnostic endpoints expose URLs, never request bodies/headers. Remove all
+// query/user-info fragments, since they need not be known to the vault yet.
+fn diagnostic_text(text: &str) -> String {
+    let Ok(urls) = regex::Regex::new(r#"https?://[^\s<>\"']+"#) else {
+        return "browser diagnostics unavailable".into();
+    };
+    let clean = match regex::Regex::new(
+        r"(?im)(authorization|proxy-authorization|cookie|set-cookie|x-api-key)[ \t]*[:=][^\r\n]*",
+    ) {
+        Ok(headers) => headers.replace_all(text, "$1: [redacted]").into_owned(),
+        Err(_) => return "browser diagnostics unavailable".into(),
+    };
+    urls.replace_all(&clean, |matched: &regex::Captures<'_>| match reqwest::Url::parse(&matched[0]) {
+        Ok(mut url) => {
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.set_query(None);
+            url.set_fragment(None);
+            url.to_string()
+        }
+        Err(_) => "[redacted URL]".into(),
+    })
+    .into_owned()
+}
+
 #[async_trait]
 impl Tool for Browser {
     fn name(&self) -> &str {
@@ -370,10 +422,11 @@ impl Tool for Browser {
     }
     fn spec(&self) -> rook_llm::ToolSpec {
         rook_llm::ToolSpec {
-            name: TOOL.into(), description: "Control this session's isolated browser. Navigate, then snapshot for page text and exact click/type refs; navigation may return only an artifact link. Close after an uncertain call; effects are never retried automatically.".into(),
+            name: TOOL.into(), description: "Control the session browser: navigate, snapshot, click/type, screenshot, console, requests and resize. Use snapshot refs. Close after uncertain effects.".into(),
             parameters: json!({"type":"object","properties":{
-                "action":{"type":"string","enum":["navigate","snapshot","click","type","wait","screenshot","status","close"]},
+                "action":{"type":"string","enum":["navigate","snapshot","click","type","wait","screenshot","status","close","console","requests","resize"]},
                 "url":{"type":"string","maxLength":4096}, "ref":{"type":"string","maxLength":80},
+                "width":{"type":"integer","minimum":240,"maximum":3840}, "height":{"type":"integer","minimum":240,"maximum":3840}, "level":{"type":"string","enum":["error","warning","info","debug"]},
                 "text":{"type":"string","maxLength":16384}, "seconds":{"type":"integer","minimum":1,"maximum":30}
             },"required":["action"],"additionalProperties":false}),
         }
@@ -515,7 +568,12 @@ impl Tool for Browser {
             .with("browser_session", rook_store::format_session_id(self.session))
             .with("browser_action", action)
             .with("browser_generation", rook_store::format_session_id(slot.generation));
-        let (content, total) = namespaced(&outcome.content, &prefix, ctx.max_output_bytes);
+        let observed = if matches!(action, "console" | "requests") {
+            diagnostic_text(&outcome.content)
+        } else {
+            outcome.content.clone()
+        };
+        let (content, total) = namespaced(&observed, &prefix, ctx.max_output_bytes);
         outcome.content = content;
         outcome.full_bytes = outcome.full_bytes.max(total);
         outcome.truncated |= total > ctx.max_output_bytes;
@@ -921,6 +979,107 @@ mod tests {
             .await
             .expect("owned detached Chromium must close after cancellation or engine drop");
         }
+        app.abort();
+        let _ = app.await;
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    #[test]
+    fn diagnostics_remove_unknown_url_credentials_queries_and_sensitive_headers() {
+        let input = "https://user:secret@example.org/path?token=unknown#fragment\nAuthorization: Bearer not-in-vault\nCookie: session=hidden\nordinary observation";
+        let safe = super::diagnostic_text(input);
+        assert!(safe.contains("https://example.org/path") && safe.contains("ordinary observation"));
+        for secret in ["user:secret", "token=unknown", "fragment", "not-in-vault", "session=hidden"] {
+            assert!(!safe.contains(secret), "{safe}");
+        }
+    }
+    #[test]
+    fn viewport_and_observation_arguments_are_admitted_before_driver_startup() {
+        for request in [
+            serde_json::json!({"action":"resize","width":0,"height":720}),
+            serde_json::json!({"action":"resize","width":4000,"height":720}),
+            serde_json::json!({"action":"console","level":"everything"}),
+        ] {
+            assert!(super::arguments(&request).is_err());
+        }
+        assert_eq!(
+            super::arguments(&serde_json::json!({"action":"resize","width":375,"height":812})).unwrap().1,
+            serde_json::json!({"width":375,"height":812})
+        );
+        assert_eq!(
+            super::arguments(&serde_json::json!({"action":"requests"})).unwrap().1,
+            serde_json::json!({"includeStatic":false})
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod native_diagnostic_tests {
+    use super::*;
+    #[tokio::test]
+    #[ignore = "requires pinned Playwright MCP and installed Chromium; run explicitly"]
+    async fn actual_browser_diagnostics_and_viewports_remain_bounded_and_source_scoped() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                let count = stream.read(&mut request).await.unwrap_or(0);
+                let missing = String::from_utf8_lossy(&request[..count]).contains("/missing");
+                let body = if missing {
+                    "missing"
+                } else {
+                    r#"<!doctype html><h1 id="size"></h1><script>function size(){document.querySelector('#size').textContent=innerWidth+'x'+innerHeight;}onresize=size;size();console.error('OWNED_BROWSER_ERROR');fetch('/missing?token=not-in-vault');</script>"#
+                };
+                let response = format!(
+                    "HTTP/1.1 {}\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    if missing { "404 Not Found" } else { "200 OK" },
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+        let root = tempfile::tempdir().unwrap();
+        let mut settings = Settings { enabled: true, startup_timeout_secs: 120, ..Default::default() };
+        if let Ok(path) = std::env::var("ROOK_BROWSER_MCP_CLI") {
+            settings.command = "node".into();
+            settings.args = vec![path];
+        }
+        let browser = Browser { pool: Arc::new(Pool::default()), settings, session: 99 };
+        let mut context = ToolContext::new(root.path().into());
+        context.max_output_bytes = 8192;
+        for args in [
+            json!({"action":"navigate","url":format!("http://{address}/")}),
+            json!({"action":"resize","width":375,"height":812}),
+        ] {
+            let result = browser.call(&context, &args).await.unwrap();
+            assert!(!result.is_error, "{}", result.content);
+        }
+        // Resize completion does not wait for the page's resize handler.
+        let ready = browser.call(&context, &json!({"action":"wait","text":"375x812"})).await.unwrap();
+        assert!(!ready.is_error, "{}", ready.content);
+        let snapshot = browser.call(&context, &json!({"action":"snapshot"})).await.unwrap();
+        assert!(snapshot.content.contains("375x812"), "{}", snapshot.content);
+        let console = browser.call(&context, &json!({"action":"console","level":"error"})).await.unwrap();
+        assert!(!console.is_error && console.content.contains("OWNED_BROWSER_ERROR"), "{}", console.content);
+        let network = browser.call(&context, &json!({"action":"requests"})).await.unwrap();
+        assert!(!network.is_error && network.content.contains("/missing"), "{}", network.content);
+        assert!(!network.content.contains("not-in-vault"));
+        assert!(network.content.len() <= 8192);
+        let result =
+            browser.call(&context, &json!({"action":"resize","width":1280,"height":720})).await.unwrap();
+        assert!(!result.is_error, "{}", result.content);
+        let ready = browser.call(&context, &json!({"action":"wait","text":"1280x720"})).await.unwrap();
+        assert!(!ready.is_error, "{}", ready.content);
+        assert!(
+            browser.call(&context, &json!({"action":"snapshot"})).await.unwrap().content.contains("1280x720")
+        );
+        assert!(!browser.call(&context, &json!({"action":"close"})).await.unwrap().is_error);
         app.abort();
         let _ = app.await;
     }

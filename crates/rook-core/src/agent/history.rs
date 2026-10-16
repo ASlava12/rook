@@ -50,6 +50,19 @@ pub(super) fn with_thinking(thought: Option<String>, said: &str) -> String {
     }
 }
 
+pub(super) fn reasoning_identity(
+    rook: &crate::Rook,
+    selected: &str,
+    dispatch: Option<&rook_llm::Dispatch>,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let vault = crate::Vault::empty();
+    let scope =
+        crate::models::catalog_scope(&rook.config, &vault, selected).unwrap_or_else(|_| selected.into());
+    let bytes = serde_json::to_vec(&(scope, dispatch.map(|d| (&d.provider, &d.model)))).unwrap_or_default();
+    format!("rook:reasoning:v1:{}", hex::encode(Sha256::digest(bytes)))
+}
+
 fn close_open_call(messages: &mut Vec<Message>, open: &mut Option<String>) {
     if let Some(id) = open.take() {
         messages.push(Message::tool_result(id, "no result was recorded: the turn did not finish"));
@@ -77,28 +90,51 @@ impl<'a> AgentLoop<'a> {
     /// except when the process died between the two, and then the pairing has
     /// to be completed here or the session can never be resumed.
     pub(super) fn history(&self) -> Result<Vec<Message>> {
-        replay(self.rook, self.session)
+        replay_inner(
+            self.rook,
+            self.session,
+            None,
+            self.provider.id(),
+            self.provider.dispatch_identity().as_ref(),
+        )
     }
 
     pub(super) fn history_with_sources(
         &self,
         sources: &mut crate::context::SourceManifest,
     ) -> Result<Vec<Message>> {
-        replay_inner(self.rook, self.session, Some(sources))
+        replay_inner(
+            self.rook,
+            self.session,
+            Some(sources),
+            self.provider.id(),
+            self.provider.dispatch_identity().as_ref(),
+        )
     }
 }
 
 /// The same replay feeds requests and context reports, including provider state,
 /// interrupted calls and image/result pruning.
 pub(crate) fn replay(rook: &crate::Rook, session: u128) -> Result<Vec<Message>> {
-    replay_inner(rook, session, None)
+    // Context inspection must not run credential helpers or construct a live provider.
+    let selected = &rook.config.agent.model;
+    let model = rook.config.models.get(selected).map(|source| source.model.clone()).or_else(|| {
+        rook_llm::catalog_endpoint_from_spec(selected, rook.config.agent.context_window)
+            .ok()
+            .map(|endpoint| endpoint.model)
+    });
+    let dispatch = model.as_ref().and_then(|model| rook_llm::Dispatch::bounded(selected, model, false));
+    replay_inner(rook, session, None, selected, dispatch.as_ref())
 }
 
 fn replay_inner(
     rook: &crate::Rook,
     session: u128,
     mut sources: Option<&mut crate::context::SourceManifest>,
+    selected: &str,
+    dispatch: Option<&rook_llm::Dispatch>,
 ) -> Result<Vec<Message>> {
+    let identity = reasoning_identity(rook, selected, dispatch);
     let (from_seq, summary) = rook.last_compaction(session)?;
     let events = rook.store.events(session, from_seq, usize::MAX)?;
     let mut messages = Vec::with_capacity(events.len() + 1);
@@ -254,8 +290,12 @@ fn replay_inner(
                 })
             }
             EventKind::Reasoning => {
-                let kept = crate::context::shorten_thinking(&body, thinking_budget);
-                thought = (!kept.is_empty()).then_some(kept);
+                thought = if event.record.label == identity {
+                    let kept = crate::context::shorten_thinking(&body, thinking_budget);
+                    (!kept.is_empty()).then_some(kept)
+                } else {
+                    None
+                };
             }
             EventKind::AssistantMessage => {
                 close_open_call(&mut messages, &mut open_call);

@@ -76,6 +76,7 @@ async fn server(name: &str) -> (Arc<Server>, Arc<Mutex<Vec<Value>>>, tokio::task
 }
 fn descriptor(name: &str, description: &str) -> ToolDescriptor {
     ToolDescriptor {
+        meta: serde_json::Value::Null,
         name: name.into(),
         description: description.into(),
         input_schema: json!({"type":"object","properties":{"items":{"type":"array","items":{"type":"object","properties":{"mode":{"type":"string","enum":["read","write"]}},"required":["mode"],"additionalProperties":false}}},"required":["items"],"additionalProperties":false}),

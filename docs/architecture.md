@@ -20,6 +20,12 @@ Public operator price references and their frontend/identity contract are in
 
 [English](architecture.md) · [Русский](ru/architecture.md)
 
+The [October 16 reference follow-up](reference-followup-adoption.md) documents
+source-bound skill updates/resource reads, scoped reasoning replay, auxiliary
+summary budgeting, presets, frozen diff layouts, browser diagnostics and optional
+MCP Apps. App HTML and approvals remain separate from model-owned instructions;
+store additions use existing labels or bounded JSON companions.
+
 ## Extension reports
 
 Explicitly enabled `hooks[].ui` replies can declare bounded status, progress,

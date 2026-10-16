@@ -358,13 +358,18 @@ impl<'a> AgentLoop<'a> {
         // a model that had just written a skill and loaded it back decided it
         // had been handed "the environment's built-in default" and went looking
         // for somewhere else to write.
-        let body = format!(
+        let mut body = format!(
             "skill {} ({}):\n{}{}",
             resolved.skill.id(),
             resolved.skill.source.label(),
             resolved.body,
             bundled(&resolved.skill)
         );
+        if let Ok(resources) = self.rook.skill_resources(&resolved.skill.manifest.name)
+            && resources.files.iter().any(|file| file != "SKILL.md")
+        {
+            body.push_str(&format!("\nresource_identity: {}\nRead bundled text with load_skill(name, resource: {{path, identity: resource_identity, offset, limit}}).", resources.identity));
+        }
         crate::sources::instructions(
             "skill",
             &skill_path(resolved),

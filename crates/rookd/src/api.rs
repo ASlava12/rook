@@ -32,6 +32,8 @@ static REVIEW_OPS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
 static WORKTREE_RECOVERIES: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
+static SKILL_RESOURCE_OPS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(4)));
 static PRIVATE_INPUT_OPS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(4)));
 
@@ -42,6 +44,7 @@ pub fn router(state: Shared) -> Router {
         .merge(crate::inbound::routes())
         .merge(crate::telegram::routes())
         .route("/api/health", get(health))
+        .route("/api/presets", post(preset_request).layer(axum::extract::DefaultBodyLimit::max(65536)))
         .route("/api/store/stats", get(stats))
         .route("/api/store/objects", get(objects))
         .route("/api/store/objects/{id}", get(object))
@@ -122,8 +125,17 @@ pub fn router(state: Shared) -> Router {
         .route("/api/docs/{topic}", get(docs))
         .merge(mcp_oauth::routes())
         .route("/api/mcp", get(mcp_status))
+        .route(
+            "/api/sessions/{id}/mcp-apps",
+            post(mcp_app_request).layer(axum::extract::DefaultBodyLimit::max(65536)),
+        )
         .route("/api/mcp/{name}/reconnect", post(mcp_reconnect))
         .route("/api/skills", get(skills))
+        .route("/api/skills/{name}/resources", get(skill_resources))
+        .route(
+            "/api/skills/{name}/resource",
+            post(skill_resource).layer(axum::extract::DefaultBodyLimit::max(8192)),
+        )
         .route("/api/skills/{name}", get(skill))
         .route("/api/skills/{name}/history", get(skill_history))
         .route("/api/skills/{name}/why", get(skill_why))
@@ -1535,15 +1547,17 @@ async fn skill_history(
 #[derive(Deserialize)]
 struct Named {
     name: String,
+    source: Option<String>,
 }
 
 /// Fetching a source and unpacking it is not something to hold a runtime
 /// worker for, and neither is walking a skill's files into the store.
 async fn install_skill(State(s): State<Shared>, Json(body): Json<Named>) -> ApiResult<serde_json::Value> {
     let rook = s.rook.clone().read_owned().await;
-    let path = tokio::task::spawn_blocking(move || rook.install_skill(&body.name))
-        .await
-        .map_err(|e| Fail(StatusCode::INTERNAL_SERVER_ERROR, ApiError::new("panic", e.to_string())))??;
+    let path =
+        tokio::task::spawn_blocking(move || rook.install_skill_from(&body.name, body.source.as_deref()))
+            .await
+            .map_err(|e| Fail(StatusCode::INTERNAL_SERVER_ERROR, ApiError::new("panic", e.to_string())))??;
     Ok(Json(serde_json::json!({ "path": path })))
 }
 
@@ -3731,4 +3745,90 @@ mod tests {
         assert!(f.state.engine_for(Some(dirs[3].path())).await.is_ok());
         drop((second, third));
     }
+}
+
+async fn preset_request(
+    State(s): State<Shared>,
+    Json(request): Json<rook_core::presets::Request>,
+) -> ApiResult<serde_json::Value> {
+    Ok(Json(s.rook.read().await.preset_request(request)?))
+}
+
+async fn skill_resources(
+    State(s): State<Shared>,
+    Path(name): Path<String>,
+    Query(q): Query<WorkspaceQuery>,
+) -> ApiResult<rook_core::skill_resources::Catalog> {
+    let permit = SKILL_RESOURCE_OPS.clone().try_acquire_owned().map_err(|_| {
+        Fail(
+            StatusCode::TOO_MANY_REQUESTS,
+            ApiError::new("busy", "Skill resource reads are busy; retry after a read finishes."),
+        )
+    })?;
+    let engine = s.engine_for(q.workspace.as_deref()).await.map_err(CoreError::Other)?;
+    let rook = engine.read_owned().await;
+    let catalog = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        rook.skill_resources(&name)
+    })
+    .await
+    .map_err(|error| CoreError::Other(error.to_string()))??;
+    Ok(Json(catalog))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SkillResource {
+    path: String,
+    #[serde(default)]
+    offset: usize,
+    identity: Option<String>,
+}
+async fn skill_resource(
+    State(s): State<Shared>,
+    Path(name): Path<String>,
+    Query(q): Query<WorkspaceQuery>,
+    Json(body): Json<SkillResource>,
+) -> ApiResult<rook_core::skill_resources::Page> {
+    let permit = SKILL_RESOURCE_OPS.clone().try_acquire_owned().map_err(|_| {
+        Fail(
+            StatusCode::TOO_MANY_REQUESTS,
+            ApiError::new("busy", "Skill resource reads are busy; retry after a read finishes."),
+        )
+    })?;
+    let engine = s.engine_for(q.workspace.as_deref()).await.map_err(CoreError::Other)?;
+    let rook = engine.read_owned().await;
+    let page = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let catalog = rook.skill_resources(&name)?;
+        rook.read_skill_resource(
+            &name,
+            body.identity.as_deref().unwrap_or(&catalog.identity),
+            &body.path,
+            body.offset,
+            8000,
+        )
+    })
+    .await
+    .map_err(|error| CoreError::Other(error.to_string()))??;
+    Ok(Json(page))
+}
+
+async fn mcp_app_request(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Json(request): Json<rook_core::mcp_apps::Request>,
+) -> ApiResult<serde_json::Value> {
+    let owner = session_id(&id)?;
+    let (manager, workspace) = mcp_session(&s, &McpQuery { session: Some(id), workspace: None }).await?;
+    let engine = s.engine_for(Some(&workspace)).await.map_err(CoreError::Other)?;
+    let rook = engine.read_owned().await;
+    let policy = s
+        .live
+        .read()
+        .await
+        .get(&owner)
+        .map(|live| live.app_policy())
+        .unwrap_or_else(|| rook_core::agent::policy_for(&rook.config));
+    let vault = rook_core::Vault::load().unwrap_or_else(|_| rook_core::Vault::empty());
+    Ok(Json(rook.mcp_app_request(owner, &manager, &policy, &vault, request).await?))
 }

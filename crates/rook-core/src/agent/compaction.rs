@@ -68,6 +68,52 @@ pub(super) fn render_span(entries: &[crate::TranscriptEntry], budget_tokens: usi
     lines.join("\n\n")
 }
 
+fn summary_request(mut material: String, window: usize) -> Result<Request> {
+    if window < 512 {
+        return Err(CoreError::Other(
+            "compaction model context is too small; configure a larger summarizer".into(),
+        ));
+    }
+    let mut request = Request::new(vec![
+        Message::system(format!("{SUMMARY_INSTRUCTIONS}\n{}", crate::sources::POLICY)),
+        Message::user(crate::sources::data("transcript", "session compaction input", "")),
+    ]);
+    let base_cost = super::budget::measure(&request.messages);
+    let usable = window.saturating_mul(9) / 10;
+    let output_room = usable.saturating_sub(base_cost.saturating_add(128));
+    if output_room < 128 {
+        return Err(CoreError::Other(
+            "compaction instructions leave no usable summary space; select a larger model".into(),
+        ));
+    }
+    request.max_output_tokens = output_room.min(2048) as u32;
+    let input_limit = usable.saturating_sub(request.max_output_tokens as usize);
+    loop {
+        request.messages = vec![
+            Message::system(format!("{SUMMARY_INSTRUCTIONS}\n{}", crate::sources::POLICY)),
+            Message::user(crate::sources::data("transcript", "session compaction input", &material)),
+        ];
+        let used = super::budget::measure(&request.messages);
+        if used <= input_limit {
+            return Ok(request);
+        }
+        if material.len() < 32 {
+            return Err(CoreError::Other(
+                "compaction instructions do not fit the summarizer window; select a larger model".into(),
+            ));
+        }
+        // Retain both the carried goal and recent work. The original journal is
+        // unchanged, and the explicit marker prevents claiming full coverage.
+        let shorter = rook_tools::elide_middle(&material, material.len() * 3 / 4);
+        if shorter.len() >= material.len() {
+            return Err(CoreError::Other(
+                "compaction wrappers do not fit the summarizer window; choose a larger model".into(),
+            ));
+        }
+        material = shorter;
+    }
+}
+
 impl<'a> AgentLoop<'a> {
     /// Replace the earlier part of the session with a summary of it.
     ///
@@ -108,10 +154,16 @@ impl<'a> AgentLoop<'a> {
         // Only what the model was actually shown. The log also holds checkpoint
         // manifests, asides and errors, and summarising those spends the budget
         // on bookkeeping and hands back a summary of things it never saw.
+        let reasoning_identity = super::history::reasoning_identity(
+            self.rook,
+            self.provider.id(),
+            self.provider.dispatch_identity().as_ref(),
+        );
         let entries: Vec<_> = self
             .rook
             .transcript(self.session, from_seq, usize::MAX, 8_000)?
             .into_iter()
+            .filter(|entry| entry.kind != "reasoning" || entry.label == reasoning_identity)
             .filter(|e| {
                 rook_store::EventKind::named(&e.kind)
                     .is_some_and(|kind| crate::context::record_reaches_the_model(kind, &e.label))
@@ -337,16 +389,14 @@ impl<'a> AgentLoop<'a> {
     }
 
     async fn ask_for_summary(&self, material: String) -> Result<String> {
-        let mut request = Request::new(vec![
-            Message::system(format!("{SUMMARY_INSTRUCTIONS}\n{}", crate::sources::POLICY)),
-            Message::user(crate::sources::data("transcript", "session compaction input", &material)),
-        ]);
+        let asked = self.summariser();
+        let request_window = asked.context_window();
+        let mut request = summary_request(material, request_window)?;
         // The same reason a sub-agent runs low: condensing a transcript is
         // mechanical, and a turn configured to think hard would otherwise spend
         // that thinking on writing its own summary.
         request.effort = Some(rook_llm::Effort::Low);
-        request.max_output_tokens = 2048;
-        let asked = self.summariser();
+
         let started = std::time::Instant::now();
         let mut timing = crate::diagnostics::Timer::start(
             self.rook,
@@ -430,4 +480,20 @@ struct Compacted {
     summary: String,
     // JSON companions may gain optional fields; no postcard/wire struct changes.
     compaction_id: String,
+}
+
+#[cfg(test)]
+mod summary_budget_tests {
+    #[test]
+    fn auxiliary_request_fits_its_own_window_with_wrappers_and_output() {
+        for window in [4096, 8192, 32768] {
+            let request = super::summary_request("Русский текст 🦀 and saved goals. ".repeat(20_000), window)
+                .expect("fits by bounded elision");
+            assert!(
+                super::super::budget::measure(&request.messages) + request.max_output_tokens as usize
+                    <= window * 9 / 10
+            );
+            assert!(request.messages[1].content.contains("saved goals"));
+        }
+    }
 }

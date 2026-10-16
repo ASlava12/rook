@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
 pub(super) struct History {
+    diff: Option<super::diff::View>,
+    diff_ready: bool,
     session: Option<u128>,
     departed: Option<u128>,
     epoch: u64,
@@ -219,6 +221,8 @@ impl History {
             suggestion: None,
             exported: None,
             worktree_result: None,
+            diff: None,
+            diff_ready: false,
             recall_result: None,
             send,
             receive,
@@ -241,6 +245,8 @@ impl History {
         self.departed = departed;
     }
     fn open_mode(&mut self, session: Option<u128>, command: impl FnOnce(u128) -> Command) {
+        self.diff = None;
+        self.diff_ready = false;
         self.epoch = self.epoch.wrapping_add(1);
         self.session = session;
         self.pending = false;
@@ -312,6 +318,14 @@ impl History {
         }
         self.epoch = self.epoch.wrapping_add(1);
         self.ask(Command::Worktree(parent, arguments.to_owned()))
+    }
+    pub(super) fn take_diff_ready(&mut self) -> Option<u128> {
+        if self.diff_ready {
+            self.diff_ready = false;
+            self.diff.as_ref().map(|v| v.owner)
+        } else {
+            None
+        }
     }
     pub(super) fn take_worktree(&mut self) -> Option<String> {
         self.worktree_result.take()
@@ -401,6 +415,16 @@ impl History {
                 if epoch == self.epoch {
                     self.pending = false;
                 }
+                continue;
+            }
+            if epoch == self.epoch
+                && let Ok(Update::Review(owner, Ok(text))) = &update
+                && let Ok(reply) = serde_json::from_str::<serde_json::Value>(text)
+                && let Some(view) = super::diff::View::from_reply(*owner, &reply)
+            {
+                self.diff = Some(view);
+                self.diff_ready = true;
+                self.pending = false;
                 continue;
             }
             if let Ok(
@@ -727,6 +751,20 @@ impl History {
         }
     }
     pub(super) fn key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        if let Some(diff) = &mut self.diff {
+            if key.code == KeyCode::Esc {
+                self.diff = None;
+                return true;
+            }
+            let owner = diff.owner;
+            let request = diff.key(key);
+            if let Some(request) = request
+                && !self.pending
+            {
+                self.ask(Command::Review(owner, request.to_string()));
+            }
+            return false;
+        }
         if self.review.is_some() {
             if self.pending {
                 self.note = "Saving summary; wait for its result before continuing or retrying.".into();
@@ -1120,6 +1158,10 @@ impl History {
         false
     }
     pub(super) fn draw(&self, f: &mut Frame, area: Rect) {
+        if let Some(diff) = &self.diff {
+            diff.draw(f, area);
+            return;
+        }
         if let Some(review) = &self.review {
             let [source, editor, help] =
                 Layout::vertical([Constraint::Length(6), Constraint::Min(3), Constraint::Length(4)])

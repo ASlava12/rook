@@ -85,11 +85,45 @@ pub fn install(skill: &Offered, into: &Path) -> Result<PathBuf> {
         )));
     }
     let target = into.join(&skill.name);
-    if target.exists() {
-        std::fs::remove_dir_all(&target).map_err(|e| CoreError::Io { path: target.clone(), source: e })?;
+    std::fs::create_dir_all(into).map_err(|e| CoreError::Io { path: into.into(), source: e })?;
+    let stage = tempfile::tempdir_in(into).map_err(|e| CoreError::Io { path: into.into(), source: e })?;
+    let prepared = stage.path().join("prepared");
+    copy_tree(&skill.dir, &prepared, &mut Budget::new())?;
+    let card = prepared.join("SKILL.md");
+    let text = std::fs::read_to_string(&card).map_err(|e| CoreError::Io { path: card.clone(), source: e })?;
+    let (manifest, _) = rook_skills::parse_manifest(&text, &card)?;
+    if manifest.name != skill.name {
+        return Err(CoreError::Other(
+            "source changed its skill identity during installation; retry discovery".into(),
+        ));
     }
-    copy_tree(&skill.dir, &target, &mut Budget::new())?;
+    // The previous directory survives every preparation failure. Renames stay
+    // on one filesystem; a failed final rename restores the previous copy.
+    let backup = stage.path().join("previous");
+    let existed = target.symlink_metadata().is_ok();
+    if existed {
+        std::fs::rename(&target, &backup).map_err(|e| CoreError::Io { path: target.clone(), source: e })?;
+    }
+    if let Err(error) = std::fs::rename(&prepared, &target) {
+        if existed && let Err(restore) = std::fs::rename(&backup, &target) {
+            let kept = stage.keep();
+            return Err(CoreError::Other(format!(
+                "skill replacement failed ({error}); restore failed ({restore}); previous files retained in {}",
+                kept.display()
+            )));
+        }
+        return Err(CoreError::Io { path: target, source: error });
+    }
     Ok(target)
+}
+
+/// Source identity is independent of catalog order and equivalent local paths.
+pub(crate) fn source_identity(source: &str) -> String {
+    let path = Path::new(source);
+    if path.is_dir() || path.is_absolute() || source.starts_with('.') {
+        return path.canonicalize().unwrap_or_else(|_| path.to_path_buf()).display().to_string();
+    }
+    source.trim_end_matches('/').trim_end_matches(".git").to_string()
 }
 
 /// What one install may copy.
@@ -207,24 +241,40 @@ fn read_skills(root: &Path, source: &str) -> Vec<Offered> {
 }
 
 fn copy_tree(from: &Path, to: &Path, budget: &mut Budget) -> Result<()> {
-    std::fs::create_dir_all(to).map_err(|e| CoreError::Io { path: to.into(), source: e })?;
-    for entry in std::fs::read_dir(from).map_err(|e| CoreError::Io { path: from.into(), source: e })? {
-        let entry = entry.map_err(|e| CoreError::Io { path: from.into(), source: e })?;
-        let Ok(kind) = entry.file_type() else { continue };
-        // Skipped, not followed: `read_dir` reports a symlink as itself while
-        // `fs::copy` reads through it, so a link in the source repository would
-        // copy whatever it points at on this machine into the skills directory.
-        if kind.is_symlink() {
-            continue;
+    let boundary = rook_contain::files::RecoveryFiles::open(from, Path::new("."), false)
+        .map_err(|source| CoreError::Io { path: from.into(), source })?;
+    let mut pending = vec![PathBuf::from(".")];
+    std::fs::create_dir_all(to).map_err(|source| CoreError::Io { path: to.into(), source })?;
+    while let Some(dir) = pending.pop() {
+        let entries = boundary
+            .entries(&dir, Budget::MOST_FILES)
+            .map_err(|source| CoreError::Io { path: from.join(&dir), source })?;
+        for (name, is_file, is_dir) in entries {
+            if !is_file && !is_dir {
+                continue;
+            }
+            let relative = dir.join(name);
+            let target = to.join(&relative);
+            if is_dir {
+                budget.charge(&relative, 0)?;
+                std::fs::create_dir(&target).map_err(|source| CoreError::Io { path: target, source })?;
+                pending.push(relative);
+                continue;
+            }
+            let room = (Budget::MOST_BYTES - budget.bytes).min(8 * 1024 * 1024) as usize;
+            let bytes = boundary
+                .read(&relative, room)
+                .map_err(|source| CoreError::Io { path: from.join(&relative), source })?;
+            budget.charge(&relative, bytes.len() as u64)?;
+            let permissions = boundary
+                .metadata(&relative)
+                .map_err(|source| CoreError::Io { path: from.join(&relative), source })?
+                .permissions();
+            std::fs::write(&target, bytes)
+                .map_err(|source| CoreError::Io { path: target.clone(), source })?;
+            std::fs::set_permissions(&target, permissions)
+                .map_err(|source| CoreError::Io { path: target, source })?;
         }
-        let target = to.join(entry.file_name());
-        if kind.is_dir() {
-            copy_tree(&entry.path(), &target, budget)?;
-            continue;
-        }
-        budget.charge(&entry.path(), entry.metadata().map(|m| m.len()).unwrap_or(0))?;
-        std::fs::copy(entry.path(), &target)
-            .map_err(|e| CoreError::Io { path: target.clone(), source: e })?;
     }
     Ok(())
 }

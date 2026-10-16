@@ -33,6 +33,7 @@ actions! {
     Mouse, "mouse", Global, "Toggle terminal selection and mouse scrolling", ["ctrl+s"];
     Stance, "stance", Global, "Cycle the permission stance", ["f2"];
     Effort, "effort", Global, "Cycle reasoning effort", ["f3"];
+    Presets, "presets", Global, "Open reusable prompt presets without losing the draft", ["f8"];
     Tasks, "tasks", Global, "Open scheduled tasks", ["f4"];
     Home, "prompt.home", Prompt, "Move to the start of the prompt", ["home", "ctrl+a"];
     End, "prompt.end", Prompt, "Move to the end; show newest output when empty", ["end"];

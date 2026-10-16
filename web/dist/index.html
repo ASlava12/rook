@@ -129,6 +129,21 @@ form.ask button[disabled]{opacity:.5;cursor:default}
 .tasks button:disabled{opacity:.55;cursor:default}
 .tasks button:focus-visible,.tasks input:focus-visible,.tasks textarea:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 nav{overflow-x:auto}nav button{flex-shrink:0}
+
+.diff-layout{display:grid;grid-template-columns:minmax(120px,1fr) minmax(0,4fr);gap:.7rem;container-type:inline-size}
+.diff-files{display:flex;flex-direction:column;gap:.3rem;max-height:60vh;overflow:auto}
+.diff-patch{min-width:0;max-height:65vh;overflow:auto}
+.diff-row{display:grid;grid-template-columns:4rem 4rem minmax(0,1fr);font-family:var(--mono);border-bottom:1px solid var(--line)}
+.diff-row pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;padding:0 .4rem}
+.diff-row.add{background:color-mix(in srgb,var(--accent) 12%,transparent)}
+.diff-row.delete{background:color-mix(in srgb,var(--bad) 12%,transparent)}
+.diff-row.meta,.diff-row.hunk{color:var(--dim)}
+.diff-line{padding:0;border:0;background:transparent;color:inherit;text-align:right;font:inherit;cursor:pointer}
+.diff-split{display:none}.diff-pair{display:grid;grid-template-columns:1fr 1fr}.diff-cell{display:grid;grid-template-columns:3rem minmax(0,1fr);min-width:0;border-bottom:1px solid var(--line)}
+.diff-cell pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:0;padding:0 .4rem}
+.diff-cell.add{background:color-mix(in srgb,var(--accent) 12%,transparent)}.diff-cell.delete{background:color-mix(in srgb,var(--bad) 12%,transparent)}
+@container(min-width:800px){.diff-patch:not([data-layout="unified"]) .diff-split{display:block}.diff-patch:not([data-layout="unified"]) .diff-unified{display:none}}
+@media(max-width:700px){.diff-layout{grid-template-columns:1fr}.diff-files{max-height:8rem}.diff-row{grid-template-columns:3rem 3rem minmax(0,1fr)}}
 </style>
 </head>
 <body>
