@@ -20,8 +20,20 @@ pub(crate) struct Clock {
 }
 impl Clock {
     pub(crate) fn changed(&self) {
-        let _ =
-            self.revision.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| Some(n.saturating_add(1)));
+        // Keep the saturating update compatible with both MSRV 1.90 and
+        // current Rust, which renamed fetch_update to try_update.
+        let mut current = self.revision.load(Ordering::Acquire);
+        loop {
+            match self.revision.compare_exchange_weak(
+                current,
+                current.saturating_add(1),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
     }
     pub(crate) fn observe(&self, message: &crate::protocol::Incoming) {
         if self.negotiated.load(Ordering::Acquire) != 1
@@ -322,5 +334,29 @@ impl Server {
             }
         }
         Err(bad("catalog_max_pages exceeded; no partial catalog installed"))
+    }
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::*;
+    #[test]
+    fn concurrent_invalidations_do_not_lose_revisions_or_wrap_at_saturation() {
+        let clock = Arc::new(Clock::default());
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let clock = clock.clone();
+                scope.spawn(move || {
+                    for _ in 0..1000 {
+                        clock.changed();
+                    }
+                });
+            }
+        });
+        assert_eq!(clock.revision(), 4000);
+        clock.revision.store(u64::MAX - 1, Ordering::Release);
+        clock.changed();
+        clock.changed();
+        assert_eq!(clock.revision(), u64::MAX, "saturation must never make an old snapshot current again");
     }
 }

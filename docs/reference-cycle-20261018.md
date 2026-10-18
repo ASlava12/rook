@@ -113,12 +113,14 @@ independent of whether a current daemon executor can attest ownership.
 
 ## Final local verification
 
-The final `cargo xtask ci` process exited **0** and printed `ci: ok` on frozen
-runtime/test sources. Reported timings: fmt 1.3s, clippy 21.3s, frontend build
+The final local `cargo xtask ci` process for implementation commit `e55024d`
+exited **0** and printed `ci: ok` on frozen runtime/test sources. Reported timings: fmt 1.3s, clippy 21.3s, frontend build
 30.6s, tests 1083.9s, total 1137.0s. This includes the new private-registry scope,
 metadata owner/omission and actual 128-child projection-bound regressions. A
 preceding complete preflight also exited zero; it does not substitute for the
-final run. No runtime/test source changed after the final gate began.
+final run. Runtime/test sources stayed frozen throughout that run. The subsequent
+compiler-compatibility correction is recorded below and has its own checks;
+remote CI verifies the exact final release revision.
 
 `node --test web/tests/*.mjs` exited zero on the same frontend sources. The owned
 native probe exited zero using the final built `rook`/`rookd`, an isolated
@@ -142,3 +144,25 @@ These are protocol/engine/frontend fixture results, not a live-model quality
 comparison. R17-7 remains inconclusive and its production default stays unchanged.
 Remote platform verdicts and packaged artifact provenance are the GitHub records
 linked at the top, rather than predictions embedded in this checkout.
+
+
+## Remote compiler compatibility correction
+
+The first pushed CI used Rust **1.99.1**, newer than the local **1.97.1** toolchain.
+Its Linux/macOS/Windows clippy steps rejected the newly introduced atomic
+`fetch_update` because current Rust renamed/deprecated it. MSRV 1.90 and all three
+Linux cross-checks passed. Adopting `try_update` would break the supported MSRV.
+The MCP revision clock instead uses the equivalent saturating
+`compare_exchange_weak` loop, available on both toolchains. A regression verifies
+concurrent invalidations do not lose increments and that saturation never wraps
+an old snapshot back into currency. Existing unrelated MSRV compatibility
+annotations are unchanged.
+
+A separately installed, pinned Rust 1.99.1 passed workspace/all-target clippy
+with warnings denied, formatting, MCP library/native HTTP/stdio client tests,
+ToolBox catalog/refresh tests and the actual-agent `reference_cycle` suite.
+Rust 1.90 passed `cargo check -p rook-mcp` on the changed source. The full local
+integration run above is for the implementation commit; this narrow equivalent
+atomic correction has targeted checks rather than another unrelated PTY rerun.
+The full exact-revision platform gates and publication remain the linked GitHub
+records. The local default toolchain is not changed by this verification.
