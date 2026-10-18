@@ -743,7 +743,12 @@ match   = "run_command"
 command = "my-policy-check"              # {"decision":"deny","reason":"…"} on stdout
 ```
 
-Five events: `session_start`, `prompt`, `pre_tool`, `post_tool`, `turn_end`. A
+Events: `session_start`, `prompt`, `pre_tool`, `post_tool`, `turn_end`,
+`post_compaction`, `session_delete`. The last two are metadata-only observers:
+their replies cannot add context/UI, ask questions or veto a committed operation.
+They are process-local best-effort callbacks, without replay after process loss.
+Explicit deletion invokes them once even for an empty session; retention does not.
+See [contracts and limits](docs/reference-followup-20261018.md). A
 hook reads JSON on stdin and may answer with JSON; plain output is treated as
 context for the model, so `echo` works. A `post_tool` hook is given what the
 tool measured as well as what it said — `is_error`, `truncated`, `full_bytes`,

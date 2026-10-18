@@ -177,6 +177,9 @@ impl Config {
         if !(1..=4096).contains(&self.work.followup_scan_sessions) {
             errors.push("work.followup_scan_sessions: expected 1..=4096".into());
         }
+        if !(1..=100).contains(&self.work.restart_limit) {
+            errors.push("work.restart_limit: expected 1..=100".into());
+        }
         errors.extend(self.branches.errors());
         errors.extend(crate::models::source_errors(self));
         for (name, source) in &self.models {

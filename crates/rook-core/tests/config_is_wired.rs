@@ -316,7 +316,7 @@ fn the_whole_advertised_tool_list_stays_within_a_budget() {
     // Their descriptions are one sentence each, and the schemas retain only
     // the fields needed for paging, ownership, and explicit dirty-tree removal.
     assert!(
-        full < 2_800,
+        full < 2_840,
         "the whole list costs ~{full} tokens on every eager request; trim a description or \
          merge an argument before raising this"
     );
@@ -333,11 +333,15 @@ fn the_whole_advertised_tool_list_stays_within_a_budget() {
     // being able to is worth. Raised from 1,000 for `docs`: four argument names
     // and a sentence saying it looks locally first, which is the part that has
     // to reach a model deciding whether to answer from memory.
+    // tool_status adds session-specific capability inspection. Its initial
+    // three paging fields were merged into one query/opaque continuation,
+    // cutting the default eager list from 2863 to 2817 estimated tokens.
+    // The default lazy list pays only that tool's sentence and one argument.
     // PDF selection/render/OCR is a new local capability. Its first sentence
     // was shortened and nine arguments merged into four (an opaque cursor
     // binds page/offset/hashes/mode); the measured default list is ~1,287.
     assert!(
-        stubs < 1_300,
+        stubs < 1_340,
         "the stubs cost ~{stubs} tokens on every request, which is what is \
          actually paid: lazy loading is the default"
     );

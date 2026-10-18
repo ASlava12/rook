@@ -2924,6 +2924,167 @@ fn keeps_its_payload(at: &std::path::Path) -> String {
     }
 }
 
+#[tokio::test]
+async fn compaction_observers_see_only_committed_metadata_and_cannot_veto_or_inject() {
+    let _one = one_at_a_time().await;
+    use rook_core::hooks::{Event, HookConfig};
+    for summarized in [true, false] {
+        let output = tempfile::tempdir().unwrap();
+        let payload = output.path().join("compacted.json");
+        let f = fixture_with(Config {
+            hooks: vec![
+                HookConfig {
+                    ui: true,
+                    ui_stream: true,
+                    ..hook(
+                        Event::PostCompaction,
+                        &prints(
+                            r#"{"decision":"deny","context":"OBSERVER_ONLY","ui":[{"kind":"status","id":"bad","text":"OBSERVER_ONLY"}]}"#,
+                        ),
+                    )
+                },
+                hook(Event::PostCompaction, &keeps_its_payload(&payload)),
+            ],
+            ..Default::default()
+        });
+        let session = long_session(&f, 40);
+        let provider = ScriptedProvider::new(if summarized { vec![reply("short summary")] } else { vec![] });
+        let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), session);
+        agent.set_window_for_test(4000);
+        agent.compact_now().await;
+        let seen: serde_json::Value = serde_json::from_slice(&std::fs::read(&payload).unwrap()).unwrap();
+        assert_eq!(seen["event"], "post_compaction");
+        assert_eq!(seen["session"], rook_store::format_session_id(session));
+        assert_eq!(seen["summarized"], summarized);
+        assert!(seen["dropped_events"].as_u64().unwrap() > 0);
+        let seq = seen["event_seq"].as_u64().unwrap();
+        let saved = f.rook.store.events(session, seq, 1).unwrap();
+        assert_eq!(saved[0].record.kind, rook_store::EventKind::Compaction);
+        assert_eq!(f.rook.last_compaction(session).unwrap().0, seen["through_seq"].as_u64().unwrap() + 1);
+        assert!(!std::fs::read_to_string(&payload).unwrap().contains("question 0"));
+        assert!(!seen.as_object().unwrap().contains_key("summary"));
+        assert!(
+            !f.rook.context_usage(session, None).unwrap().extension_ui.describe().contains("OBSERVER_ONLY")
+        );
+        let next = ScriptedProvider::new(vec![reply("done")]);
+        let requests = next.share();
+        AgentLoop::new(&f.rook, Arc::new(next), session).run("continue").await.unwrap();
+        assert!(
+            !requests
+                .lock()
+                .unwrap()
+                .iter()
+                .flat_map(|r| &r.messages)
+                .any(|m| m.content.contains("OBSERVER_ONLY"))
+        );
+    }
+}
+
+#[tokio::test]
+async fn deletion_observers_fire_once_for_empty_sessions_and_never_for_internal_cleanup() {
+    let _one = one_at_a_time().await;
+    use rook_core::hooks::Event;
+    let output = tempfile::tempdir().unwrap();
+    let payload = output.path().join("deleted.json");
+    let f = fixture_with(Config {
+        hooks: vec![hook(Event::SessionDelete, &keeps_its_payload(&payload))],
+        ..Default::default()
+    });
+    let session = f.rook.start_session("empty").unwrap();
+    assert_eq!(f.rook.store.get_session(session).unwrap().unwrap().event_count, 0);
+    assert_eq!(f.rook.delete_session_notifying(session).await.unwrap(), 0);
+    let seen: serde_json::Value = serde_json::from_slice(&std::fs::read(&payload).unwrap()).unwrap();
+    assert_eq!(
+        seen,
+        serde_json::json!({"event":"session_delete", "session":rook_store::format_session_id(session),"reason":"explicit","events":0})
+    );
+    assert!(f.rook.store.get_session(session).unwrap().is_none());
+    std::fs::remove_file(&payload).unwrap();
+    assert_eq!(f.rook.delete_session_notifying(session).await.unwrap(), 0);
+    assert!(!payload.exists(), "an exact deletion retry must not notify again");
+    let internal = f.rook.start_session("retention").unwrap();
+    f.rook.delete_session(internal).unwrap();
+    assert!(!payload.exists(), "internal cleanup must not launch operator hooks");
+    let mut config = Config {
+        hooks: vec![hook(Event::SessionDelete, &keeps_its_payload(&payload))],
+        ..Default::default()
+    };
+    config.sandbox.network_policy.enabled = true;
+    let restricted = fixture_with(config);
+    let kept = restricted.rook.start_session("restricted deletion").unwrap();
+    assert!(
+        restricted
+            .rook
+            .delete_session_notifying(kept)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("network policy")
+    );
+    assert!(restricted.rook.store.get_session(kept).unwrap().is_some());
+    assert!(!payload.exists());
+}
+
+#[tokio::test]
+async fn an_uncommitted_compaction_never_calls_observers() {
+    let _one = one_at_a_time().await;
+    use rook_core::hooks::Event;
+    let output = tempfile::tempdir().unwrap();
+    let payload = output.path().join("not-committed.json");
+    let f = fixture_with(Config {
+        hooks: vec![hook(Event::PostCompaction, &keeps_its_payload(&payload))],
+        ..Default::default()
+    });
+    let session = f.rook.start_session("empty").unwrap();
+    AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(vec![])), session).compact_now().await;
+    assert!(f.rook.last_compaction(session).unwrap().1.is_none());
+    assert!(!payload.exists());
+}
+
+#[tokio::test]
+async fn tool_availability_uses_the_real_session_catalog_without_claiming_authorization() {
+    let mut config = Config::default();
+    config.memory.enabled = false;
+    config.web.enabled = false;
+    let f = fixture_with(config);
+    let session = f.rook.start_session("capabilities").unwrap();
+    let script =
+        ["read_file", "recall", "delegate", "request_secret", "ask", "web_search", "plan", "invented"]
+            .into_iter()
+            .map(|name| call("tool_status", serde_json::json!({"query":name})))
+            .chain([reply("inspected")])
+            .collect();
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    agent.depth = rook_core::agent::MAX_DEPTH;
+    let result = agent.run("check the current tools").await.unwrap();
+    assert_eq!(result.tools_called.iter().filter(|name| *name == "tool_status").count(), 8);
+    let results: Vec<serde_json::Value> = f
+        .rook
+        .transcript(session, 0, 512, 16384)
+        .unwrap()
+        .into_iter()
+        .filter(|entry| entry.kind == "tool-result" && entry.label == "tool_status")
+        .map(|entry| serde_json::from_str(&entry.body).unwrap())
+        .collect();
+    assert_eq!(results.len(), 8);
+    assert_eq!(results[0]["items"][0]["status"], "available");
+    let reasons = [
+        "memory is disabled",
+        "depth limit",
+        "private input",
+        "interactive question",
+        "web search",
+        "checklist tool",
+        "not loaded or unknown",
+    ];
+    for (result, reason) in results.iter().skip(1).zip(reasons) {
+        assert_eq!(result["scope"], "current_session_catalog");
+        assert_eq!(result["items"][0]["status"], "unavailable");
+        assert!(result["items"][0]["reason"].as_str().unwrap().contains(reason), "{result}");
+        assert!(result["notice"].as_str().unwrap().contains("not all Rook capabilities or authorization"));
+    }
+}
+
 /// A hook's stdout becomes context the model carries for the rest of the
 /// session, and it was read whole: `cat` on the wrong file spent the window.
 ///
@@ -5559,14 +5720,18 @@ async fn recent_is_still_the_word_for_the_conversation_so_far() {
 /// that. Each one spends a summarisation call to stand still.
 #[tokio::test]
 async fn a_turn_stops_compacting_once_it_stops_helping() {
-    let f = fixture();
+    let mut config = Config::default();
+    config.agent.compact_at = 0.5;
+    let f = fixture_with(config);
     let session = f.rook.start_session("stuck").unwrap();
 
     // One enormous message: compaction summarises history and cannot make a
     // single message smaller, so there is nothing it can win here.
-    // Sized against the window below: over the compaction threshold of ~2,232
-    // tokens and under the usable ~2,976, so the turn compacts and does not
-    // refuse the request outright.
+    // Separate the compaction threshold from overflow by enough room for the
+    // real system prompt and all six tool exchanges. A tight assumed prefix
+    // became an overflow test when a new tool added a few tokens. Assert the
+    // actual reached pressure throughout, so removing the no-progress guard
+    // cannot accidentally pass because the model's usage estimate lowered it.
     f.rook.log(session, rook_store::EventKind::UserMessage, "user", &"x ".repeat(4_000)).unwrap();
 
     let script: Vec<_> = (0..6)
@@ -5575,8 +5740,24 @@ async fn a_turn_stops_compacting_once_it_stops_helping() {
         .collect();
     let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
     agent.allow_everything_not_denied();
-    agent.set_window_for_test(4_000);
-    let outcome = agent.run("carry on").await.unwrap();
+    let budget = rook_core::context::ContextBudget::new(5_000, 0.5);
+    agent.set_window_for_test(budget.window);
+    let mut costs = Vec::new();
+    let outcome = agent
+        .run_with("carry on", |progress| {
+            if let rook_core::agent::Progress::Context { used, .. } = progress {
+                costs.push(used);
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(outcome.steps, 7, "all six nonrepeating calls and the last work reply must run");
+    assert_eq!(outcome.tools_called, vec!["list_dir"; 6]);
+    assert!(!costs.is_empty());
+    assert!(
+        costs.iter().all(|used| *used >= budget.threshold() && *used <= budget.usable()),
+        "the context must stay above compaction pressure and below overflow: {costs:?}; budget {budget:?}"
+    );
 
     assert_eq!(
         outcome.compactions, 1,

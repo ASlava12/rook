@@ -243,7 +243,14 @@ async fn explicit_summary_output_budget_uses_the_summarizers_window_and_default_
 #[tokio::test]
 async fn dropping_compaction_cancels_its_stream_and_never_commits_a_late_note() {
     let root = tempfile::tempdir().unwrap();
-    let rook = open(root.path(), config());
+    let observer = root.path().join("unexpected-observer");
+    let mut config = config();
+    config.hooks.push(rook_core::hooks::HookConfig {
+        event: rook_core::hooks::Event::PostCompaction,
+        command: format!("echo called > \"{}\"", observer.display()),
+        ..Default::default()
+    });
+    let rook = open(root.path(), config);
     let session = rook.start_session("cancel summary").unwrap();
     seed(&rook, session);
     let before = rook.store.get_session(session).unwrap().unwrap().next_seq;
@@ -262,6 +269,7 @@ async fn dropping_compaction_cancels_its_stream_and_never_commits_a_late_note() 
             .any(|event| event.record.kind == EventKind::Compaction)
     );
     assert_eq!(rook.last_compaction(session).unwrap().1, None);
+    assert!(!observer.exists(), "a cancelled candidate has no committed observer event");
     assert!(rook.transcript(session, 0, 128, 1024).unwrap().iter().any(|entry| entry.kind == "user"));
 }
 

@@ -26,6 +26,7 @@
 mod acp;
 mod acp_tools;
 mod budget;
+mod capabilities;
 mod checks;
 pub(crate) use checks::verdict_in as evidence_verdict;
 mod compaction;

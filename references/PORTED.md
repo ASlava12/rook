@@ -9,6 +9,10 @@ Add a row when you implement something after reading a reference. Add it to
 
 | what | from | read at | where it landed |
 |---|---|---|---|
+| Session-specific tool availability and absence reasons | OpenClaw capability inspection, independently adapted to the installed request catalog | `f427a05291`, `6913563f69d9` snapshot | `agent/capabilities.rs`, exact MCP direct/deferred names and source-bound pages; [contracts](../docs/reference-followup-20261018.md) |
+| Committed-compaction and explicit-deletion observers | Hermes lifecycle hook commit seams and callback isolation | `35948f22a`, `ed9fb3cf5`, `a31975222`, `ee3ce9a4d`, `627ce0355` | `hooks.rs`, compaction commit, atomic deletion claim, CLI/daemon/browser deletion; [contracts](../docs/reference-followup-20261018.md) |
+| Bounded skill discovery and resource enumeration | OpenCode bounded discovery; Rook retains its flat/versioned layouts | `49e9786b`, `da9d436c36e0` snapshot | `rook-skills/src/index.rs`, prioritized admission and explicit limit errors |
+| Persistent interrupted-stage recovery guard | Pi durable crash-loop guard; independently implemented for Rook managed stages | `a30c2a8`, `440a5fc`, `482c1381a00d` snapshot | `work/managed.rs`, optional JSON run state, generation-safe explicit resume, CLI/API/shared frontend blocked reasons |
 | Opt-in live MCP catalogs at safe request boundaries | Codex live catalog notifications | `0df4aa67781ae45a3c97befa4db48b734afe46d9`, October 18 review | `rook-mcp` clocks/cache/listeners, ToolBox and agent refresh, Apps and frontend status; [contracts](../docs/mcp-catalog-refresh.md) |
 | Atomic durable model/effort pairs | Hermes combined busy-session settings | `b9a86d07e74e`, R17 pinned source review | `rook-core/src/model_selection.rs`, root admission and CLI/API/TUI/browser; [delivery](../docs/reference-r17-adoption.md) |
 | Drain before daemon replacement while preserving pending human input | Hermes reachable drain plan | `da76391fdc7f`, R17 pinned source review | Shared `drain` state, daemon fence/controller and operator frontends; [delivery](../docs/reference-r17-adoption.md) |

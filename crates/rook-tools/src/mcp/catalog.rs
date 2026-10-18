@@ -130,6 +130,7 @@ impl ToolBox {
             self.mcp_catalog = CatalogSummary::default();
             return;
         }
+        self.mcp_callable = Arc::new(entries.keys().cloned().collect());
         let mut fingerprint = Fingerprint(Sha256::new());
         let source = entries
             .values()

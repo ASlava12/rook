@@ -102,14 +102,21 @@ pub struct SkillCard {
 
 impl Skill {
     pub fn load(dir: impl AsRef<Path>, source: SkillSource) -> Result<Self> {
-        let dir = dir.as_ref().to_path_buf();
+        let mut remaining = usize::MAX;
+        Self::load_budgeted(dir.as_ref(), source, &mut remaining)
+    }
+
+    fn load_budgeted(dir: &Path, source: SkillSource, remaining: &mut usize) -> Result<Self> {
+        let dir = dir.to_path_buf();
         let path = skill_file(&dir).ok_or_else(|| SkillError::NotFound(dir.display().to_string()))?;
-        let text = rook_contain::files::read_text(
-            &dir,
-            Path::new(path.file_name().unwrap_or_default()),
-            1024 * 1024,
-        )
-        .map_err(|e| SkillError::io(&path, e))?;
+        let allowance = (*remaining).min(1024 * 1024);
+        let read =
+            rook_contain::files::read_text(&dir, Path::new(path.file_name().unwrap_or_default()), allowance);
+        // A failed capped read may have consumed its entire allowance. Charge
+        // it conservatively so malformed/oversized files cannot evade the
+        // aggregate budget; successful small files pay only their actual bytes.
+        *remaining = remaining.saturating_sub(read.as_ref().map_or(allowance, String::len));
+        let text = read.map_err(|e| SkillError::io(&path, e))?;
         let (manifest, body) = manifest::parse(&text, &path)?;
         if !manifest.allowed_tools.is_empty() {
             tracing::warn!(skill = %manifest.name, "allowed-tools is informational metadata; Rook's approval policy controls tool access");
@@ -168,18 +175,43 @@ impl Skill {
 
     /// Files bundled with the skill (scripts, references, assets), relative to
     /// its directory. These are what version control and packaging operate on.
-    pub fn resources(&self) -> Vec<PathBuf> {
+    pub fn resources(&self) -> Result<Vec<PathBuf>> {
         let mut out = Vec::new();
-        for entry in walkdir::WalkDir::new(&self.dir).follow_links(false).into_iter().flatten() {
+        for (visited, entry) in walkdir::WalkDir::new(&self.dir)
+            .follow_links(false)
+            .max_depth(32)
+            .into_iter()
+            .filter_entry(|entry| entry.depth() == 0 || entry.file_name() != ".git")
+            .enumerate()
+        {
+            if visited >= 4096 {
+                return Err(SkillError::DiscoveryLimit {
+                    path: self.dir.clone(),
+                    limit: "4096 resource entries",
+                });
+            }
+            let entry = entry.map_err(|e| SkillError::io(&self.dir, std::io::Error::other(e)))?;
+            if entry.file_type().is_dir() && entry.depth() >= 32 {
+                return Err(SkillError::DiscoveryLimit {
+                    path: entry.into_path(),
+                    limit: "32 resource directory levels",
+                });
+            }
             if !entry.file_type().is_file() {
                 continue;
             }
             if let Ok(rel) = entry.path().strip_prefix(&self.dir) {
+                if rel.as_os_str().len() > 4096 {
+                    return Err(SkillError::DiscoveryLimit {
+                        path: self.dir.clone(),
+                        limit: "4096-byte resource paths",
+                    });
+                }
                 out.push(rel.to_path_buf());
             }
         }
         out.sort();
-        out
+        Ok(out)
     }
 }
 
@@ -229,34 +261,93 @@ pub struct SkillIndex {
 }
 
 impl SkillIndex {
-    /// Walk `roots` in order. Errors are collected rather than fatal: one broken
-    /// skill must not take down the whole catalog.
+    /// Scan admitted roots in source-priority order, retaining equal-source
+    /// root order. Errors/limit notices are collected instead of hiding failures.
     pub fn discover(roots: &[(PathBuf, SkillSource)]) -> (Self, Vec<SkillError>) {
+        Self::discover_bounded(roots, DiscoveryLimits::default())
+    }
+
+    fn discover_bounded(
+        roots: &[(PathBuf, SkillSource)],
+        limits: DiscoveryLimits,
+    ) -> (Self, Vec<SkillError>) {
         let mut skills = Vec::new();
         let mut errors = Vec::new();
-        for (root, source) in roots {
-            let Ok(entries) = std::fs::read_dir(root) else { continue };
-            for entry in entries.flatten() {
+        let mut remaining = limits.bytes;
+        let mut visited = 0;
+        // Preserve the existing precedence when truncation is necessary: the
+        // workspace's deliberate overrides get room before a huge plugin or
+        // builtin library. Equal-source root order is retained.
+        let mut ordered: Vec<&(PathBuf, SkillSource)> = Vec::new();
+        for root in roots {
+            let position = ordered.partition_point(|(_, source)| source.rank() >= root.1.rank());
+            if position < limits.roots {
+                ordered.insert(position, root);
+                ordered.truncate(limits.roots);
+            }
+        }
+        if roots.len() > limits.roots {
+            errors.push(SkillError::DiscoveryLimit {
+                path: PathBuf::from("skills"),
+                limit: "configured roots",
+            });
+        }
+        'roots: for (root, source) in ordered {
+            let entries = match std::fs::read_dir(root) {
+                Ok(entries) => entries,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    errors.push(SkillError::io(root, e));
+                    continue;
+                }
+            };
+            // One queue for the two supported layouts, never a recursive scan
+            // of arbitrary project/dependency trees.
+            let mut pending = vec![(entries, false)];
+            while let Some((entries, version_level)) = pending.last_mut() {
+                let Some(entry) = entries.next() else {
+                    pending.pop();
+                    continue;
+                };
+                let limit = if visited >= limits.entries {
+                    Some("directory entries")
+                } else if skills.len() >= limits.skills {
+                    Some("loaded skills")
+                } else if remaining == 0 {
+                    Some("manifest bytes")
+                } else if errors.len() >= limits.errors {
+                    Some("diagnostics")
+                } else {
+                    None
+                };
+                if let Some(limit) = limit {
+                    errors.push(SkillError::DiscoveryLimit { path: root.clone(), limit });
+                    break 'roots;
+                }
+                visited += 1;
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(e) => {
+                        errors.push(SkillError::io(root, e));
+                        continue;
+                    }
+                };
                 let path = entry.path();
                 if !path.is_dir() {
                     continue;
                 }
                 if skill_file(&path).is_some() {
-                    match Skill::load(&path, source.clone()) {
+                    match Skill::load_budgeted(&path, source.clone(), &mut remaining) {
                         Ok(s) => skills.push(s),
                         Err(e) => errors.push(e),
                     }
                     continue;
                 }
                 // `<name>/<version>/SKILL.md` — several versions side by side.
-                let Ok(versions) = std::fs::read_dir(&path) else { continue };
-                for v in versions.flatten() {
-                    let vpath = v.path();
-                    if vpath.is_dir() && skill_file(&vpath).is_some() {
-                        match Skill::load(&vpath, source.clone()) {
-                            Ok(s) => skills.push(s),
-                            Err(e) => errors.push(e),
-                        }
+                if !*version_level {
+                    match std::fs::read_dir(&path) {
+                        Ok(versions) => pending.push((versions, true)),
+                        Err(e) => errors.push(SkillError::io(&path, e)),
                     }
                 }
             }
@@ -368,6 +459,19 @@ impl SkillIndex {
     }
 }
 
+struct DiscoveryLimits {
+    roots: usize,
+    entries: usize,
+    skills: usize,
+    bytes: usize,
+    errors: usize,
+}
+impl Default for DiscoveryLimits {
+    fn default() -> Self {
+        Self { roots: 64, entries: 16_384, skills: 512, bytes: 16 * 1024 * 1024, errors: 64 }
+    }
+}
+
 fn better(candidate: &Skill, current: &Skill, env: &Environment) -> bool {
     let ca = candidate.manifest.requires.satisfied_by(env);
     let cu = current.manifest.requires.satisfied_by(env);
@@ -388,4 +492,134 @@ fn skill_file(dir: &Path) -> Option<PathBuf> {
 /// Cheap token estimate. Good enough for budgeting; never used for billing.
 pub fn estimate_tokens(text: &str) -> usize {
     text.len().div_ceil(4)
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+
+    fn write(root: &Path, name: &str, body: &str) -> usize {
+        let path = root.join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        let text = format!("---\nname: bounded\ndescription: Use when testing discovery.\n---\n{body}");
+        std::fs::write(path.join("SKILL.md"), &text).unwrap();
+        text.len()
+    }
+
+    fn hit(errors: &[SkillError], expected: &str) {
+        assert!(
+            errors.iter().any(|e| matches!(e, SkillError::DiscoveryLimit {limit, ..} if *limit == expected)),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn entry_skill_and_byte_limits_are_reached_before_loading_the_next_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        let mut bytes = 0;
+        for i in 0..5 {
+            bytes = write(root.path(), &format!("v{i}"), "small body");
+        }
+        let roots = [(root.path().into(), SkillSource::User)];
+        for (limits, kind) in [
+            (DiscoveryLimits { entries: 2, ..Default::default() }, "directory entries"),
+            (DiscoveryLimits { skills: 2, ..Default::default() }, "loaded skills"),
+            (DiscoveryLimits { bytes: 2 * bytes, ..Default::default() }, "manifest bytes"),
+        ] {
+            assert!(5 > limits.entries || 5 > limits.skills || 5 * bytes > limits.bytes);
+            let (index, errors) = SkillIndex::discover_bounded(&roots, limits);
+            assert_eq!(index.len(), 2);
+            hit(&errors, kind);
+        }
+    }
+
+    #[test]
+    fn version_directories_share_the_same_entry_budget() {
+        let root = tempfile::tempdir().unwrap();
+        for i in 0..5 {
+            write(root.path(), &format!("versions/{i}.0.0"), "version");
+        }
+        let (index, errors) = SkillIndex::discover_bounded(
+            &[(root.path().into(), SkillSource::User)],
+            DiscoveryLimits { entries: 3, ..Default::default() },
+        );
+        assert_eq!(index.len(), 2, "the parent directory also costs one visited entry");
+        hit(&errors, "directory entries");
+    }
+
+    #[test]
+    fn higher_priority_sources_get_room_before_a_large_low_priority_library() {
+        let builtin = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        for i in 0..3 {
+            write(builtin.path(), &format!("s{i}"), "builtin");
+        }
+        write(project.path(), "override", "project");
+        let (index, errors) = SkillIndex::discover_bounded(
+            &[(builtin.path().into(), SkillSource::Builtin), (project.path().into(), SkillSource::Project)],
+            DiscoveryLimits { skills: 1, ..Default::default() },
+        );
+        assert_eq!(index.len(), 1);
+        assert_eq!(index.all()[0].source, SkillSource::Project);
+        hit(&errors, "loaded skills");
+        let (index, errors) = SkillIndex::discover_bounded(
+            &[(builtin.path().into(), SkillSource::Builtin), (project.path().into(), SkillSource::Project)],
+            DiscoveryLimits { roots: 1, ..Default::default() },
+        );
+        assert_eq!(index.len(), 1);
+        assert_eq!(index.all()[0].source, SkillSource::Project, "root admission must also respect priority");
+        hit(&errors, "configured roots");
+    }
+
+    #[test]
+    fn oversized_and_malformed_reads_cannot_evade_the_shared_byte_and_error_limits() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), "oversized", &"x".repeat(1024 * 1024));
+        let mut remaining = 1024 * 1024;
+        assert!(
+            Skill::load_budgeted(&root.path().join("oversized"), SkillSource::User, &mut remaining).is_err()
+        );
+        assert_eq!(remaining, 0);
+        let broken = tempfile::tempdir().unwrap();
+        for i in 0..5 {
+            let path = broken.path().join(i.to_string());
+            std::fs::create_dir(&path).unwrap();
+            std::fs::write(path.join("SKILL.md"), "missing frontmatter").unwrap();
+        }
+        let (index, errors) = SkillIndex::discover_bounded(
+            &[(broken.path().into(), SkillSource::User)],
+            DiscoveryLimits { errors: 2, ..Default::default() },
+        );
+        assert!(index.is_empty());
+        assert_eq!(errors.len(), 3, "two failures and one explicit truncation diagnostic");
+        hit(&errors, "diagnostics");
+    }
+
+    #[test]
+    fn a_large_or_deep_resource_tree_is_reported_instead_of_silently_truncated() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), "skill", "body");
+        let dir = root.path().join("skill");
+        let skill = Skill::load(&dir, SkillSource::User).unwrap();
+        for i in 0..4097 {
+            std::fs::write(dir.join(format!("file{i}")), "").unwrap();
+        }
+        assert!(matches!(
+            skill.resources(),
+            Err(SkillError::DiscoveryLimit { limit: "4096 resource entries", .. })
+        ));
+        let deep = tempfile::tempdir().unwrap();
+        write(deep.path(), "skill", "body");
+        let dir = deep.path().join("skill");
+        let mut nested = dir.clone();
+        for _ in 0..33 {
+            nested.push("d");
+        }
+        std::fs::create_dir_all(&nested).unwrap();
+        let skill = Skill::load(&dir, SkillSource::User).unwrap();
+        assert!(matches!(
+            skill.resources(),
+            Err(SkillError::DiscoveryLimit { limit: "32 resource directory levels", .. })
+        ));
+    }
 }

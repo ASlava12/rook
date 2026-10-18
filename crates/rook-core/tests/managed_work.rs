@@ -1146,6 +1146,130 @@ fn held(script: Vec<rook_llm::Result<Response>>) -> Arc<Held> {
     })
 }
 
+async fn interrupt_managed_stage(rook: &Rook, id: &str, expected_interruptions: u32) {
+    let provider = held(vec![]);
+    let mut stage = Box::pin(work::advance(
+        rook,
+        id,
+        |session| Ok(AgentLoop::new(rook, provider.clone(), session)),
+        |_| {},
+    ));
+    tokio::select! {
+        result = &mut stage => panic!("the stage must reach its held physical request: {result:?}"),
+        entered = tokio::time::timeout(std::time::Duration::from_secs(30), provider.entered.notified()) => entered.unwrap(),
+    }
+    let saved = work::read(rook, id).unwrap();
+    assert!(saved.run.restart_guard.unfinished_stage, "ownership must be durable before a physical request");
+    assert_eq!(saved.run.restart_guard.consecutive_interruptions, expected_interruptions);
+    drop(stage);
+    assert!(
+        work::read(rook, id).unwrap().run.restart_guard.unfinished_stage,
+        "dropping the future cannot pretend its stage returned normally"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn interrupted_stages_survive_store_reopen_and_park_before_another_request_at_the_limit() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let mut rook = engine(workspace.path(), store.path());
+    rook.config.work.restart_limit = 2;
+    let run = start(&rook);
+    for interruptions in 0..2 {
+        interrupt_managed_stage(&rook, &run.id, interruptions).await;
+        drop(rook);
+        rook = engine(workspace.path(), store.path());
+        assert_eq!(
+            work::read(&rook, &run.id).unwrap().run.restart_guard.limit,
+            2,
+            "the goal retains its admitted restart limit after reopening with another default"
+        );
+    }
+    let parked = work::advance(&rook, &run.id, |_| panic!("a parked stage must not build a model"), |_| {})
+        .await
+        .unwrap();
+    assert_eq!(parked.status, Status::Blocked);
+    assert_eq!(parked.restart_guard.consecutive_interruptions, 2);
+    assert!(parked.reason.contains("restart limit 2"));
+    assert!(parked.next_attempt_at.is_none());
+    let again =
+        work::advance(&rook, &run.id, |_| panic!("a parked task must stay parked"), |_| {}).await.unwrap();
+    assert_eq!(again.restart_guard.consecutive_interruptions, 2);
+    let resumed =
+        work::control_identified(&rook, &run.id, control("retry-once", &run.generation, Action::Resume))
+            .unwrap();
+    assert_eq!(resumed.run.restart_guard.consecutive_interruptions, 0);
+    assert!(!resumed.run.restart_guard.unfinished_stage);
+    interrupt_managed_stage(&rook, &run.id, 0).await;
+    let retry =
+        work::control_identified(&rook, &run.id, control("retry-once", &run.generation, Action::Resume))
+            .unwrap();
+    assert!(retry.already_applied);
+    assert!(
+        retry.run.restart_guard.unfinished_stage,
+        "retrying an old resume receipt cannot erase a later interrupted stage"
+    );
+    interrupt_managed_stage(&rook, &run.id, 1).await;
+    let parked =
+        work::advance(&rook, &run.id, |_| panic!("still bounded after exact control retries"), |_| {})
+            .await
+            .unwrap();
+    assert_eq!(parked.status, Status::Blocked);
+    work::control(&rook, &run.id, Action::Cancel).unwrap();
+    let cancelled =
+        work::advance(&rook, &run.id, |_| panic!("cancel never starts a request"), |_| {}).await.unwrap();
+    assert_eq!(cancelled.status, Status::Cancelled);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_explicit_resume_and_a_returned_stage_retire_the_guard_without_confusing_provider_retries() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let mut rook = engine(workspace.path(), store.path());
+    rook.config.work.restart_limit = 3;
+    let run = start(&rook);
+    interrupt_managed_stage(&rook, &run.id, 0).await;
+    work::control(&rook, &run.id, Action::Pause).unwrap();
+    let paused = work::advance(&rook, &run.id, |_| panic!("pause is not a restart"), |_| {}).await.unwrap();
+    assert_eq!(paused.restart_guard.consecutive_interruptions, 0);
+    work::control(&rook, &run.id, Action::Resume).unwrap();
+    let provider = Script::new(vec![Err(rook_llm::LlmError::Other("temporary outage".into()))]);
+    let retried =
+        work::advance(&rook, &run.id, |session| Ok(AgentLoop::new(&rook, provider.clone(), session)), |_| {})
+            .await
+            .unwrap();
+    assert_eq!(retried.status, Status::RetryWait);
+    assert_eq!(retried.consecutive_failures, 1);
+    assert_eq!(retried.restart_guard.consecutive_interruptions, 0);
+    assert!(!retried.restart_guard.unfinished_stage);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_expired_saved_budget_precedes_interruption_recovery_and_cannot_be_resumed() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let mut rook = engine(workspace.path(), store.path());
+    rook.config.work.restart_limit = 1;
+    let run = start(&rook);
+    interrupt_managed_stage(&rook, &run.id, 0).await;
+    work::update(&rook, &run.id, |saved| {
+        saved.run.max_seconds = 1;
+        saved.run.created_at = work::now().saturating_sub(60);
+        Ok(())
+    })
+    .unwrap();
+    let result =
+        work::advance(&rook, &run.id, |_| panic!("neither limit may open a request"), |_| {}).await.unwrap();
+    assert_eq!(
+        result.status,
+        Status::Limited,
+        "the exhausted budget must not be mistaken for a resumable crash-loop block"
+    );
+    assert!(result.reason.contains("time"), "{}", result.reason);
+    assert_eq!(result.restart_guard.consecutive_interruptions, 0);
+    assert!(work::control(&rook, &run.id, Action::Resume).is_err());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_prompt_sent_during_a_model_request_is_acknowledged_at_the_next_boundary() {
     let workspace = tempfile::tempdir().unwrap();
@@ -1366,6 +1490,12 @@ async fn stage_ownership_is_bounded_and_released_when_the_future_finishes() {
         .await
         .unwrap_err();
         assert!(duplicate.to_string().contains("already running"), "{duplicate}");
+        assert_eq!(
+            work::read(&rook, &first.id).unwrap().run.restart_guard.consecutive_interruptions,
+            0,
+            "a competing observer cannot count the currently owned stage as a crash"
+        );
+        assert!(!work::read(&rook, &second.id).unwrap().run.restart_guard.unfinished_stage);
         provider.release.notify_one();
     };
     let (result, ()) = tokio::join!(running, competing);
@@ -1502,6 +1632,11 @@ async fn retries_back_off_until_the_outage_window_requires_attention() {
         .await
         .unwrap();
         assert_eq!(result.consecutive_failures, attempt);
+        assert!(!result.restart_guard.unfinished_stage);
+        assert_eq!(
+            result.restart_guard.consecutive_interruptions, 0,
+            "handled provider failures are not interrupted stages"
+        );
         if attempt == 3 {
             assert_eq!(result.status, Status::Blocked);
         } else {

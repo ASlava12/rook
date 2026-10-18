@@ -820,6 +820,8 @@ pub struct WorkConfig {
     pub retry_initial_secs: u64,
     pub retry_max_secs: u64,
     pub retry_window_secs: u64,
+    /// Consecutive unfinished stages before automatic recovery parks the run.
+    pub restart_limit: u32,
     pub idle_iterations: u32,
 }
 
@@ -839,6 +841,7 @@ impl Default for WorkConfig {
             retry_initial_secs: 30,
             retry_max_secs: 1800,
             retry_window_secs: 24 * 3600,
+            restart_limit: 5,
             idle_iterations: 8,
         }
     }

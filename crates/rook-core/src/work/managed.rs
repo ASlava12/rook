@@ -304,6 +304,10 @@ fn start_inner(
         iterations: 0,
         tokens: 0,
         consecutive_failures: 0,
+        restart_guard: rook_proto::work::RestartGuard {
+            limit: config.restart_limit.clamp(1, 100),
+            ..Default::default()
+        },
         session: None,
         instructions: Vec::new(),
         recent: Vec::new(),
@@ -575,6 +579,8 @@ fn apply_control(rook: &Rook, saved: &mut Saved, action: Action) -> Result<()> {
             saved.run.consecutive_failures = 0;
             saved.failed_since = None;
             saved.idle = 0;
+            saved.run.restart_guard.unfinished_stage = false;
+            saved.run.restart_guard.consecutive_interruptions = 0;
         }
     }
     Ok(())
@@ -798,19 +804,78 @@ pub async fn advance<'a>(
     make_agent: impl Fn(u128) -> Result<crate::agent::AgentLoop<'a>>,
     mut progress: impl FnMut(crate::agent::Progress<'_>),
 ) -> Result<Run> {
-    let (mut saved, _step) = {
+    let (identity, _step) = {
         let _writing = WRITING.lock().unwrap_or_else(|e| e.into_inner());
-        let saved = read(rook, id)?;
+        let mut saved = read(rook, id)?;
         if !saved.run.status.runnable() || saved.run.next_attempt_at.is_some_and(|at| at > now()) {
             return Ok(saved.run);
         }
-        (saved, Step::claim(rook, id)?)
+        if rook.workspace.canonicalize().map_err(|e| bad(e.to_string()))?.display().to_string()
+            != saved.run.workspace
+        {
+            return Err(bad("work belongs to another workspace"));
+        }
+        let step = Step::claim(rook, id)?;
+        if let Some(reason) = limit(&saved.run, now()) {
+            saved.run.status = Status::Limited;
+            saved.run.reason = reason.into();
+            saved.run.next_attempt_at = None;
+            saved.run.updated_at = now();
+            save(rook, &saved)?;
+            return Ok(saved.run);
+        }
+        let guard = &mut saved.run.restart_guard;
+        guard.limit = guard.limit.clamp(1, 100);
+        if guard.unfinished_stage {
+            guard.consecutive_interruptions = guard.consecutive_interruptions.saturating_add(1);
+            if guard.consecutive_interruptions >= guard.limit {
+                saved.run.status = Status::Blocked;
+                saved.run.next_attempt_at = None;
+                saved.run.reason = format!(
+                    "{} consecutive interrupted stages reached the restart limit {}; automatic recovery is parked. Inspect the saved execution/recovery receipts, then explicitly resume to reset the guard",
+                    guard.consecutive_interruptions, guard.limit
+                );
+                saved.run.updated_at = now();
+                save(rook, &saved)?;
+                return Ok(saved.run);
+            }
+        }
+        guard.unfinished_stage = true;
+        saved.run.updated_at = now();
+        // Save flushes before a model/tool/evaluation stage can begin. An
+        // abandoned future or lost process leaves the marker; a handled error
+        // returns through the cleanup below and is not a crash-loop attempt.
+        save(rook, &saved)?;
+        (saved.run.identity(), step)
     };
-    if rook.workspace.canonicalize().map_err(|e| bad(e.to_string()))?.display().to_string()
-        != saved.run.workspace
-    {
-        return Err(bad("work belongs to another workspace"));
+    let result = advance_stage(rook, id, make_agent, &mut progress).await;
+    let retired = retire_stage(rook, id, &identity);
+    match (result, retired) {
+        (Err(error), _) | (_, Err(error)) => Err(error),
+        (Ok(_), Ok(run)) => Ok(run),
     }
+}
+
+fn retire_stage(rook: &Rook, id: &str, identity: &RunIdentity) -> Result<Run> {
+    let _writing = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+    let mut saved = read(rook, id)?;
+    if saved.run.identity() == *identity {
+        saved.run.restart_guard.unfinished_stage = false;
+        saved.run.restart_guard.consecutive_interruptions = 0;
+        // Closing ownership must not move a handled failure's updated_at: its
+        // persisted retry deadline and backoff duration belong to that event.
+        save(rook, &saved)?;
+    }
+    Ok(saved.run)
+}
+
+async fn advance_stage<'a>(
+    rook: &'a Rook,
+    id: &str,
+    make_agent: impl Fn(u128) -> Result<crate::agent::AgentLoop<'a>>,
+    mut progress: impl FnMut(crate::agent::Progress<'_>),
+) -> Result<Run> {
+    let mut saved = read(rook, id)?;
     if !saved.run.status.runnable() || saved.run.next_attempt_at.is_some_and(|at| at > now()) {
         return Ok(saved.run);
     }

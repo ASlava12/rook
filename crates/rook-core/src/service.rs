@@ -2062,6 +2062,38 @@ impl Rook {
         Ok(self.store.delete_session(session)?)
     }
 
+    /// Explicit operator deletion with bounded, non-interactive observers.
+    /// Retention and internal cleanup intentionally use the storage-only path.
+    pub async fn delete_session_notifying(&self, session: u128) -> Result<u64> {
+        if self.config.sandbox.network_policy.enabled
+            && self.config.hooks.iter().any(|hook| hook.event == crate::hooks::Event::SessionDelete)
+        {
+            return Err(CoreError::Other(
+                "session_delete hooks are unavailable under domain network policy; no session was deleted"
+                    .into(),
+            ));
+        }
+        let Some(events) = self.store.delete_session_if_present(session)? else {
+            return Ok(0);
+        };
+        let event = crate::hooks::Event::SessionDelete;
+        let (hooks, errors) = crate::hooks::Hooks::compile(&self.config.hooks);
+        for error in errors {
+            tracing::warn!("session deletion hook configuration: {error}");
+        }
+        if hooks.listens(event) {
+            self.store.flush()?;
+            hooks
+                .run(
+                    event,
+                    "explicit",
+                    &serde_json::json!({"event":"session_delete", "session":rook_store::format_session_id(session), "reason":"explicit", "events":events}),
+                )
+                .await;
+        }
+        Ok(events)
+    }
+
     fn retention_policy(&self) -> rook_store::RetentionPolicy {
         let mut policy = self.config.storage.retention.clone();
         policy.protect_tags.push("rook:execution".into());
@@ -2115,7 +2147,7 @@ impl Rook {
                 }
                 for id in oldest {
                     prune.sessions_deleted += 1;
-                    prune.events_deleted += self.store.delete_session(id)?;
+                    prune.events_deleted += self.delete_session(id)?;
                 }
                 let round = self.store.gc(&GcOptions {
                     expand: Some(&fileset::gc_expander),

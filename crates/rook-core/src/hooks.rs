@@ -32,6 +32,10 @@ pub enum Event {
     PostTool,
     /// After the turn finishes. Nothing it says changes the outcome.
     TurnEnd,
+    /// After a compaction record commits. Observer output cannot alter replay.
+    PostCompaction,
+    /// After an explicit operator deletion commits; retention does not invoke it.
+    SessionDelete,
 }
 
 impl Event {
@@ -44,7 +48,13 @@ impl Event {
             Event::PreTool => "pre_tool",
             Event::PostTool => "post_tool",
             Event::TurnEnd => "turn_end",
+            Event::PostCompaction => "post_compaction",
+            Event::SessionDelete => "session_delete",
         }
+    }
+
+    fn observer(self) -> bool {
+        matches!(self, Self::PostCompaction | Self::SessionDelete)
     }
 }
 
@@ -53,8 +63,8 @@ impl Event {
 pub struct HookConfig {
     pub event: Event,
     /// Restricts the hook to matching subjects: a tool name for the tool events,
-    /// the prompt otherwise. A plain string matches as a substring, `/…/` is a
-    /// regular expression.
+    /// the prompt for turn events, or summary/source_fallback/explicit for
+    /// observers. A plain string matches as a substring, `/…/` is a regex.
     #[serde(rename = "match")]
     pub matches: Option<String>,
     pub command: String,
@@ -148,6 +158,10 @@ impl Hooks {
         self.hooks.iter().any(|(config, _, _)| config.ui)
     }
 
+    pub(crate) fn listens(&self, event: Event) -> bool {
+        self.hooks.iter().any(|(config, _, _)| config.event == event)
+    }
+
     pub(crate) async fn run_with_ui(
         &self,
         event: Event,
@@ -168,6 +182,15 @@ impl Hooks {
                 continue;
             }
 
+            // Observer callbacks run after the operation is committed. They
+            // cannot ask for input, inject context/UI or veto other observers.
+            let observer;
+            let config = if event.observer() {
+                observer = HookConfig { ui: false, ui_stream: false, ..config.clone() };
+                &observer
+            } else {
+                config
+            };
             let reply = match invoke(config, payload, *ordinal, settings, asker, &mut on_ui).await {
                 Ok(reply) => reply,
                 Err(e) => {
@@ -181,6 +204,10 @@ impl Hooks {
                     continue;
                 }
             };
+
+            if event.observer() {
+                continue;
+            }
 
             if let Some(context) = reply.context.filter(|c| !c.trim().is_empty()) {
                 outcome.context.push(context);

@@ -10,7 +10,9 @@ import os
 import pathlib
 import select
 import signal
+import shlex
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -22,6 +24,7 @@ parser.add_argument('--bin-dir', type=pathlib.Path, required=True,
 parser.add_argument('--tmp-root', type=pathlib.Path,
                     help='Optional parent directory for owned temporary state')
 parser.add_argument('--browser', type=pathlib.Path, help='Optional Chrome/Chromium executable for real UI checks')
+parser.add_argument('--followup', action='store_true', help='Also verify the post-0.17 observer, tool-status and crash-loop contracts')
 args = parser.parse_args()
 BINARY = args.bin_dir.resolve()
 for name in ['rook', 'rookd']:
@@ -31,11 +34,13 @@ if not hasattr(os, 'openpty'):
     parser.error('this native terminal probe requires a Unix PTY')
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 seen = threading.Event(); release = threading.Event(); models = []
+crash_entered = threading.Condition(); crash_count = 0; crash_release = threading.Event()
 class LLM(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args): pass
     def do_GET(self):
         data = json.dumps({'data':[{'id':'A'},{'id':'B'}]}).encode(); self.send_response(200); self.send_header('Content-Type','application/json'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data)
     def do_POST(self):
+        global crash_count
         self.connection.settimeout(30)
         size = int(self.headers.get('content-length', 0))
         assert 0 < size <= 2097152, 'fixture request limit reached'
@@ -43,17 +48,29 @@ class LLM(http.server.BaseHTTPRequestHandler):
         model = request['model']; assert len(models)<64; models.append((model,request.get('reasoning_effort')))
         text = '\n'.join(str(m.get('content','')) for m in request['messages'])
         classify = 'Classify whether' in str(request['messages'][0].get('content',''))
+        if args.followup and 'CHECK_CRASH_GUARD' in text and not classify:
+            with crash_entered:
+                crash_count += 1; crash_entered.notify_all()
+            if not crash_release.wait(90): raise RuntimeError('owned crash gate expired')
         if 'HELLO_BOUNDARY' in text and not classify and not seen.is_set():
             seen.set()
             if not release.wait(30): raise RuntimeError('owned model gate expired')
         answer = '{"action":"finish"}' if classify else 'Hello from model '+model
         chunk = {'id':'owned-response','model':model,'choices':[{'index':0,'delta':{'role':'assistant','content':answer},'finish_reason':None}]}
         end = {'id':'owned-response','model':model,'choices':[{'index':0,'delta':{},'finish_reason':'stop'}], 'usage':{'prompt_tokens':100,'completion_tokens':5,'total_tokens':105}}
+        last_user = next((str(m.get('content','')) for m in reversed(request['messages']) if m.get('role')=='user'), '')
+        if args.followup and 'CHECK_TOOL_STATUS' in last_user and not classify and request['messages'][-1].get('role')!='tool':
+            assert any(tool.get('function',{}).get('name')=='tool_status' for tool in request.get('tools',[])), 'tool_status missing from the actual wire request'
+            chunk['choices'][0]['delta']={'role':'assistant','tool_calls':[{'index':0,'id':'status-probe','type':'function','function':{'name':'tool_status','arguments':'{"query":"recall"}'}}]}
+            end['choices'][0]['finish_reason']='tool_calls'
         if request.get('stream'):
             data = ('data: '+json.dumps(chunk)+'\n\ndata: '+json.dumps(end)+'\n\ndata: [DONE]\n\n').encode(); content_type = 'text/event-stream'
         else:
             data = json.dumps({'id':'owned-response','model':model,'choices':[{'index':0,'message':{'role':'assistant','content':answer},'finish_reason':'stop'}],'usage':{'prompt_tokens':100,'completion_tokens':5,'total_tokens':105}}).encode(); content_type = 'application/json'
-        self.send_response(200); self.send_header('Content-Type',content_type); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data)
+        try:
+            self.send_response(200); self.send_header('Content-Type',content_type); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            if not (args.followup and 'CHECK_CRASH_GUARD' in text): raise
 server = http.server.ThreadingHTTPServer(('127.0.0.1',0), LLM)
 threading.Thread(target=server.serve_forever,daemon=True).start()
 with tempfile.TemporaryDirectory(prefix='rook-r17-frontend-',dir=args.tmp_root) as directory:
@@ -64,6 +81,15 @@ with tempfile.TemporaryDirectory(prefix='rook-r17-frontend-',dir=args.tmp_root) 
         p=subprocess.run([str(BINARY/'rook'),'--workspace',str(workspace),*args],env=env,cwd=workspace,input=input,text=True,capture_output=True,timeout=40)
         assert p.returncode == 0, (args,p.returncode,p.stdout[-2000:],p.stderr[-2000:])
         return p.stdout
+    if args.followup:
+        callback=root/'observer.py'; receipts=root/'deletions.jsonl'
+        callback.write_text('import json,sys\npayload=json.load(sys.stdin)\nwith open(sys.argv[1], "a") as output: output.write(json.dumps(payload)+"\\n")\n')
+        with (home/'config.toml').open('a') as config:
+            config.write('\n[work]\nrestart_limit=2\n[[hooks]]\nevent="session_delete"\ncommand='+json.dumps(shlex.join([sys.executable,str(callback),str(receipts)]))+'\n')
+        cli('chat',input='/quit\n')
+        deleted=json.loads(cli('--json','session','ls'))[0]['id']
+        cli('session','rm',deleted)
+        assert json.loads(receipts.read_text().splitlines()[0])['session']==deleted
     cli('chat', input='/quit\n')
     sid=json.loads(cli('--json','session','ls'))[0]['id']
     original=json.loads(cli('--json','session','model',sid,'A','--request-id','pick-A','--revision','0','--effort','low'))
@@ -84,9 +110,9 @@ with tempfile.TemporaryDirectory(prefix='rook-r17-frontend-',dir=args.tmp_root) 
         child.kill();child.wait();raise RuntimeError('owned daemon did not start')
     try:
         daemon,base=start()
-        def api(path,body=None):
+        def api(path,body=None,method=None):
             data=None if body is None else json.dumps(body).encode()
-            request=urllib.request.Request(base+path,data=data,headers={'Content-Type':'application/json'} if data else {})
+            request=urllib.request.Request(base+path,data=data,headers={'Content-Type':'application/json'} if data else {},method=method)
             with opener.open(request,timeout=10) as response: return json.load(response)
         run=subprocess.Popen([str(BINARY/'rook'),'--workspace',str(workspace),'run','--session',sid,'Say HELLO_BOUNDARY'],env=env,cwd=workspace,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
         assert seen.wait(20), 'owned LLM never received the first root request'
@@ -122,6 +148,25 @@ with tempfile.TemporaryDirectory(prefix='rook-r17-frontend-',dir=args.tmp_root) 
         daemon,base=start()
         assert api('/api/sessions/'+sid+'/model-selection',{'id':'pick-A','expected_revision':0,'model':'A','effort':'low'})==original
         assert api('/api/sessions/'+sid+'/model-selection')['selected']=='B'
+        if args.followup:
+            job=api('/api/work',{'goal':'CHECK_CRASH_GUARD','workspace':str(workspace),'autonomous':False,'max_iterations':10,'max_tokens':100000,'max_seconds':300})
+            for count in [1,2]:
+                with crash_entered:
+                    assert crash_entered.wait_for(lambda:crash_count>=count,timeout=30), 'owned worker did not reach the physical request'
+                saved=api('/api/work/'+job['id'])
+                assert saved['restart_guard']=={'unfinished_stage':True,'consecutive_interruptions':count-1,'limit':2},saved
+                daemon.kill();daemon.wait(timeout=10);daemon=None
+                daemon,base=start()
+            until=time.monotonic()+30
+            while time.monotonic()<until:
+                saved=api('/api/work/'+job['id'])
+                if saved['status']=='blocked':break
+                time.sleep(.05)
+            else:raise AssertionError('crash-loop guard did not park the restarted worker')
+            assert crash_count==2 and saved['restart_guard']['consecutive_interruptions']==2 and saved['consecutive_failures']==0,saved
+            assert 'restart limit 2' in saved['reason']
+            shown=cli('task','show',job['id']); assert 'interrupted stage recovery: 2 / 2' in shown,shown
+            api('/api/work/'+job['id']+'/control','cancel');crash_release.set()
         drain=api('/api/daemon/drain',{'action':'start','id':'probe-drain','timeout_secs':30,'restart':False})
         until=time.monotonic()+10
         while drain['phase']=='draining' and time.monotonic()<until:
@@ -206,9 +251,20 @@ with tempfile.TemporaryDirectory(prefix='rook-r17-frontend-',dir=args.tmp_root) 
         assert api('/api/health')['turns_running']==0 and daemon.poll() is None
         assert failed['handoff']['phase']=='failed',failed
         assert api('/api/daemon/drain',{'action':'cancel','id':'failed-handoff'})['phase']=='cancelled'
+        if args.followup:
+            cli('run','--session',sid,'CHECK_TOOL_STATUS')
+            transcript=json.loads(cli('--json','session','show',sid))
+            status=next(json.loads(row['body']) for row in reversed(transcript) if row['kind']=='tool-result' and row['label']=='tool_status')
+            assert status['items'][0]['status']=='unavailable' and 'memory is disabled' in status['items'][0]['reason'],status
+            assert api('/api/sessions/'+sid,method='DELETE')['events']>0
+            assert api('/api/sessions/'+sid,method='DELETE')['events']==0
+            deleted_payloads=[json.loads(line) for line in receipts.read_text().splitlines()]
+            assert [item['session'] for item in deleted_payloads]==[deleted,sid],deleted_payloads
+            print(json.dumps({'offline_cli_delete_observer':True,'daemon_delete_observer_once':True,'wire_tool_status_dispatch':True,'physical_crash_recovery_limit':True,'restart_limit_cli_status':True}))
         print(json.dumps({'busy_selection_ms':busy_ms,'models':models,'selection':view,'share_events':share['events'],'omitted':share['omitted'],'runtime_metrics':len(report['runtime']['aggregates']),'exact_retry_after_restart':True,'api_cli_export_parity':True,'paired_effort':True,'copy_read_parity':True,'drain_cancel_and_restart':True,'failed_controller_keeps_old_daemon':True,'terminal_pty_lifecycle':True,'json_pty_no_osc':True,'background_busy_owner_and_cli':True}))
     finally:
         release.set()
+        crash_release.set()
         if daemon is None and (home/'rookd.addr').exists():
             try:cli('daemon','stop','--force')
             except Exception:pass

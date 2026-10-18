@@ -341,6 +341,10 @@
     "kind": "integer",
     "help": "How long to retry a provider outage before requiring attention, in seconds."
   },
+  "work.restart_limit": {
+    "kind": "integer",
+    "help": "Consecutive interrupted managed stages before automatic recovery parks a run (1..100, default 5). Saved per goal; explicit resume resets the interruption counter. Separate from handled provider retries."
+  },
   "work.idle_iterations": {
     "kind": "integer",
     "help": "Consecutive iterations without progress before pausing the run."
@@ -735,18 +739,20 @@
   },
   "hooks.*.event": {
     "kind": "string",
-    "help": "When the hook runs: session_start, prompt, pre_tool, post_tool or turn_end.",
+    "help": "When the hook runs. post_compaction and session_delete are non-interactive observers; their replies cannot change context or decisions.",
     "choices": [
       "session_start",
       "prompt",
       "pre_tool",
       "post_tool",
-      "turn_end"
+      "turn_end",
+      "post_compaction",
+      "session_delete"
     ]
   },
   "hooks.*.match": {
     "kind": "string",
-    "help": "Restricts the hook to matching subjects: a tool name for the tool events, the prompt otherwise. A plain string matches as a substring, /…/ is a regular expression."
+    "help": "Restricts the hook to matching subjects: tool names, prompts, summary/source_fallback for post_compaction or explicit for session_delete. A plain string matches as a substring, /…/ is a regular expression."
   },
   "hooks.*.command": {
     "kind": "string",

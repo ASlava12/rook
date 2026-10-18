@@ -1225,8 +1225,19 @@ impl Store {
     /// Drop a session and its log. Objects it referenced survive until `gc`,
     /// because other sessions may share them.
     pub fn delete_session(&self, session: u128) -> Result<u64> {
+        self.delete_session_record(session).map(|(events, _)| events)
+    }
+
+    /// Atomically distinguish a removed session (including an empty one) from
+    /// a retry. Observers must not infer this from a separate metadata read.
+    pub fn delete_session_if_present(&self, session: u128) -> Result<Option<u64>> {
+        self.delete_session_record(session).map(|(events, existed)| existed.then_some(events))
+    }
+
+    fn delete_session_record(&self, session: u128) -> Result<(u64, bool)> {
         let txn = self.db.begin_write()?;
         let mut removed = 0u64;
+        let existed;
         {
             let mut events = txn.open_table(schema::EVENTS)?;
             let start = schema::event_key(session, 0);
@@ -1240,7 +1251,7 @@ impl Store {
                 removed += 1;
             }
             let mut sessions = txn.open_table(schema::SESSIONS)?;
-            sessions.remove(schema::session_key(session).as_slice())?;
+            existed = sessions.remove(schema::session_key(session).as_slice())?.is_some();
 
             // Whatever is kept beside a session rather than in it is keyed by
             // the session id, and would otherwise outlive the session forever —
@@ -1269,7 +1280,7 @@ impl Store {
             }
         }
         txn.commit()?;
-        Ok(removed)
+        Ok((removed, existed))
     }
 
     // ---------------------------------------------------------------- kv pairs

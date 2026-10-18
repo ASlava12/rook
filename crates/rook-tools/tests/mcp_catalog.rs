@@ -225,6 +225,11 @@ async fn overflow_stays_discoverable_callable_and_bounded_without_changing_schem
         assert_eq!(summary.deferred, many.len() - direct.len());
         assert_eq!(summary.deferred_names.len(), summary.deferred.min(16));
         assert_eq!(summary.omitted_deferred, summary.deferred - summary.deferred_names.len());
+        assert_eq!(
+            bounded.mcp_tool_names().count(),
+            many.len(),
+            "availability must include deferred tools beyond the 16-name display sample"
+        );
         assert!(serde_json::to_vec(&specs).unwrap().len() <= bound.max_bytes);
         assert!(
             direct.iter().map(|s| serde_json::to_vec(s).unwrap().len() + 1).sum::<usize>()

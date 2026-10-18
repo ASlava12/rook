@@ -66,6 +66,13 @@ impl<'a> AgentLoop<'a> {
             }
             specs.push(if lazy { spec.stub() } else { spec })
         };
+        push(ToolSpec {
+            name: super::capabilities::TOOL.into(),
+            description: "Inspect session tool availability.".into(),
+            parameters: json!({"type":"object","properties":{
+                "query":{"type":"string","maxLength":129}
+            }}),
+        });
         if !checking && self.asker.as_ref().is_some_and(|asker| asker.supports_private_input()) {
             push(ToolSpec {
                 name:super::REQUEST_SECRET.into(),

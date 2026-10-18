@@ -142,7 +142,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --title "$GITHUB_REF_NAME" \
-            --generate-notes \
-            --verify-tag
+          notes="docs/releases/${GITHUB_REF_NAME#v}.md"
+          if [ -f "$notes" ]; then
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --title "$GITHUB_REF_NAME" --notes-file "$notes" --verify-tag
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
+          fi

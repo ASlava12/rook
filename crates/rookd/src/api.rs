@@ -2204,7 +2204,7 @@ async fn fork(
 
 async fn delete_session(State(s): State<Shared>, Path(id): Path<String>) -> ApiResult<serde_json::Value> {
     let rook = s.rook.read().await;
-    Ok(Json(serde_json::json!({ "events": rook.delete_session(session_id(&id)?)? })))
+    Ok(Json(serde_json::json!({ "events": rook.delete_session_notifying(session_id(&id)?).await? })))
 }
 
 /// A store pass on a blocking thread, with the panic reported as one.

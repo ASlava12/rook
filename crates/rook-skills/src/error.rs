@@ -20,6 +20,10 @@ pub enum SkillError {
     NotFound(String),
     #[error("skill {name} has no version compatible with this environment; {detail}")]
     NoCompatibleVersion { name: String, detail: String },
+    #[error(
+        "{path}: skill discovery stopped at its {limit} limit; some skills or resources were not inspected"
+    )]
+    DiscoveryLimit { path: PathBuf, limit: &'static str },
 }
 
 pub type Result<T> = std::result::Result<T, SkillError>;

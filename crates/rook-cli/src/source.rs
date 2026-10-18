@@ -1245,7 +1245,10 @@ impl Source {
 
     pub fn delete_session(&self, session: u128) -> Result<u64> {
         match self {
-            Self::Local(rook) => Ok(rook.delete_session(session)?),
+            Self::Local(rook) => {
+                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+                Ok(runtime.block_on(rook.delete_session_notifying(session))?)
+            }
             Self::Daemon(d) => {
                 let id = rook_store::format_session_id(session);
                 let said: serde_json::Value = d.delete(&format!("/api/sessions/{id}"))?;

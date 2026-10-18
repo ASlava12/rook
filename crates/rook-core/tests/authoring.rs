@@ -122,7 +122,8 @@ fn a_skill_can_carry_the_tool_its_instructions_call() {
     assert!(dir.join("template.md").exists());
 
     let loaded = f.rook.skills().resolve("csv-report", f.rook.env()).unwrap();
-    let resources: Vec<String> = loaded.skill.resources().iter().map(|r| r.display().to_string()).collect();
+    let resources: Vec<String> =
+        loaded.skill.resources().unwrap().iter().map(|r| r.display().to_string()).collect();
     assert!(resources.contains(&"report.py".to_string()), "the skill knows what it carries: {resources:?}");
 }
 

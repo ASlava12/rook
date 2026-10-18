@@ -173,11 +173,28 @@ pub struct Run {
     pub iterations: u32,
     pub tokens: u64,
     pub consecutive_failures: u32,
+    /// Durable interrupted-stage receipts; this is not evidence of a live owner.
+    #[serde(default)]
+    pub restart_guard: RestartGuard,
     pub session: Option<String>,
     pub instructions: Vec<Steering>,
     pub recent: Vec<Iteration>,
     pub reply: String,
     pub verification: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RestartGuard {
+    pub unfinished_stage: bool,
+    pub consecutive_interruptions: u32,
+    pub limit: u32,
+}
+
+impl Default for RestartGuard {
+    fn default() -> Self {
+        Self { unfinished_stage: false, consecutive_interruptions: 0, limit: 5 }
+    }
 }
 
 /// A running consumer must not adopt a replacement goal with the same ID.

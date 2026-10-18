@@ -17,8 +17,11 @@ use rook_tools::policy::Stance;
 /// `SKILL.md`, which is most of them.
 fn bundled(skill: &rook_skills::Skill) -> String {
     const MOST: usize = 20;
-    let files: Vec<String> = skill
-        .resources()
+    let files = match skill.resources() {
+        Ok(files) => files,
+        Err(why) => return format!("\n\nBundled resource listing unavailable: {why}."),
+    };
+    let files: Vec<String> = files
         .into_iter()
         .filter(|rel| rel != std::path::Path::new("SKILL.md"))
         .filter(|rel| !rel.starts_with("variants"))
@@ -63,6 +66,8 @@ impl<'a> AgentLoop<'a> {
         s.push_str(
             "You are Rook, an autonomous agent working in the configured workspace.\n\
              Work in small verified steps. Prefer reading before editing. State what you did.\n\
+             Before claiming a capability is missing, check `tool_status` when available; \
+             session limits do not establish a product limitation.\n\
              Before saying how a library, tool or protocol behaves, ask `docs` about it instead \
              of recalling: it answers from documentation kept on this machine, and gathers it \
              when there is none.\n\

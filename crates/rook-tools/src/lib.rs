@@ -641,6 +641,7 @@ pub struct ToolBox {
     mcp_catalog: mcp::CatalogSummary,
     mcp_sources: Arc<Vec<(Arc<rook_mcp::Server>, Vec<rook_mcp::ToolDescriptor>)>>,
     mcp_names: Arc<std::collections::BTreeSet<String>>,
+    mcp_callable: Arc<std::collections::BTreeSet<String>>,
     mcp_versions: Arc<Vec<u64>>,
     mcp_dropped: Arc<std::collections::BTreeSet<String>>,
     mcp_limits: mcp::CatalogLimits,
@@ -677,6 +678,7 @@ impl ToolBox {
             mcp_catalog: self.mcp_catalog.clone(),
             mcp_sources: self.mcp_sources.clone(),
             mcp_names: self.mcp_names.clone(),
+            mcp_callable: self.mcp_callable.clone(),
             mcp_versions: self.mcp_versions.clone(),
             mcp_dropped: Arc::new(
                 self.mcp_dropped.iter().cloned().chain(dropped.iter().map(|s| (*s).to_owned())).collect(),
@@ -705,6 +707,7 @@ impl ToolBox {
         catalog.tools.retain(|tool| !self.mcp_dropped.contains(tool.name()));
         self.mcp_names = Arc::new(catalog.tools.iter().map(|tool| tool.name().to_owned()).collect());
         self.mcp_catalog = catalog.mcp_catalog;
+        self.mcp_callable = catalog.mcp_callable;
         for tool in catalog.tools {
             self.register(tool);
         }
@@ -782,6 +785,12 @@ impl ToolBox {
 
     pub fn mcp_catalog_summary(&self) -> &mcp::CatalogSummary {
         &self.mcp_catalog
+    }
+
+    /// Exact model-visible MCP names, including tools deferred from the prefix.
+    /// The set belongs to this installed catalog and obeys removals/restrictions.
+    pub fn mcp_tool_names(&self) -> impl Iterator<Item = &str> {
+        self.mcp_callable.iter().map(String::as_str)
     }
 
     pub fn get(&self, name: &str) -> Option<&Arc<dyn Tool>> {

@@ -235,6 +235,14 @@ impl<'a> AgentLoop<'a> {
         }
 
         outcome.tools_called.push(call.name.clone());
+        if call.name == super::capabilities::TOOL {
+            let result = match self.tool_status(&call.arguments) {
+                Ok(value) => (value.to_string(), false),
+                Err(why) => (why, true),
+            };
+            self.rook.log(self.session, EventKind::ToolResult, &call.name, &result.0).ok();
+            return result;
+        }
         if self.rook.config.sandbox.network_policy.enabled && (call.name == DOCS || call.name == FIND_SKILL) {
             let refusal = format!(
                 "{} is unavailable under domain network policy; fetch permitted sources with a local foreground run_command",

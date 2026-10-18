@@ -1821,6 +1821,15 @@ recorded so the design question survives the session that raised it.
 
 ## Next
 
+**Post-0.17 reference follow-up, 2026-10-18.** Five capabilities are implemented
+and verified locally: session-specific tool availability,
+post-compaction observers, explicit session-deletion observers, bounded skill
+discovery/resources and persistent interrupted-stage recovery limits. Seven
+reference pointers advance; three already match their fetched tips. See the
+[frozen source review](research/reference-review-20261018-followup.md) and
+[delivery contract](reference-followup-20261018.md). They form the 0.18.0 delivery
+batch; exact-commit platform CI and published-archive checks gate publication.
+
 **Reference delivery cycle, 2026-10-18 (0.17.0).** The seven R17 runtime items,
 live MCP catalog refresh, Gemini malformed-output recovery and a session-family
 background-work overview are implemented. Refactoring, audit corrections, the

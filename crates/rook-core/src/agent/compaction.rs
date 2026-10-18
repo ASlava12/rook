@@ -137,6 +137,33 @@ impl<'a> AgentLoop<'a> {
                     .map_err(CoreError::from)
                     .and_then(|record| self.rook.log(self.session, EventKind::Compaction, "auto", &record));
                 observed.finish(saved.as_ref().map(|seq| (*seq, note.summary.as_str())));
+                if let Ok(seq) = saved
+                    && !self.rook.config.sandbox.network_policy.enabled
+                    && self.hooks.listens(crate::hooks::Event::PostCompaction)
+                {
+                    if let Err(why) = self.rook.store.flush() {
+                        tracing::warn!(
+                            "compaction observer skipped because durability could not be confirmed: {why}"
+                        );
+                        return;
+                    }
+                    // The durable record is the commit seam shared by manual,
+                    // threshold and provider-overflow compactions. A failed or
+                    // cancelled candidate never reaches these observers.
+                    self.hooks
+                        .run(
+                            crate::hooks::Event::PostCompaction,
+                            if note.summarized { "summary" } else { "source_fallback" },
+                            &self.payload(serde_json::json!({
+                                "event":"post_compaction", "event_seq":seq,
+                                "compaction_id":note.compaction_id,
+                                "through_seq":note.through_seq,
+                                "dropped_events":note.dropped_events,
+                                "summarized":note.summarized
+                            })),
+                        )
+                        .await;
+                }
             }
             // Not recorded as a compaction: one with no position in it frees no
             // context, so the next turn compacts again, and the one after that,
@@ -317,8 +344,8 @@ impl<'a> AgentLoop<'a> {
         // recording: the span is dropped from the request either way, and the
         // events themselves are not deleted, so the note says where to read
         // them rather than pretending they are gone.
-        let summary = match self.ask_for_summary(material).await {
-            Ok(text) => text,
+        let (summary, summarized) = match self.ask_for_summary(material).await {
+            Ok(text) => (text, true),
             Err(e) => {
                 // Provider errors can themselves contain a large response.
                 // Admit their borrowed display prefix before formatting a note.
@@ -332,10 +359,13 @@ impl<'a> AgentLoop<'a> {
                     }
                     _ => "summary request failed; inspect the saved diagnostics",
                 };
-                format!(
-                    "The transcript before this point could not be summarised ({reason}). It is still in \
+                (
+                    format!(
+                        "The transcript before this point could not be summarised ({reason}). It is still in \
                      the session log — `rook session show` reads it back — so ask before assuming \
                      what is in it."
+                    ),
+                    false,
                 )
             }
         };
@@ -344,6 +374,7 @@ impl<'a> AgentLoop<'a> {
             through_seq,
             dropped_events: span.len(),
             compaction_id: rook_store::format_session_id(id),
+            summarized,
             summary: if span.iter().any(|entry| tool_images.contains(&entry.seq)) {
                 format!(
                     "{summary}\nEarlier tool images are no longer in context. Their original pixels remain available through read_result with include_images=true."
@@ -528,6 +559,7 @@ struct Compacted {
     summary: String,
     // JSON companions may gain optional fields; no postcard/wire struct changes.
     compaction_id: String,
+    summarized: bool,
 }
 
 #[cfg(test)]

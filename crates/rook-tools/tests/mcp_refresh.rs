@@ -42,6 +42,7 @@ async fn refreshed_bindings_keep_old_boxes_and_invocations_and_reject_changed_pa
     tools.refresh_mcp_catalog(CatalogLimits::default(), Duration::from_secs(10)).await;
     let old = tools.clone();
     let removed = tools.without(&["catalog__old"]);
+    assert!(!removed.mcp_tool_names().any(|name| name == "catalog__old"));
     assert!(removed.get("catalog__old").is_none());
     assert!(
         removed
@@ -54,6 +55,7 @@ async fn refreshed_bindings_keep_old_boxes_and_invocations_and_reject_changed_pa
     let invocation = tools.get("catalog__old").unwrap().clone();
     let mut restricted = tools.clone();
     restricted.restrict_mcp(&Default::default(), CatalogLimits::default());
+    assert_eq!(restricted.mcp_tool_names().count(), 0);
     let mut dropped = tools.without(&["mcp_call", "catalog__new"]);
     let page = tools.call(&context(), "mcp_tools", &json!({"limit":1})).await.unwrap();
     let page: Value = serde_json::from_str(&page.content).unwrap();
@@ -63,6 +65,8 @@ async fn refreshed_bindings_keep_old_boxes_and_invocations_and_reject_changed_pa
     assert!(tools.refresh_mcp_catalog(CatalogLimits::default(), Duration::from_secs(10)).await);
     assert!(tools.get("catalog__old").is_none());
     assert!(tools.get("catalog__new").is_some());
+    assert!(tools.mcp_tool_names().any(|name| name == "catalog__new"));
+    assert!(!tools.mcp_tool_names().any(|name| name == "catalog__old"));
     assert!(!tools.mcp_catalog_changed());
     assert_eq!(invocation.spec().description, "old");
     assert!(matches!(tools.get("catalog__new").unwrap().risk(&json!({})), Risk::External { .. }));

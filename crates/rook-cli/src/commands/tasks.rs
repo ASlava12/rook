@@ -197,6 +197,12 @@ fn describe(value: &serde_json::Value) -> String {
         if let Some(at) = run.next_attempt_at {
             text.push_str(&format!("\nnext retry: unix {at}"));
         }
+        if run.restart_guard.consecutive_interruptions > 0 {
+            text.push_str(&format!(
+                "\ninterrupted stage recovery: {} / {} (saved receipt, not live status)",
+                run.restart_guard.consecutive_interruptions, run.restart_guard.limit
+            ));
+        }
         if let Some(session) = run.session {
             text.push_str(&format!("\nsession: {session}"));
         }
