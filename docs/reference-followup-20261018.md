@@ -169,3 +169,21 @@ and [0.18.0 artifacts](https://github.com/ASlava12/rook/releases/tag/v0.18.0).
 The isolated ACP rustdoc check and the corrected pressure test both passed.
 The subsequent frozen-source full gate completed successfully, including ACP
 rustdoc; no concurrent local Cargo invocation was started during that rerun.
+
+
+### FreeBSD hook fixture follow-up
+
+CI on `6b45aa2` passed the seven other required jobs. FreeBSD's only failing
+target was the existing two-source extension UI fixture: one pair of reports
+was missing after roughly the fixture's artificial 10-second hook watchdog,
+while the VM was also compiling test subprocesses. This is consistent with
+fixture starvation; that run did not have hook-warning tracing, so it does not
+prove which invocation failed.
+
+Hook fixtures now use the existing production watchdog instead of overriding
+it with a shorter deadline. Explicit timeout tests retain their own one-second
+limits. The two-source fixture verifies both replies before assessing saved
+source ownership and captures scoped hook warnings for a future failure.
+The complete agent-loop suite passes after this test-only correction; shipping
+hook behavior and timeouts are unchanged. Exact-revision platform CI is rerun
+before tagging rather than borrowing the earlier seven successful results.

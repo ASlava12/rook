@@ -2585,7 +2585,11 @@ fn hooks_seed() -> u64 {
 }
 
 fn hook(event: rook_core::hooks::Event, command: &str) -> rook_core::hooks::HookConfig {
-    rook_core::hooks::HookConfig { event, command: command.into(), timeout_secs: 10, ..Default::default() }
+    // These fixtures check hook behavior, not scheduling latency. Keep the
+    // production watchdog: the cold FreeBSD VM can be compiling other test
+    // fixtures while these real shell children wait for their executor.
+    // Timeout-specific tests below still set their own one-second ceiling.
+    rook_core::hooks::HookConfig { event, command: command.into(), ..Default::default() }
 }
 
 /// A hook command that prints `json` back, spelled for the shell the platform
@@ -2605,6 +2609,7 @@ async fn extension_ui_reports_are_source_owned_historical_and_absent_from_model_
     let _one = one_at_a_time().await;
     use rook_core::extension_ui::Item;
     use rook_core::hooks::{Event, HookConfig};
+    use tracing::instrument::WithSubscriber;
     let f = fixture();
     let declarations = r#"{"context":"explicit model context","ui":[{"kind":"status","id":"build","text":"DISPLAY_ONLY_REPORT"},{"kind":"progress","id":"scan","label":"checking","done":1,"total":3}]}"#;
     let config = HookConfig { ui: true, ..hook(Event::Prompt, &prints(declarations)) };
@@ -2612,10 +2617,19 @@ async fn extension_ui_reports_are_source_owned_historical_and_absent_from_model_
     let session = rook.start_session("extension reports").unwrap();
     let provider = ScriptedProvider::new(vec![reply("done")]);
     let seen = provider.share();
-    AgentLoop::new(&rook, Arc::new(provider), session).run("show reports").await.unwrap();
+    let diagnostics =
+        tracing_subscriber::fmt().with_max_level(tracing::Level::WARN).with_test_writer().finish();
+    AgentLoop::new(&rook, Arc::new(provider), session)
+        .run("show reports")
+        .with_subscriber(diagnostics)
+        .await
+        .unwrap();
     let sent: String =
         seen.lock().unwrap().last().unwrap().messages.iter().map(|m| m.content.clone()).collect();
-    assert!(sent.contains("explicit model context"));
+    assert!(
+        sent.matches("explicit model context").count() >= 2,
+        "both configured prompt hooks must have replied before source ownership is assessed"
+    );
     assert!(!sent.contains("DISPLAY_ONLY_REPORT"));
     let usage = rook.context_usage(session, None).unwrap();
     assert_eq!(usage.extension_ui.reports.len(), 4);
