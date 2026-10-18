@@ -1318,7 +1318,7 @@ impl Source {
                 replaced: d.replaced,
                 workspace: d.workspace.clone(),
                 runtime: tokio::runtime::Builder::new_current_thread().enable_all().build()?,
-                http: reqwest::Client::builder().timeout(ROUTED).build()?,
+                http: daemon_client(&d.base)?,
             }),
         })
     }
@@ -1827,7 +1827,8 @@ pub struct Daemon {
 /// Short, because that is the whole question: a file left behind by a crash
 /// must not send every command into a long wait. Nothing is listening in the
 /// ordinary case and the connection is refused at once; this covers the other
-/// one, where something else took the port and will never answer.
+/// one, where something else took the port and will never answer. Discovery
+/// confirms a timeout once; a refused connection still returns immediately.
 const PROBE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// How long a routed command may take.
@@ -1846,28 +1847,53 @@ const PROBE: std::time::Duration = std::time::Duration::from_secs(5);
 /// minutes tells them apart.
 const ROUTED: std::time::Duration = std::time::Duration::from_secs(600);
 
+// A local control request must reach the owning process even in a shell
+// whose general HTTP traffic goes through a proxy. Remote addresses retain
+// their existing proxy behavior; frontend readers build the same client.
+fn daemon_client(base: &str) -> reqwest::Result<reqwest::Client> {
+    let local = reqwest::Url::parse(base).is_ok_and(|url| {
+        let Some(host) = url.host_str() else { return false };
+        let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
+        host.eq_ignore_ascii_case("localhost")
+            || host.eq_ignore_ascii_case("localhost.")
+            || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback() || ip.is_unspecified())
+    });
+    let client = reqwest::Client::builder().timeout(ROUTED);
+    if local { client.no_proxy() } else { client }.build()
+}
+
 impl Daemon {
     /// The address `rookd` wrote when it started, if something still answers
     /// there: a file left behind by a crash must not send every command into a
     /// connection error.
     pub fn running() -> Option<Self> {
-        Self::at(&paths::daemon_address_file())
+        Self::at(&paths::daemon_address_file(), PROBE)
     }
 
-    fn at(address_file: &std::path::Path) -> Option<Self> {
+    fn at(address_file: &std::path::Path, patience: std::time::Duration) -> Option<Self> {
         let base = std::fs::read_to_string(address_file).ok()?.trim().to_string();
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().ok()?;
         // reqwest panics on build without one, even for plain HTTP to loopback.
         rook_llm::init_tls();
         // The default every request inherits; the probe below asks for less.
-        let http = reqwest::Client::builder().timeout(ROUTED).build().ok()?;
+        let http = daemon_client(&base).ok()?;
         let mut daemon =
             Self { base, replaced: false, workspace: std::path::PathBuf::from("."), runtime, http };
         // The same request that proves it is alive answers what it is running,
         // so knowing costs nothing beyond what was already asked — and where
         // it is too old to answer, this side works it out from how long it
         // says it has been up.
-        let health = daemon.health().ok()?;
+        let health = match daemon.get_within::<rook_proto::Health>("/api/health", patience) {
+            Ok(health) => health,
+            Err(error) if error.downcast_ref::<reqwest::Error>().is_some_and(reqwest::Error::is_timeout) => {
+                // A missed probe is not proof that the owner disappeared.
+                // Confirm once before callers try starting another writer;
+                // reread the address in case recovery published a new port.
+                daemon.base = std::fs::read_to_string(address_file).ok()?.trim().to_string();
+                daemon.get_within::<rook_proto::Health>("/api/health", patience).ok()?
+            }
+            Err(_) => return None,
+        };
         daemon.replaced = health.binary_replaced || installed_since(health.uptime_secs);
         Some(daemon)
     }
@@ -2048,7 +2074,7 @@ mod tests {
         let address = dir.path().join("address");
         std::fs::write(&address, format!("http://127.0.0.1:{port}")).expect("an address file");
 
-        let daemon = Daemon::at(&address).expect("the probe found it, which is the precondition");
+        let daemon = Daemon::at(&address, PROBE).expect("the probe found it, which is the precondition");
 
         let began = std::time::Instant::now();
         let answered: serde_json::Value = daemon.get("/api/store/stats").expect("work is not cut short");
@@ -2056,6 +2082,72 @@ mod tests {
         // The precondition for the claim: it really did take longer than the
         // ceiling that used to be there, or this passes without proving it.
         assert!(began.elapsed() >= slow, "the stub answered early, so nothing was waited out");
+    }
+
+    #[test]
+    fn a_transient_health_timeout_is_confirmed_before_a_live_daemon_is_treated_as_absent() {
+        use std::io::{Read, Write};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        };
+
+        for answer_second in [true, false] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            listener.set_nonblocking(true).unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let requests = Arc::new(AtomicUsize::new(0));
+            let done = stop.clone();
+            let seen = requests.clone();
+            let server = std::thread::spawn(move || {
+                let watchdog = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                let mut held = Vec::new();
+                while !done.load(Ordering::SeqCst) && std::time::Instant::now() < watchdog {
+                    let (mut socket, _) = match listener.accept() {
+                        Ok(connection) => connection,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                            continue;
+                        }
+                        Err(error) => panic!("owned health listener: {error}"),
+                    };
+                    socket.set_nonblocking(false).unwrap();
+                    socket.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                    let mut header = Vec::new();
+                    while !header.ends_with(b"\r\n\r\n") && header.len() < 2048 {
+                        let mut byte = [0];
+                        assert_eq!(socket.read(&mut byte).unwrap(), 1);
+                        header.push(byte[0]);
+                    }
+                    assert!(header.starts_with(b"GET /api/health ") && header.ends_with(b"\r\n\r\n"));
+                    let number = seen.fetch_add(1, Ordering::SeqCst) + 1;
+                    assert!(number <= 2, "discovery must have a bounded confirmation");
+                    if number == 2 && answer_second {
+                        let body = r#"{"ok":true,"version":"0.19.0","api_version":1,"store_root":"/s","workspace":"/w","os":"test","arch":"test","uptime_secs":99999}"#;
+                        socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).unwrap();
+                    } else {
+                        // An accepted connection stays open without a reply:
+                        // discovery must reach its timeout, rather than EOF.
+                        held.push(socket);
+                    }
+                }
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let address = address_file(&dir, Some(&base));
+            let patience = std::time::Duration::from_secs(2);
+            let began = std::time::Instant::now();
+            let found = Daemon::at(&address, patience);
+            stop.store(true, Ordering::SeqCst);
+            server.join().unwrap();
+            let required_wait = if answer_second { patience } else { patience * 2 };
+            assert!(began.elapsed() >= required_wait, "each unanswered probe must reach its timeout");
+            assert_eq!(requests.load(Ordering::SeqCst), 2, "confirm the unresponsive address once");
+            assert_eq!(found.is_some(), answer_second, "admit only a confirmed typed health response");
+            if let Some(daemon) = found {
+                assert_eq!(daemon.base, base);
+            }
+        }
     }
 
     /// A route this build knows and the daemon does not is a version skew, and
@@ -2108,7 +2200,7 @@ mod tests {
     #[test]
     fn no_address_file_means_no_daemon() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(Daemon::at(&address_file(&dir, None)).is_none());
+        assert!(Daemon::at(&address_file(&dir, None), PROBE).is_none());
     }
 
     #[test]
@@ -2116,12 +2208,12 @@ mod tests {
         // Port 1 is reserved and never listening. A file left behind by a crash
         // must not turn every command into a connection error.
         let dir = tempfile::tempdir().unwrap();
-        assert!(Daemon::at(&address_file(&dir, Some("http://127.0.0.1:1"))).is_none());
+        assert!(Daemon::at(&address_file(&dir, Some("http://127.0.0.1:1")), PROBE).is_none());
     }
 
     #[test]
     fn an_address_that_is_not_a_url_is_not_a_daemon() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(Daemon::at(&address_file(&dir, Some("nonsense"))).is_none());
+        assert!(Daemon::at(&address_file(&dir, Some("nonsense")), PROBE).is_none());
     }
 }

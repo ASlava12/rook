@@ -1671,12 +1671,39 @@ impl Rook {
         let out = self.run(args);
         assert!(
             out.status.success(),
-            "`rook {}` failed: {}{}",
+            "`rook {}` failed: {}{}\n{}",
             args.join(" "),
             String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
+            String::from_utf8_lossy(&out.stderr),
+            // TempDir cleanup removes these files during unwinding. Keep the
+            // owned daemon's evidence in the failing job, before it disappears.
+            self.daemon_diagnostics(),
         );
         String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    fn daemon_diagnostics(&self) -> String {
+        use std::io::{Read, Seek};
+        let mut reports = Vec::new();
+        for path in [
+            self.home.path().join("rookd.err"),
+            self.home.path().join("logs").join(rook_core::telemetry::PANICS),
+        ] {
+            let Ok(mut file) = std::fs::File::open(&path) else { continue };
+            let size = file.metadata().map(|meta| meta.len()).unwrap_or(0);
+            if file.seek(std::io::SeekFrom::Start(size.saturating_sub(65536))).is_err() {
+                continue;
+            }
+            let mut bytes = Vec::new();
+            if file.take(65536).read_to_end(&mut bytes).is_ok() {
+                reports.push(format!(
+                    "{} (last 64 KiB):\n{}",
+                    path.display(),
+                    String::from_utf8_lossy(&bytes)
+                ));
+            }
+        }
+        reports.join("\n")
     }
 
     fn json(&self, args: &[&str]) -> serde_json::Value {
@@ -1691,6 +1718,83 @@ impl Rook {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("SKILL.md"), body).unwrap();
         self
+    }
+}
+
+#[test]
+fn daemon_control_bypasses_loopback_proxies_but_preserves_remote_proxy_routes() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let _one = one_at_a_time();
+    let _ = rookd();
+    fn response(path: &str, health: &str) -> String {
+        match path {
+            "/api/health" => health.into(),
+            "/api/tasks" => "[]".into(),
+            "/api/work/00000000000000000000000000" => {
+                r#"{"id":"00000000000000000000000000","status":"queued","reason":"owned control"}"#.into()
+            }
+            other => panic!("unexpected owned control route {other}"),
+        }
+    }
+    for local in [true, false] {
+        let rook = Rook::new();
+        // A regressed client cannot launch a second fixture daemon when its
+        // proxy returns a foreign response instead of the published health.
+        let _locked = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        let health = serde_json::json!({"ok":true,"version":"0.19.0","api_version":1,
+            "store_root":rook.home.path().join("store"),"workspace":rook.workspace.path(),
+            "os":"test","arch":"test","uptime_secs":99999})
+        .to_string();
+        let direct_hits = Arc::new(AtomicUsize::new(0));
+        let proxy_hits = Arc::new(AtomicUsize::new(0));
+        let direct_seen = direct_hits.clone();
+        let direct_health = health.clone();
+        let direct = fixture_model::Server::new(move |path, _| {
+            assert!(direct_seen.fetch_add(1, Ordering::SeqCst) < 3);
+            Some(("application/json", response(path, &direct_health)))
+        });
+        let proxy_seen = proxy_hits.clone();
+        let proxy = fixture_model::Server::new(move |target, _| {
+            assert!(proxy_seen.fetch_add(1, Ordering::SeqCst) < 3);
+            let body = if local {
+                // Deliberately not a typed daemon health response.
+                "{}".into()
+            } else {
+                let path = target.strip_prefix("http://192.0.2.1:54321").expect("owned synthetic origin");
+                response(path, &health)
+            };
+            Some(("application/json", body))
+        });
+        let base = if local { direct.url.as_str() } else { "http://192.0.2.1:54321" };
+        std::fs::write(rook.home.path().join("rookd.addr"), base).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_rook"))
+            .env("ROOK_HOME", rook.home.path())
+            .env("ROOK_LOG", "error")
+            .env("NO_PROXY", "")
+            .env("no_proxy", "")
+            .env("HTTP_PROXY", &proxy.url)
+            .env("http_proxy", &proxy.url)
+            .env("HTTPS_PROXY", &proxy.url)
+            .env("https_proxy", &proxy.url)
+            .env("ALL_PROXY", &proxy.url)
+            .env("all_proxy", &proxy.url)
+            .args(["--json", "task", "show", "00000000000000000000000000"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "local={local}: {}\n{}",
+            String::from_utf8_lossy(&out.stderr),
+            rook.daemon_diagnostics()
+        );
+        let reply: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(reply["reason"], "owned control");
+        assert_eq!(direct_hits.load(Ordering::SeqCst), if local { 3 } else { 0 });
+        assert_eq!(proxy_hits.load(Ordering::SeqCst), if local { 0 } else { 3 });
+        assert_eq!(std::fs::read_to_string(rook.home.path().join("rookd.addr")).unwrap(), base);
     }
 }
 
@@ -1970,6 +2074,14 @@ impl Daemon {
 
 impl Drop for Daemon {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!(
+                "owned rookd pid {} at {} before teardown: {:?}",
+                self.child.id(),
+                self.address,
+                self.child.try_wait()
+            );
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
