@@ -242,29 +242,41 @@ mod tests {
     fn independent_probe_observes_a_blocked_executor_without_accumulating_queued_tasks() {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         runtime.block_on(async {
-            let sampler =
+            let mut sampler =
                 start(&Settings { enabled: true, interval_ms: 50, slow_ms: 20, ..Default::default() })
                     .unwrap()
                     .unwrap();
-            // This deliberately blocks the sole executor, not the independent probe thread.
-            std::thread::sleep(Duration::from_millis(220));
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            let observed = sampler.state.snapshot();
-            let scheduler = observed.aggregates.iter().find(|a| a.metric == Metric::SchedulingLag).unwrap();
-            assert!(scheduler.stats.max_ms >= 20, "{observed:?}");
-            assert!(observed.coalesced_probes > 0, "only one probe may queue while the executor is blocked");
-            // A live producer can enqueue another legitimate probe between
-            // snapshot and assertion. Stop it before checking queue drainage.
-            let state = sampler.state.clone();
-            drop(sampler);
+            // Keep the sole executor blocked until the independent producer has
+            // actually attempted another probe. A fixed sleep cannot establish
+            // this precondition on a loaded host.
+            let by = Instant::now() + Duration::from_secs(30);
+            while sampler.state.snapshot().coalesced_probes == 0 {
+                assert!(Instant::now() < by, "the independent producer did not attempt a second probe");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            // Stop only the producer, keeping recording enabled while its one
+            // admitted probe drains. No new probe can race the final assertions.
+            sampler.stop.send(()).unwrap();
+            sampler.worker.take().unwrap().join().unwrap();
+            assert!(sampler.state.pending.load(Ordering::Acquire));
             tokio::time::timeout(Duration::from_secs(30), async {
-                while state.pending.load(Ordering::Acquire) {
+                while sampler.state.pending.load(Ordering::Acquire) {
                     tokio::task::yield_now().await;
                 }
             })
             .await
-            .expect("the last queued probe must drain after its producer stops");
-            assert!(!state.pending.load(Ordering::Acquire));
+            .expect("the admitted probe must drain after its producer stops");
+            let observed = sampler.state.snapshot();
+            let scheduler = observed
+                .aggregates
+                .iter()
+                .find(|a| a.operation == Operation::Scheduler && a.metric == Metric::SchedulingLag)
+                .unwrap();
+            assert!(scheduler.stats.max_ms >= 20, "{observed:?}");
+            assert!(observed.coalesced_probes > 0, "the actual coalescing precondition was reached");
+            assert_eq!(scheduler.stats.count, 1, "only one probe was queued while the executor was blocked");
+            assert!(!sampler.state.pending.load(Ordering::Acquire));
+            drop(sampler);
         });
     }
     #[test]

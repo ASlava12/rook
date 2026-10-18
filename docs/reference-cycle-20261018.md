@@ -185,3 +185,18 @@ and emitted a pseudo tool call as assistant text instead of recalling a memory.
 Both transcripts were read. They show model choices rather than a newly observed
 execution failure; no text-to-tool execution or automatic replay was added to
 turn them into passes. This is not evidence of a model-quality improvement.
+
+
+## Runtime-probe test synchronization
+
+The workflow-only rerun exposed a pre-existing timing assumption in the runtime
+probe regression on macOS: sleeping 220ms did not guarantee that a loaded host
+scheduled the independent producer twice. The real gate log showed only the
+`coalesced_probes > 0` assertion failing. Production sampler behavior is unchanged.
+The test now blocks the sole Tokio executor until actual coalescing is observed,
+using a 30-second hung-producer guard. It then stops/joins the producer while
+keeping recording enabled, drains the admitted probe and verifies both lag and
+**exactly one** recorded scheduling probe. This replaces the fixed sleep and
+post-snapshot producer race with explicit synchronization, rather than increasing
+a guessed scheduling delay. Full core library and current-toolchain clippy checks
+cover the correction before the next platform run.
