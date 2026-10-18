@@ -16,6 +16,13 @@ fn died_marker() -> String {
 
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or_else(|| "ok".into());
+    if mode.starts_with("catalog-") {
+        if let Err(error) = catalog_fixture(&mode) {
+            eprintln!("catalog fixture: {error}");
+            std::process::exit(2);
+        }
+        return;
+    }
     if mode.starts_with("elicitation") {
         if let Err(error) = elicitation_fixture(&mode) {
             eprintln!("elicitation fixture: {error}");
@@ -155,6 +162,64 @@ fn main() {
         let _ = writeln!(out, "{}", serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result }));
         let _ = out.flush();
     }
+}
+
+fn catalog_fixture(mode: &str) -> std::io::Result<()> {
+    use serde_json::{Value, json};
+    let mut out = std::io::stdout();
+    let mut changed = false;
+    let mut interrupted = false;
+    let mut listed = 0;
+    for line in std::io::stdin().lock().lines() {
+        let message: Value = serde_json::from_str(&line?).map_err(std::io::Error::other)?;
+        let Some(id) = message.get("id") else { continue };
+        let method = message["method"].as_str().unwrap_or("");
+        let notification = json!({"jsonrpc":"2.0","method":"notifications/tools/list_changed"});
+        let result = match method {
+            "initialize" => {
+                json!({"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":mode != "catalog-unnegotiated"}},"serverInfo":{"name":"catalog-fixture"}})
+            }
+            "tools/call" => {
+                if message["params"]["name"] == "advance" {
+                    changed = true;
+                    writeln!(out, "{notification}")?;
+                }
+                json!({"content":[{"type":"text","text":listed.to_string()}]})
+            }
+            "tools/list" => {
+                listed += 1;
+                if changed && mode == "catalog-fail" {
+                    writeln!(
+                        out,
+                        "{}",
+                        json!({"jsonrpc":"2.0","id":id,"error":{"code":-32603,"message":"fixture-secret-not-for-status"}})
+                    )?;
+                    out.flush()?;
+                    continue;
+                }
+                if changed && mode == "catalog-slow" {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                }
+                if mode == "catalog-startup" && listed == 1 {
+                    writeln!(out, "{notification}")?;
+                    json!({"tools":[{"name":"obsolete","inputSchema":{"type":"object"}}]})
+                } else if changed && message["params"]["cursor"] == "tail" {
+                    json!({"tools":[{"name":"torn-tail","inputSchema":{"type":"object"}}]})
+                } else if changed && (mode == "catalog-churn" || (mode == "catalog-page" && !interrupted)) {
+                    interrupted = true;
+                    writeln!(out, "{notification}")?;
+                    json!({"tools":[{"name":"torn-prefix","inputSchema":{"type":"object"}}],"nextCursor":"tail"})
+                } else {
+                    let name = if changed || mode == "catalog-startup" { "new" } else { "old" };
+                    json!({"tools":[{"name":"advance","inputSchema":{"type":"object"}},{"name":name,"description":name,"inputSchema":{"type":"object"}}]})
+                }
+            }
+            _ => json!({}),
+        };
+        writeln!(out, "{}", json!({"jsonrpc":"2.0","id":id,"result":result}))?;
+        out.flush()?;
+    }
+    Ok(())
 }
 
 fn elicitation_fixture(mode: &str) -> std::io::Result<()> {

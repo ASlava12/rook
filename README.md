@@ -752,6 +752,16 @@ server that answered or whether a command hit its timeout. A `pre_tool` hook tha
 call it was guarding — a guard that cannot run is not approval — and no hook can
 unlock what the deny list forbids.
 
+### Session controls and update draining
+
+`rook session model SESSION MODEL --effort high` saves a model/effort pair for the next turn; an active turn keeps its admitted pair. REPL/TUI presets and browser presets use the same durable operation. `rook daemon drain --restart` waits for current work before replacing the daemon; `--status` and `--cancel PLAN_ID` inspect or cancel it. Questions, private input and Stop remain available, and a timeout never forces a restart.
+
+Live MCP tool catalogs are opt-in per server with `refresh_tools = true`; see [catalog refresh](docs/mcp-catalog-refresh.md) for bounds, retained bindings, pagination and status.
+
+`rook session background SESSION` and `/background` inspect session-family activity and owned jobs without switching chats; the browser offers the same read-only panel. See [background work](docs/background-work.md) for live versus saved status and coverage.
+
+`rook session last-answer SESSION` reads saved branch prose; `/copy` in REPL/TUI and the browser copy action explicitly use the clipboard. Internal summaries require `--summary`. `rook session results SESSION` or `/results` reads typed delegated result receipts. Purpose-specific fallbacks and explicit reasoning declarations are documented with examples in the [R17 guide](docs/reference-r17-adoption.md#usage). The summarizer output-budget experiment retains the 2048-token default pending successful real-model measurements.
+
 ### Models
 
 The `provider/model` in `config.toml` picks the wire dialect:
@@ -788,11 +798,11 @@ makes of an address it cannot route to. A key is still refused over plain http t
 anything but this machine, own network or not.
 
 A request refused for something the agent added rather than you is asked again
-without it. Whether a model takes a reasoning effort is decided by its name, and
-a gateway serving something else under that name is where a name is wrong: the
-route answers 400, and rather than ending the turn on a field you never set, the
-effort is dropped and the request made once more — and not sent again for the
-rest of the run.
+without it. Default effort mappings recognize known model families and fresh
+route metadata. A configured source can declare an implemented reasoning control
+for an unfamiliar alias; see the [R17 guide](docs/reference-r17-adoption.md#usage).
+If a route answers 400 naming the effort field, the effort is dropped and the
+request made once more, then omitted for the rest of the provider lifetime.
 
 The effort control is a **requested** level. After a streaming request is accepted,
 Rook also reports what was sent on the answering route: for example, requested
@@ -811,6 +821,13 @@ Opus 4.5 accepts effort without enabling adaptive thinking.
 Gemini 3 uses `thinkingLevel`, with model-specific supported levels. Gemini 2.5
 uses numeric budgets; upper levels use its documented maximum rather than
 switching back to dynamic thinking. Unmapped Google models omit the control.
+Gemini `MALFORMED_RESPONSE` is treated as a failed generation. The shared retry
+policy retries only before any answer content or completion evidence was delivered;
+partial text, reasoning and calls are never replayed automatically. Failed-frame
+contents cannot enter tool dispatch. Refusals and invalid function-call finishes
+are never retried, and a refusal cannot authorize a call from an earlier frame. Reported token counters remain attached to
+the failed physical attempt; omitted counters stay unknown.
+
 The Responses transport is selected explicitly with `api = "responses"` (alias
 `"openai-responses"`) on a named model/endpoint, or `responses/gpt-6-astra`
 shorthand. The shorthand uses `OPENAI_API_KEY` and `OPENAI_BASE_URL`, like

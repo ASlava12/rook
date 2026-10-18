@@ -10378,3 +10378,127 @@ async fn bundled_skill_reads_are_data_with_durable_results_instead_of_reloaded_i
         && entry.label == "load_skill"
         && entry.body.contains("RESOURCE_DATA_OBSERVED")));
 }
+
+#[tokio::test]
+async fn delegated_result_contract_validates_saved_redacted_json_without_replaying_child_tools() {
+    for valid in [true, false] {
+        let f = fixture();
+        let parent = f.rook.start_session("typed parent").unwrap();
+        let provider = ScriptedProvider::new(vec![
+            call(
+                "delegate",
+                serde_json::json!({"tasks":[{"task":"read the file", "output_schema":{"type":"object","required":["ok"],"properties":{"ok":{"type":"boolean"}},"additionalProperties":false}}]}),
+            ),
+            call("list_dir", serde_json::json!({"path":"."})),
+            reply(if valid { r#"{"ok":true}"# } else { r#"{"wrong":true}"# }),
+            reply("parent acknowledges the receipt"),
+        ]);
+        let seen = provider.share();
+        AgentLoop::new(&f.rook, Arc::new(provider), parent).run("delegate once").await.unwrap();
+        let receipts = f.rook.delegated_results(parent).unwrap();
+        assert_eq!(receipts.len(), 1, "each child needs one typed receipt");
+        assert_eq!(receipts[0].validation, if valid { "valid" } else { "invalid" });
+        assert_eq!(receipts[0].source, "saved");
+        assert!(receipts[0].through > 0);
+        let child = rook_store::parse_session_id(&receipts[0].session).unwrap();
+        let calls = f
+            .rook
+            .store
+            .events(child, 0, 256)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.record.kind == rook_store::EventKind::ToolCall)
+            .count();
+        assert_eq!(calls, 1, "schema failure must never rerun child tools");
+        assert_eq!(seen.lock().unwrap().len(), 4, "no output repair model call was admitted");
+        f.rook.delete_session(child).unwrap();
+        assert_eq!(f.rook.delegated_results(parent).unwrap()[0].source, "missing");
+    }
+}
+
+#[tokio::test]
+async fn delegated_result_redaction_and_large_projection_apply_in_foreground_and_background() {
+    for background in [false, true] {
+        for bytes in [0, 12000, 70000] {
+            let f = fixture();
+            let parent = f.rook.start_session("bounded typed result").unwrap();
+            let secret = "R17_PRIVATE_RESULT";
+            let value = if bytes > 0 {
+                serde_json::json!({"data":(0..(bytes as usize).div_ceil(64)).map(|i|rook_store::ObjectId::of(&i.to_le_bytes()).to_hex()).collect::<String>()})
+            } else {
+                serde_json::json!({"data":secret})
+            };
+            let delegate = call(
+                "delegate",
+                serde_json::json!({"task":"return typed data","wait":!background,"output_schema":{"type":"object","required":["data"],"properties":{"data":{"type":"string"}},"additionalProperties":false}}),
+            );
+            let provider = ByPrompt(vec![
+                ("delegate the data", delegate),
+                ("started: task01", call("subagents", serde_json::json!({"id":"task01","wait_secs":20}))),
+                ("\"validation\"", reply("receipt inspected")),
+                ("return typed data", reply(&value.to_string())),
+            ]);
+            let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), parent);
+            agent.hide_connection_secret(secret);
+            tokio::time::timeout(std::time::Duration::from_secs(30), agent.run("delegate the data"))
+                .await
+                .unwrap()
+                .unwrap_or_else(|error| panic!("background={background}, bytes={bytes}: {error}"));
+            let results = f.rook.delegated_results(parent).unwrap();
+            assert_eq!(results.len(), 1);
+            let result = &results[0];
+            assert_eq!(result.validation, if bytes > 65536 { "unavailable" } else { "valid" });
+            assert_eq!(result.omitted, bytes > 8192);
+            assert_eq!(result.value.is_none(), bytes > 8192);
+            assert!(!serde_json::to_string(result).unwrap().contains(secret));
+            assert!(result.answer_seq.is_some());
+            assert_eq!(result.source, "saved");
+        }
+    }
+}
+
+#[tokio::test]
+async fn cancelling_a_typed_child_saves_an_interrupted_source_receipt_without_retrying_it() {
+    struct HeldChild {
+        started: tokio::sync::Notify,
+    }
+    #[async_trait]
+    impl Provider for HeldChild {
+        fn id(&self) -> &str {
+            "fixture/held-typed-child"
+        }
+        fn context_window(&self) -> usize {
+            16000
+        }
+        async fn complete(&self, request: Request) -> rook_llm::Result<Response> {
+            if let Some(answer) = completion_answer(&request) {
+                return Ok(answer);
+            }
+            if request.messages.iter().any(|m| m.role == Role::User && m.content.contains("R17_HELD_CHILD")) {
+                self.started.notify_one();
+                return std::future::pending().await;
+            }
+            Ok(call(
+                "delegate",
+                serde_json::json!({"task":"R17_HELD_CHILD","output_schema":{"type":"object"}}),
+            ))
+        }
+    }
+    let f = fixture();
+    let parent = f.rook.start_session("cancel typed child").unwrap();
+    let provider = Arc::new(HeldChild { started: tokio::sync::Notify::new() });
+    let mut agent = AgentLoop::new(&f.rook, provider.clone(), parent);
+    let mut running = Box::pin(agent.run("start one child"));
+    tokio::select! {
+        _=provider.started.notified()=>{},
+        result=&mut running=>panic!("child was not held: {result:?}"),
+        _=tokio::time::sleep(std::time::Duration::from_secs(20))=>panic!("child request never started"),
+    }
+    drop(running);
+    let receipts = f.rook.delegated_results(parent).unwrap();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].status, "interrupted");
+    assert_eq!(receipts[0].validation, "unavailable");
+    assert!(receipts[0].value.is_none());
+    assert_eq!(receipts[0].source, "saved");
+}

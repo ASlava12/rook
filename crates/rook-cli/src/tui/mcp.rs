@@ -169,6 +169,7 @@ impl Connections {
                         );
                         ListItem::new(vec![
                             Line::from(status),
+                            Line::from(s.catalog.to_string()),
                             Line::from(
                                 s.error.clone().or_else(|| s.last_request_error.clone()).unwrap_or_default(),
                             ),

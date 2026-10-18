@@ -250,11 +250,27 @@ pub(crate) enum DaemonCmd {
         #[arg(long)]
         force: bool,
     },
+    /// Close admission and wait for current owners; pending questions remain reachable.
+    Drain {
+        #[arg(long, default_value = "300")]
+        timeout_secs: u64,
+        #[arg(long)]
+        restart: bool,
+        #[arg(long, conflicts_with_all = ["restart", "cancel", "id"])]
+        status: bool,
+        #[arg(long, conflicts_with_all = ["restart", "id"])]
+        cancel: Option<String>,
+        /// Retain this caller ID for an exact retry after uncertain delivery.
+        #[arg(long)]
+        id: Option<String>,
+    },
     /// Stop it and start the installed build in its place.
     Restart {
         /// End the turns that are running.
         #[arg(long)]
         force: bool,
+        #[arg(long, hide = true)]
+        drain_receipt: Option<String>,
     },
 }
 
@@ -461,10 +477,24 @@ pub(crate) enum StoreCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum SessionCmd {
+    /// Read typed delegated result receipts and saved-source availability.
+    Results {
+        id: String,
+    },
+    /// Read the last saved assistant answer on this branch (never touches the clipboard).
+    LastAnswer {
+        id: String,
+        /// Explicitly select the last internal compaction summary instead.
+        #[arg(long)]
+        summary: bool,
+    },
     /// Inspect or durably queue a session model for its next turn.
     Model {
         id: String,
         model: Option<String>,
+        /// Commit this reasoning effort in the same durable selection.
+        #[arg(long, requires = "model", value_parser = ["low", "medium", "high", "xhigh", "max"])]
+        effort: Option<String>,
         /// Reuse this ID and revision for an exact retry after an uncertain response.
         #[arg(long)]
         request_id: Option<String>,
@@ -529,6 +559,12 @@ pub(crate) enum SessionCmd {
     },
     /// Inspect ancestors and direct conversation branches without restoring files.
     Tree {
+        id: String,
+        #[arg(long)]
+        after: Option<String>,
+    },
+    /// Inspect background work across ancestors and direct children, without switching sessions.
+    Background {
         id: String,
         #[arg(long)]
         after: Option<String>,

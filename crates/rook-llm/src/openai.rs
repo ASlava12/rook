@@ -416,6 +416,8 @@ impl OpenAiCompatible {
 
     async fn send(&self, request: &Request, stream: bool) -> Result<reqwest::Response> {
         let messages = crate::images::for_wire(&request.messages);
+        let declared = crate::reasoning::effort(request)
+            .and_then(|effort| request.model_capabilities.reasoning_override.as_ref()?.parameter(effort));
         let body = WireRequest {
             model: &self.model,
             messages: messages.iter().map(|message| WireMessage::from(message.as_ref())).collect(),
@@ -438,7 +440,11 @@ impl OpenAiCompatible {
             temperature: (!reasons(&self.model)).then_some(request.temperature),
             stream,
             stream_options: stream.then_some(StreamOptions { include_usage: true }),
-            reasoning_effort: request.effort.and_then(|e| reasoning_effort(&self.model, e)),
+            reasoning_effort: declared
+                .as_ref()
+                .filter(|(name, _)| *name == "reasoning_effort")
+                .and_then(|(_, value)| value.as_str())
+                .or_else(|| crate::reasoning::effort(request).and_then(|e| reasoning_effort(&self.model, e))),
         };
 
         let mut req = self

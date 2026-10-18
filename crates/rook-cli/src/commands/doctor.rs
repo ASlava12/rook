@@ -449,6 +449,12 @@ fn probe_provider(config: &rook_core::Config) -> Result<String> {
             "\n  the endpoint reports {reported}; set `context_window = {reported}` under [agent] to use it"
         ));
     }
+    if let Some(settings) = config.models.get(spec).and_then(|source| source.reasoning.as_ref()) {
+        note.push_str(&format!(
+            "\n  reasoning capabilities: explicit configured override ({})",
+            serde_json::to_string(settings)?
+        ));
+    }
     note.push_str(&format!(
         "\n  effort requested {}; mapping: {}",
         config.agent.effort().as_str(),

@@ -304,3 +304,110 @@ async fn a_call_to_a_server_that_has_gone_fails_now_rather_than_at_the_timeout()
         "it answered in {waited:?}, so it waited for a reply nobody was left to send"
     );
 }
+
+#[tokio::test]
+async fn opted_in_catalog_notifications_refresh_once_and_coalesce_concurrent_readers() {
+    let _one = one_at_a_time().await;
+    let mut config = mock("catalog-notify");
+    config.refresh_tools = true;
+    let server = Server::connect(&config, &rook_llm::Proxy::Direct).await.unwrap();
+    assert!(server.list_tools().await.unwrap().iter().any(|tool| tool.name == "old"));
+    server.call_tool("advance", &serde_json::json!({})).await.unwrap();
+    assert!(server.catalog_status().stale);
+    tokio::join!(server.refresh_tool_catalog(), server.refresh_tool_catalog(), server.refresh_tool_catalog());
+    let status = server.catalog_status();
+    assert!(status.enabled && !status.stale);
+    assert_eq!(status.generation, 2);
+    assert!(server.cached_tools().unwrap().1.iter().any(|tool| tool.name == "new"));
+    assert_eq!(server.call_tool("stats", &serde_json::json!({})).await.unwrap().to_text(), "2");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn catalog_refresh_requires_both_configuration_and_negotiated_list_changes() {
+    let _one = one_at_a_time().await;
+    for (mode, configured) in [("catalog-notify", false), ("catalog-unnegotiated", true)] {
+        let mut config = mock(mode);
+        config.refresh_tools = configured;
+        let server = Server::connect(&config, &rook_llm::Proxy::Direct).await.unwrap();
+        server.list_tools().await.unwrap();
+        server.call_tool("advance", &serde_json::json!({})).await.unwrap();
+        server.refresh_tool_catalog().await;
+        assert!(!server.catalog_status().enabled);
+        assert_eq!(server.catalog_status().generation, 1);
+        assert!(server.cached_tools().unwrap().1.iter().any(|tool| tool.name == "old"));
+        assert_eq!(server.call_tool("stats", &serde_json::json!({})).await.unwrap().to_text(), "1");
+        server.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn notification_during_startup_or_pagination_never_installs_a_torn_catalog() {
+    let _one = one_at_a_time().await;
+    for mode in ["catalog-startup", "catalog-page", "catalog-churn"] {
+        let mut config = mock(mode);
+        config.refresh_tools = true;
+        let server = Server::connect(&config, &rook_llm::Proxy::Direct).await.unwrap();
+        let initial = server.list_tools().await.unwrap();
+        if mode != "catalog-startup" {
+            server.call_tool("advance", &serde_json::json!({})).await.unwrap();
+            server.refresh_tool_catalog().await;
+        } else {
+            assert!(initial.iter().all(|t| t.name != "obsolete"));
+        }
+        let status = server.catalog_status();
+        let tools = server.cached_tools().unwrap().1;
+        assert!(!tools.iter().any(|t| t.name.starts_with("torn-")));
+        if mode == "catalog-churn" {
+            assert!(status.stale && status.error.is_some());
+            assert_eq!(status.generation, 1);
+            assert_eq!(
+                server.call_tool("stats", &serde_json::json!({})).await.unwrap().to_text(),
+                "7",
+                "initial discovery plus three two-page attempts"
+            );
+        } else {
+            assert!(!status.stale);
+            assert!(tools.iter().any(|t| t.name == "new"));
+        }
+        server.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn failed_or_cancelled_catalog_refresh_keeps_old_descriptors_without_a_detached_publish() {
+    let _one = one_at_a_time().await;
+    for mode in ["catalog-fail", "catalog-slow"] {
+        let mut config = mock(mode);
+        config.refresh_tools = true;
+        let server = Server::connect(&config, &rook_llm::Proxy::Direct).await.unwrap();
+        server.list_tools().await.unwrap();
+        server.call_tool("advance", &serde_json::json!({})).await.unwrap();
+        if mode == "catalog-slow" {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), server.refresh_tool_catalog())
+                    .await
+                    .is_err()
+            );
+        } else {
+            server.refresh_tool_catalog().await;
+            let status = server.catalog_status();
+            assert!(status.retry_after_secs.is_some());
+            assert!(!serde_json::to_string(&status).unwrap().contains("fixture-secret"));
+            server.refresh_tool_catalog().await;
+            assert_eq!(
+                server.call_tool("stats", &serde_json::json!({})).await.unwrap().to_text(),
+                "2",
+                "cooldown prevents a second failed listing"
+            );
+        }
+        assert_eq!(server.catalog_status().generation, 1);
+        assert!(server.cached_tools().unwrap().1.iter().any(|t| t.name == "old"));
+        server.shutdown().await;
+        assert_eq!(
+            server.catalog_status().generation,
+            1,
+            "cancelled discovery cannot publish after transport cleanup"
+        );
+    }
+}

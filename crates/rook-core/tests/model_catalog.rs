@@ -338,3 +338,47 @@ async fn native_metadata_inherits_from_a_named_endpoint_and_survives_offline_cac
         Origin::Configuration
     ));
 }
+
+#[tokio::test]
+async fn reasoning_declarations_have_explicit_provenance_and_invalidate_prior_observations() {
+    use rook_llm::reasoning::{Control, Override};
+    let dir = tempfile::tempdir().unwrap();
+    let (url, count, task) = server(vec![(200, models("one"))]).await;
+    let mut config = config(&url);
+    let vault = Vault::empty();
+    discover(&config, &vault, "desk", Mode::Refresh, dir.path()).await.unwrap();
+    task.await.unwrap();
+    assert!(matches!(
+        discover(&config, &vault, "desk", Mode::Offline, dir.path()).await.unwrap().origin,
+        Origin::Cache
+    ));
+    config.models.get_mut("desk").unwrap().reasoning = Some(Override {
+        control: Some(Control::OpenaiEffort),
+        effort_levels: Some(vec![rook_llm::Effort::Low, rook_llm::Effort::High]),
+        ..Default::default()
+    });
+    let declared = discover(&config, &vault, "desk", Mode::Offline, dir.path()).await.unwrap();
+    assert!(
+        matches!(declared.origin, Origin::Configuration),
+        "old cached metadata must not silently cross a changed reasoning declaration"
+    );
+    assert!(declared.notices.iter().any(|notice| notice.contains("explicit configured override")));
+    assert_eq!(declared.models[0].capabilities.reasoning, Some(true));
+    assert_eq!(
+        declared.models[0].capabilities.effort_levels,
+        Some(vec![rook_llm::Effort::Low, rook_llm::Effort::High])
+    );
+    config.models.get_mut("desk").unwrap().reasoning =
+        Some(Override { supported: Some(false), ..Default::default() });
+    assert_eq!(
+        discover(&config, &vault, "desk", Mode::Offline, dir.path()).await.unwrap().models[0]
+            .capabilities
+            .reasoning,
+        Some(false)
+    );
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        1,
+        "configuration-only inspection must never contact the endpoint"
+    );
+}

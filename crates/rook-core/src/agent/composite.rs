@@ -307,6 +307,7 @@ impl<'a> AgentLoop<'a> {
                 effort: Some(self.effort),
                 recipe: Some(ready.recipe),
                 executor: None,
+                result_schema: None,
             },
             doing,
             ready.index,

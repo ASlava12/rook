@@ -181,6 +181,7 @@ pub(crate) fn describe(report: &rook_core::mcp_connections::Report) -> String {
             server.active_requests,
             server.generation
         );
+        let _ = writeln!(text, "  {}", server.catalog);
         if let Some(error) = &server.last_request_error {
             let _ = writeln!(text, "  last request: {error}");
         }

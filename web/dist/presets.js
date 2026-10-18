@@ -18,14 +18,18 @@ export function presetPanel(input, applySettings) {
         el('span', {}, item.name),
         el('button', {type:'button', onclick:async () => {
           const owner=state.chat.session;
+          const draft=input.value;
           try {
             const current = await api('/api/presets', {action:'get',name:item.name});
             if (!root.isConnected || turn !== epoch || state.chat.session !== owner) return;
-            if (state.chat.busy && (current.preset.model || current.preset.effort)) { notice.textContent='Wait for the active turn before applying saved settings.'; return; }
+            if (input.value !== draft) { notice.textContent='The draft changed while loading. Review the newer draft before loading a preset.'; return; }
             if (current.preset.model || current.preset.effort) {
               if (!confirm(`Load ${item.name}? Model: ${current.preset.model || 'current'}; effort: ${current.preset.effort || 'current'}.`)) return;
-              applySettings(current.preset);
+              const applied = await applySettings(current.preset);
+              if (applied === false) { notice.textContent='Settings were not confirmed. The previous draft is retained; inspect or retry the model selection.'; return; }
+              if (!root.isConnected || turn !== epoch || state.chat.session !== owner) return;
             }
+            if (input.value !== draft) { notice.textContent='Preset settings were confirmed; the newer draft was retained.'; return; }
             previous = input.value;
             input.value = current.preset.prompt;
             input.dispatchEvent(new Event('input'));

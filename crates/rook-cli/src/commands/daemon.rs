@@ -34,6 +34,36 @@ pub(crate) fn cmd_serve(port: Option<u16>) -> Result<()> {
 /// somebody had to go and find. Both halves belong to the program that starts
 /// it.
 pub(crate) fn cmd_daemon(cmd: DaemonCmd, json: bool) -> Result<()> {
+    let receipt = match &cmd {
+        DaemonCmd::Restart { drain_receipt, .. } => drain_receipt.clone(),
+        _ => None,
+    };
+    if let Some(id) = &receipt {
+        let saved = rook_core::drain::RestartReceipt::read()?
+            .ok_or_else(|| anyhow::anyhow!("restart handoff receipt missing"))?;
+        anyhow::ensure!(
+            saved.id == *id && saved.phase == "restarting",
+            "restart handoff changed; no daemon was stopped"
+        );
+    }
+    let result = daemon_command(cmd, json);
+    if let Some(id) = receipt {
+        let vault = rook_core::Vault::load().unwrap_or_else(|_| rook_core::Vault::empty());
+        rook_core::drain::RestartReceipt {
+            version: 1,
+            id,
+            phase: if result.is_ok() { "restarted" } else { "failed" }.into(),
+            reason: result
+                .as_ref()
+                .err()
+                .map(|error| vault.redact(&error.to_string()).chars().take(512).collect()),
+        }
+        .save()?;
+    }
+    result
+}
+
+fn daemon_command(cmd: DaemonCmd, json: bool) -> Result<()> {
     let running = crate::source::Daemon::running();
     match (cmd, running) {
         (DaemonCmd::Status, None) => {
@@ -88,7 +118,30 @@ pub(crate) fn cmd_daemon(cmd: DaemonCmd, json: bool) -> Result<()> {
             let interrupted = daemon.stop(force)?;
             println!("stopping{}", ended(interrupted));
         }
-        (DaemonCmd::Restart { force }, running) => {
+        (DaemonCmd::Drain { timeout_secs, restart, status, cancel, id }, Some(daemon)) => {
+            let action = if status {
+                None
+            } else if let Some(id) = cancel {
+                Some(rook_core::drain::Action::Cancel { id })
+            } else {
+                Some(rook_core::drain::Action::Start {
+                    id: id.unwrap_or_else(|| rook_store::format_session_id(rook_store::new_session_id())),
+                    timeout_secs,
+                    restart,
+                })
+            };
+            let view: rook_core::drain::View = match action {
+                None => daemon.request_bounded("/api/daemon/drain", None, 16384)?,
+                Some(action) => daemon.request_bounded(
+                    "/api/daemon/drain",
+                    Some(&serde_json::to_value(action)?),
+                    16384,
+                )?,
+            };
+            println!("{}", serde_json::to_string_pretty(&view)?);
+        }
+        (DaemonCmd::Drain { .. }, None) => bail!("daemon is not running; use rook daemon start"),
+        (DaemonCmd::Restart { force, .. }, running) => {
             // The port it was on, so the windows already attached — which read
             // the address once, when they attached — find the new one where
             // they are still looking.

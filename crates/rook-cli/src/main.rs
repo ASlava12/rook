@@ -3,6 +3,7 @@
 mod approve;
 mod args;
 mod chat;
+mod clipboard;
 mod commands;
 mod fmt;
 mod notify;

@@ -49,6 +49,7 @@ struct SummaryReview {
 enum Command {
     ExportPreview(u128, String),
     Recall(rook_core::session_recall::Request),
+    Background(u128, String, Arc<rook_tools::jobs::Jobs>),
     Worktree(u128, String),
     Review(u128, String),
     ShellUndo(u128, String),
@@ -76,6 +77,7 @@ enum Command {
 enum Update {
     ExportPreview(Result<String, String>),
     Recall(Result<rook_core::session_recall::Response, String>),
+    Background(u128, Result<String, String>),
     Worktree(u128, Result<String, String>),
     Review(u128, Result<String, String>),
     ShellUndo(u128, Result<String, String>),
@@ -107,6 +109,10 @@ impl Command {
             Self::Recall(request) => {
                 Update::Recall(source.session_recall(&request).map_err(|error| error.to_string()))
             }
+            Self::Background(session, args, jobs) => Update::Background(
+                session,
+                source.background_command(session, &args, Some(&jobs)).map_err(|e| e.to_string()),
+            ),
             Self::Worktree(parent, args) => {
                 Update::Worktree(parent, source.worktree_command(parent, &args).map_err(|e| e.to_string()))
             }
@@ -331,6 +337,18 @@ impl History {
         self.epoch = self.epoch.wrapping_add(1);
         self.ask(Command::Export(session, from, through, path, profile))
     }
+    pub(super) fn background(
+        &mut self,
+        session: u128,
+        args: &str,
+        jobs: Arc<rook_tools::jobs::Jobs>,
+    ) -> bool {
+        if self.pending || args.len() > 128 {
+            return false;
+        }
+        self.epoch = self.epoch.wrapping_add(1);
+        self.ask(Command::Background(session, args.into(), jobs))
+    }
     pub(super) fn worktree(&mut self, parent: u128, arguments: &str) -> bool {
         if self.pending || arguments.len() > 256 {
             return false;
@@ -408,6 +426,7 @@ impl History {
     pub(super) fn poll(&mut self) {
         while let Ok((epoch, update)) = self.receive.try_recv() {
             let operation = match &update {
+                Ok(Update::Background(_, _)) => "Background work",
                 Ok(Update::Review(_, _)) => "Review",
                 Ok(Update::ShellUndo(_, _)) => "Shell undo",
                 Ok(Update::Experiment(_, _)) => "Experiment",
@@ -447,7 +466,8 @@ impl History {
                 continue;
             }
             if let Ok(
-                Update::Worktree(parent, result)
+                Update::Background(parent, result)
+                | Update::Worktree(parent, result)
                 | Update::Review(parent, result)
                 | Update::ShellUndo(parent, result)
                 | Update::Experiment(parent, result)
@@ -537,7 +557,8 @@ impl History {
                     });
                 }
                 Ok(
-                    Update::Worktree(_, _)
+                    Update::Background(_, _)
+                    | Update::Worktree(_, _)
                     | Update::Review(_, _)
                     | Update::ShellUndo(_, _)
                     | Update::Experiment(_, _)

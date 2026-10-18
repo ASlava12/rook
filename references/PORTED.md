@@ -9,6 +9,15 @@ Add a row when you implement something after reading a reference. Add it to
 
 | what | from | read at | where it landed |
 |---|---|---|---|
+| Opt-in live MCP catalogs at safe request boundaries | Codex live catalog notifications | `0df4aa67781ae45a3c97befa4db48b734afe46d9`, October 18 review | `rook-mcp` clocks/cache/listeners, ToolBox and agent refresh, Apps and frontend status; [contracts](../docs/mcp-catalog-refresh.md) |
+| Atomic durable model/effort pairs | Hermes combined busy-session settings | `b9a86d07e74e`, R17 pinned source review | `rook-core/src/model_selection.rs`, root admission and CLI/API/TUI/browser; [delivery](../docs/reference-r17-adoption.md) |
+| Drain before daemon replacement while preserving pending human input | Hermes reachable drain plan | `da76391fdc7f`, R17 pinned source review | Shared `drain` state, daemon fence/controller and operator frontends; [delivery](../docs/reference-r17-adoption.md) |
+| Independent compaction cancellation/deadlines | OpenClaw bounded summary phase, Hermes cancellation | `d942bc5b1fb3`, R17 pinned source review | `rook-core/src/agent/compaction.rs`, retained source markers and cancellation checks |
+| Purpose-specific fallback chains | OpenClaw separate auxiliary failover | `6861671cda97`, R17 pinned source review | `rook-core/src/models.rs`, independent main/compaction/errand providers and typed settings |
+| Typed redacted delegated results with saved-source receipts | Hermes delegated result contracts | `9ed387ce2301`, R17 pinned source review | `rook-core/src/delegated_results.rs`, child admission/validation, CLI/API/TUI/browser |
+| Explicit copy of the last saved assistant answer | OpenCode answer copy action | `b0d762154c31`, R17 pinned source review | `rook-core/src/last_answer.rs`, frontend clipboard helpers and saved-answer API |
+| Configured reasoning capabilities with provenance and actual wire mapping | OpenCode reasoning declarations | `d889cb20447f`, R17 pinned source review | `rook-llm/src/reasoning.rs`, model catalog/config/doctor and native API adapters |
+| Bounded recovery of malformed Gemini generations without replaying partial output | OpenCode explicit malformed-finish failure; independently implemented shared retry/attempt handling | `180fd9d622c6855ef6ea36fd81314de6406af054`, October 18 review | `rook-llm/src/{google,retry,attempt}.rs`, HTTP and actual-engine regressions; [cycle evidence](../docs/reference-cycle-20261018.md) |
 | Durable session model selection with queued/effective status and idempotent retained receipts | Hermes deferred busy-session picks and mutation receipts; independently implemented transactional KV/CAS and root-boundary application | Hermes `34e8635cb9cf`; incoming `51357f428393`, `4dcad0e701a9`, route binding `c473d338dc33` | `rook-core/src/model_selection.rs`, store transaction, ordinary CLI/REPL/TUI/API/browser model controls; [contracts and checks](../docs/reference-r16-adoption.md) |
 | Cross-session attention inbox with current-owner counts and parent/child navigation | OpenResearch branch waiting indicators; shared bounded projection, no saved answer authority | OpenResearch `8fc90cf355cd`; incoming `0165a286d81a` | `rook-core/src/attention.rs`, daemon live registry and CLI/REPL/TUI/browser |
 | Optional scheduler, admission and blocking-work observations | OpenClaw bounded synchronous-stall observations; adapted to Tokio with an independent coalescing probe | OpenClaw `51042e8c1a27`; incoming `8e234e5a43b3` | `rook-core/src/runtime_diagnostics.rs`, daemon boundary instrumentation and existing diagnostics views |
@@ -107,6 +116,18 @@ Add a row when you implement something after reading a reference. Add it to
 | Terminal attention on completion and questions | goose `50666ae0b9a51e260b52b7efbab2e4e020346e94` `goose-cli/src/session/output.rs` | design only; Rook uses terminal-only stderr and `ROOK_NOTIFY=off`, never JSON stdout | `rook-cli/src/notify.rs`, REPL/TUI approval and completion paths |
 
 ## Triage log
+
+**2026-10-18 (0.17.0 delivery cycle).** Advanced all ten clean
+reference worktrees from their previous R17 pins to fetched configured-branch
+tips; ancestry is proven for every replacement. The incoming ranges contain
+3117 subjects; focused feature/lifecycle/provider triage is not an exhaustive
+source audit. The [new review](../docs/research/reference-review-20261018-cycle.md)
+selects MCP catalog notifications, safe Gemini malformed-generation recovery and
+a family background-work overview to complement the seven R17 runtime ports.
+All three additions are implemented; integrated/native checks and the delivery
+audit passed. Publication is tracked in the [cycle tracker](../docs/reference-cycle-20261018.md).
+The summarizer quality experiment remains inconclusive with its default unchanged.
+
 
 `cargo xtask refs advance` prints what landed upstream since the pointer was last
 moved; what follows is what was done with it, so a dismissal is a decision rather

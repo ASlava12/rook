@@ -38,6 +38,7 @@ pub(crate) trait Transport: Send + Sync {
     fn negotiated(&self, _version: &str) -> Result<()> {
         Ok(())
     }
+    fn watch_catalog(&self, _patience: Duration) {}
 
     /// The subprocess this transport owns, if it owns one. Used to check that a
     /// server does not outlive the session it belongs to.

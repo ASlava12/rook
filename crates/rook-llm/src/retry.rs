@@ -39,6 +39,9 @@ const FIRST_WAIT: Duration = Duration::from_secs(1);
 /// for its upstream's 400, and the same wrong request was then sent four times
 /// with a backoff between them before the message that named it arrived.
 fn worth_asking_again(error: &LlmError) -> bool {
+    if let LlmError::IncompleteResponse { retryable, .. } = error {
+        return *retryable;
+    }
     matches!(error, LlmError::Status { status, .. } if matches!(status, 408 | 429 | 500 | 502 | 503 | 504 | 529))
         && !names_a_wrong_request(error)
         && !out_of_credit(error)
@@ -435,7 +438,7 @@ impl Retrying {
                     // Use this attempt's request, not shared refusal state: a
                     // concurrent call could have learned a different answer.
                     let applied = match request.effort {
-                        Some(effort) => self.inner.effort_use(effort),
+                        Some(effort) => self.inner.effort_use_for(effort, request),
                         None => crate::EffortUse::Omitted { reason: "endpoint refused the effort parameter" },
                     };
                     let report = crate::EffortReport { provider: self.inner.id().into(), requested, applied };

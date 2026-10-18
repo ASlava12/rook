@@ -49,7 +49,28 @@ pub struct Job {
     pub processes_stopped: Option<bool>,
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Metadata {
+    pub id: String,
+    pub session: String,
+    pub started_at: i64,
+    pub exit_code: Option<i32>,
+    pub quiet_for_secs: Option<u64>,
+    pub processes_stopped: Option<bool>,
+}
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Overview {
+    pub jobs: Vec<Metadata>,
+    pub omitted: usize,
+    pub unassigned: usize,
+}
+fn rook_session(session: u128) -> String {
+    // rook-tools cannot depend on the store; ULIDs have a canonical wire spelling.
+    ulid::Ulid::from(session).to_string()
+}
+
 struct Running {
+    session: Option<u128>,
     pinned: bool,
     command: String,
     started_at: i64,
@@ -132,7 +153,7 @@ impl Jobs {
         isolation: Option<&crate::isolate::Isolation>,
         spill: Option<crate::exec::Spill>,
     ) -> Result<String> {
-        self.start_transport(command, cwd, isolation, spill, None)
+        self.start_transport(command, cwd, isolation, spill, None, None)
     }
     pub(crate) fn start_transport(
         &self,
@@ -141,6 +162,7 @@ impl Jobs {
         isolation: Option<&crate::isolate::Isolation>,
         spill: Option<crate::exec::Spill>,
         transport: Option<Arc<crate::environments::Transport>>,
+        session: Option<u128>,
     ) -> Result<String> {
         let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
         // A finished job is kept so its output can still be read, and a turn
@@ -240,6 +262,7 @@ impl Jobs {
         running.insert(
             id.clone(),
             Running {
+                session: self.scope.or(session),
                 pinned: self.scope.is_some(),
                 command: transport.as_ref().map(|t| t.display.clone()).unwrap_or_else(|| command.to_owned()),
                 started_at: now(),
@@ -264,6 +287,39 @@ impl Jobs {
     pub fn list(&self) -> Vec<Job> {
         let running = self.running.lock().unwrap_or_else(|e| e.into_inner());
         running.iter().map(|(id, r)| self.redacted(r.seen_as(id))).collect()
+    }
+
+    /// Metadata only: never clones command text, captured output or environment values.
+    pub fn overview(&self, sessions: &std::collections::BTreeSet<u128>, limit: usize) -> Overview {
+        let running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+        let mut result = Overview { jobs: Vec::new(), omitted: 0, unassigned: 0 };
+        for (id, job) in running.iter() {
+            let Some(session) = job.session else {
+                result.unassigned += 1;
+                continue;
+            };
+            if !sessions.contains(&session) {
+                continue;
+            }
+            if result.jobs.len() >= limit.min(512) {
+                result.omitted += 1;
+                continue;
+            }
+            let exit_code = *job.exit.lock().unwrap_or_else(|e| e.into_inner());
+            result.jobs.push(Metadata {
+                id: id.clone(),
+                session: rook_session(session),
+                started_at: job.started_at,
+                exit_code,
+                processes_stopped: *job.environment_stopped.lock().unwrap_or_else(|e| e.into_inner()),
+                quiet_for_secs: if exit_code.is_none() {
+                    job.printed.lock().unwrap_or_else(|e| e.into_inner()).quiet_for().map(|d| d.as_secs())
+                } else {
+                    None
+                },
+            });
+        }
+        result
     }
 
     pub fn get(&self, id: &str) -> Option<Job> {
@@ -307,6 +363,11 @@ impl Jobs {
     }
 
     /// Test actual liveness without cloning captured output for a guard.
+    /// Count live jobs without cloning their captured output.
+    pub fn running_count(&self) -> usize {
+        self.running.lock().unwrap_or_else(|e| e.into_inner()).values().filter(|job| !job.finished()).count()
+    }
+
     pub fn is_running(&self, id: Option<&str>) -> bool {
         let running = self.running.lock().unwrap_or_else(|e| e.into_inner());
         match id {

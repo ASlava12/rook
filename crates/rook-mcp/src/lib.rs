@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 
 use transport::Transport;
 
+pub use catalog::CatalogStatus;
 pub use protocol::{Content, PROTOCOL_VERSION, RpcError, ServerInfo, ToolDescriptor, ToolResult};
 pub use resources::{ResourceContent, ResourcePage, ResourceRead};
 
@@ -139,6 +140,8 @@ pub struct ServerConfig {
     pub catalog_max_tools: usize,
     pub catalog_max_pages: usize,
     pub catalog_timeout_secs: u64,
+    /// Refresh negotiated tool-list changes without replacing the connection.
+    pub refresh_tools: bool,
     pub enabled: bool,
 }
 
@@ -161,12 +164,15 @@ impl Default for ServerConfig {
             catalog_max_tools: 4096,
             catalog_max_pages: 64,
             catalog_timeout_secs: 30,
+            refresh_tools: false,
             enabled: true,
         }
     }
 }
 
 pub struct Server {
+    catalog_clock: std::sync::Arc<catalog::Clock>,
+    catalog_cache: catalog::Cache,
     calls: tokio::sync::RwLock<()>,
     name: String,
     info: ServerInfo,
@@ -208,9 +214,22 @@ impl Server {
                 message: message.into(),
             });
         }
-        let transport = Self::transport_for(config, proxy, token.clone())?;
+        let catalog_clock = std::sync::Arc::new(catalog::Clock::default());
+        let transport = Self::transport_for(config, proxy, token.clone(), catalog_clock.clone())?;
         let info = Self::handshake(transport.as_ref(), config).await?;
+        catalog_clock.negotiate(
+            info.capabilities.pointer("/tools/listChanged").and_then(serde_json::Value::as_bool)
+                == Some(true),
+        );
+        if config.refresh_tools
+            && info.capabilities.pointer("/tools/listChanged").and_then(serde_json::Value::as_bool)
+                == Some(true)
+        {
+            transport.watch_catalog(Duration::from_secs(config.startup_timeout_secs.clamp(1, 300)));
+        }
         Ok(Self {
+            catalog_clock,
+            catalog_cache: Default::default(),
             calls: tokio::sync::RwLock::new(()),
             name: config.name.clone(),
             info,
@@ -232,15 +251,23 @@ impl Server {
         config: &ServerConfig,
         proxy: &rook_llm::Proxy,
         token: Option<std::sync::Arc<dyn oauth::TokenSource>>,
+        catalog_clock: std::sync::Arc<catalog::Clock>,
     ) -> Result<Box<dyn Transport>> {
         match config.url.as_deref() {
-            Some(url) if !url.is_empty() => {
-                Ok(Box::new(http::Http::new(&config.name, url, &config.headers, proxy, token)?))
-            }
+            Some(url) if !url.is_empty() => Ok(Box::new(http::Http::new(
+                &config.name,
+                url,
+                &config.headers,
+                proxy,
+                token,
+                catalog_clock,
+            )?)),
             // A server this machine starts and talks to over its own pipes has
             // no network between the two, so there is nothing for a proxy to
             // sit in.
-            _ if !config.command.trim().is_empty() => Ok(Box::new(stdio::Stdio::spawn(config)?)),
+            _ if !config.command.trim().is_empty() => {
+                Ok(Box::new(stdio::Stdio::spawn(config, catalog_clock)?))
+            }
             _ => Err(McpError::NotConfigured { server: config.name.clone() }),
         }
     }
@@ -418,14 +445,28 @@ impl Server {
         if self.restarts.fetch_add(1, Ordering::Relaxed) >= MOST_RESTARTS {
             return false;
         }
-        let Ok(fresh) = Self::transport_for(&self.config, &self.proxy, self.token.clone()) else {
+        let Ok(fresh) =
+            Self::transport_for(&self.config, &self.proxy, self.token.clone(), self.catalog_clock.clone())
+        else {
             return false;
         };
-        if Self::handshake(fresh.as_ref(), &self.config).await.is_err() {
+        let Ok(info) = Self::handshake(fresh.as_ref(), &self.config).await else {
             return false;
+        };
+        let mut transport = self.transport.write().await;
+        self.catalog_clock.negotiate(
+            info.capabilities.pointer("/tools/listChanged").and_then(serde_json::Value::as_bool)
+                == Some(true),
+        );
+        if self.config.refresh_tools
+            && info.capabilities.pointer("/tools/listChanged").and_then(serde_json::Value::as_bool)
+                == Some(true)
+        {
+            fresh.watch_catalog(Duration::from_secs(self.config.startup_timeout_secs.clamp(1, 300)));
         }
         tracing::warn!(server = %self.name, "restarted after a transport failure");
-        *self.transport.write().await = fresh;
+        *transport = fresh;
+        self.catalog_clock.changed();
         true
     }
 

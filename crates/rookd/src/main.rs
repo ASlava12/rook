@@ -8,6 +8,7 @@
 
 mod api;
 mod chat;
+mod drain;
 mod inbound;
 mod telegram;
 mod web;
@@ -38,6 +39,8 @@ struct Args {
 }
 
 pub struct AppState {
+    pub drain: Arc<rook_core::drain::Control>,
+    pub restart_cli: std::path::PathBuf,
     pub work: work::Tasks,
     oauth: api::mcp_oauth::Logins,
     /// An `Arc` so a websocket turn can take an owned read guard and outlive the
@@ -424,7 +427,11 @@ async fn serve() -> Result<()> {
     }
 
     let about = about(&rook);
+    let restart_cli =
+        std::env::current_exe()?.with_file_name(if cfg!(windows) { "rook.exe" } else { "rook" });
     let state = Arc::new(AppState {
+        drain: Default::default(),
+        restart_cli,
         work: Default::default(),
         oauth: Default::default(),
         rook: Arc::new(RwLock::new(rook)),
@@ -453,6 +460,7 @@ async fn serve() -> Result<()> {
     let maintenance = tokio::spawn(maintain(state.clone(), config.storage.maintenance_interval_hours));
     let work = tokio::spawn(work::supervise(state.clone()));
     let telegram = tokio::spawn(telegram::run(state.clone()));
+    let drain = tokio::spawn(drain::supervise(state.clone()));
 
     let addr = SocketAddr::new(bind, port);
     let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("binding {addr}"))?;
@@ -471,6 +479,8 @@ async fn serve() -> Result<()> {
     // a daemon still holding the lock meets it with the error this ordering
     // exists to prevent — which is what a restart hit, every time, on the
     // daemon it had just stopped.
+    drain.abort();
+    let _ = drain.await;
     telegram.abort();
     let _ = telegram.await;
     maintenance.abort();

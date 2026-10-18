@@ -39,6 +39,7 @@ pub(super) struct Bounds {
     pub(super) effort: Option<rook_llm::Effort>,
     pub(super) recipe: Option<crate::recipes::Prepared>,
     pub(super) executor: Option<String>,
+    pub(super) result_schema: Option<serde_json::Value>,
 }
 
 pub(super) struct Crew<'a> {
@@ -282,6 +283,12 @@ impl Crew<'_> {
     ) -> impl std::future::Future<Output = Result<(String, TurnOutcome)>> + Send + 'b {
         async move {
             let mut accounting = crate::model_delegation::Guard::start(self.rook, self.parent, session)?;
+            let mut typed_result = crate::delegated_results::Guard::new(
+                self.rook,
+                self.parent,
+                session,
+                bounds.result_schema.is_some(),
+            );
             let mut tree = if bounds.isolated {
                 Some(accounting.returned(crate::worktrees::create(self.rook, session).await)?)
             } else {
@@ -353,6 +360,11 @@ impl Crew<'_> {
             child.max_turn_tokens = bounds.tokens;
             child.by = bounds.by;
             child.prepared_recipe = bounds.recipe;
+            if let Some(schema) = &bounds.result_schema {
+                child.options.output_schema = Some(schema.clone());
+                child.options.schema_retries = 0;
+                child.delegated_result_contract = true;
+            }
             child.external_executor = bounds.executor;
             if let Some(name) = &child.external_executor {
                 if inherited.is_some_and(|context| context.len() > rook.config.acp_executor.frame_bytes) {
@@ -376,6 +388,26 @@ impl Crew<'_> {
                 }
             }))
             .await;
+            let result = if let Some(schema) = &bounds.result_schema {
+                let receipt = crate::delegated_results::Receipt::project(
+                    rook,
+                    session,
+                    schema,
+                    result.as_ref(),
+                    &child.vault,
+                )?;
+                let record = receipt.record(rook, self.parent, session)?;
+                typed_result.finish();
+                match result {
+                    Ok(mut outcome) => {
+                        outcome.reply = record;
+                        Ok(outcome)
+                    }
+                    Err(_) => Err(CoreError::Other(record)),
+                }
+            } else {
+                result
+            };
             let mut report = None;
             if let Some(tree) = tree.as_mut() {
                 tree.finished = true;
@@ -529,6 +561,20 @@ impl<'a> AgentLoop<'a> {
             Ok(tasks) => tasks,
             Err(why) => return why,
         };
+        if tasks.len() > self.rook.config.agent.max_subagents_per_turn {
+            return "delegation task count exceeds the configured turn ceiling".into();
+        }
+        let result_schemas: std::collections::BTreeMap<_, _> = match tasks
+            .iter()
+            .map(|task| {
+                crate::delegated_results::schema_for(args, task, &self.rook.workspace)
+                    .map(|schema| (task.clone(), schema))
+            })
+            .collect::<Result<_>>()
+        {
+            Ok(schemas) => schemas,
+            Err(error) => return error.to_string(),
+        };
         let isolated = match args.get("isolation") {
             None => false,
             Some(value) if value.as_str() == Some("shared") => false,
@@ -587,7 +633,10 @@ impl<'a> AgentLoop<'a> {
         let named = args.get("model").and_then(|m| m.as_str()).map(str::trim).filter(|m| !m.is_empty());
         let provider = match (careful, named) {
             (true, _) => None,
-            (false, None) => Some(self.errand_provider()),
+            (false, None) => match self.errand_provider() {
+                Ok(chosen) => Some(chosen),
+                Err(why) => return why,
+            },
             (false, Some(named)) => match self.errand_on(named).await {
                 Ok(chosen) => Some(chosen),
                 Err(why) => return why,
@@ -638,6 +687,7 @@ impl<'a> AgentLoop<'a> {
                             isolated,
                             recipe: None,
                             executor: executor.clone(),
+                            result_schema: result_schemas.get(task).cloned().flatten(),
                         },
                     )
                 })
@@ -679,6 +729,7 @@ impl<'a> AgentLoop<'a> {
                 let said = relayed[i].clone();
                 let provider = provider.clone();
                 let executor = executor.clone();
+                let result_schema = result_schemas.get(task).cloned().flatten();
                 async move {
                     let _permit = limit.acquire().await;
                     let bounds = Bounds {
@@ -690,6 +741,7 @@ impl<'a> AgentLoop<'a> {
                         isolated,
                         recipe: None,
                         executor: executor.clone(),
+                        result_schema,
                     };
                     (i, crew.run_subtask(task, inherited.as_deref(), bounds, doing, i, said).await)
                 }
@@ -920,20 +972,28 @@ impl<'a> AgentLoop<'a> {
     /// faster. A call that says `careful` is given the turn's own instead —
     /// the configuration sets the default and the model may ask upward, which
     /// is the way round that fails safely.
-    fn errand_provider(&self) -> std::sync::Arc<dyn Provider> {
+    fn errand_provider(&self) -> std::result::Result<std::sync::Arc<dyn Provider>, String> {
         let config = &self.rook.config.agent;
         let spec = config.errand_model.trim();
-        if spec.is_empty() || spec == config.model {
-            return self.provider.clone();
+        if (spec.is_empty() || spec == config.model)
+            && config.fallbacks.errand.is_none()
+            && config.fallbacks.main.is_none()
+        {
+            return Ok(self.provider.clone());
         }
+        let spec =
+            if spec.is_empty() { self.provider.configured_source().unwrap_or(&config.model) } else { spec };
         match crate::models::errand_provider_for(&self.rook.config, &self.vault, spec) {
-            Ok(provider) => std::sync::Arc::from(provider),
+            Ok(provider) => Ok(std::sync::Arc::from(provider)),
+            Err(e) if config.fallbacks.errand.is_some() || config.fallbacks.main.is_some() => {
+                Err(format!("explicit errand route unavailable: {e}"))
+            }
             Err(e) => {
                 tracing::warn!(
                     "`[agent] errand_model` {spec:?} could not be built ({e}); using {}",
                     config.model
                 );
-                self.provider.clone()
+                Ok(self.provider.clone())
             }
         }
     }

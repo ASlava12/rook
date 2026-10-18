@@ -178,7 +178,8 @@ fn resolved(command: &str, path: &std::ffi::OsStr, exts: &str) -> std::path::Pat
 }
 
 impl Stdio {
-    pub(crate) fn spawn(config: &ServerConfig) -> Result<Self> {
+    pub(crate) fn spawn(config: &ServerConfig, catalog_clock: Arc<crate::catalog::Clock>) -> Result<Self> {
+        catalog_clock.stdio();
         let lease = crate::reap::reserve(config.stdio_max_processes)
             .map_err(|source| McpError::Spawn { command: config.command.clone(), source })?;
         let mut command = tokio::process::Command::new(program(
@@ -239,6 +240,7 @@ impl Stdio {
                     tracing::debug!(server = %name, "unparsable JSON-RPC frame");
                     continue;
                 };
+                catalog_clock.observe(&message);
                 if message.method.is_some() && message.id.is_some() {
                     if !message.id.as_ref().is_some_and(|id| requests.admit(id)) {
                         reader_finished.store(true, Ordering::Release);

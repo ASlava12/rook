@@ -8,6 +8,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+futures-util = "0.3.34"
 # Process groups, output decoding and capability filesystem I/O are used on
 # every platform; this must not become a Windows-only dependency.
 rook-contain = { path = "../rook-contain" }
@@ -18,7 +19,7 @@ globset = "0.4"
 regex = "1.13.1"
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "charset", "http2", "gzip", "socks"] }
 rook-llm.workspace = true
-rook-mcp = { version = "0.16.0", path = "../rook-mcp" }
+rook-mcp = { version = "0.17.0", path = "../rook-mcp" }
 rook-proto.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }
 similar = { version = "3.2.0", default-features = false, features = ["text"] }

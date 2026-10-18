@@ -686,6 +686,7 @@ mod broker_tests {
             proxy.report()["decisions"].as_array().unwrap().iter().any(|d| d["reason"] == "connection bound")
         );
         let port = proxy.port;
+        let retired = proxy.task.abort_handle();
         drop(proxy);
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(10), upstream.read_u8())
@@ -695,6 +696,15 @@ mod broker_tests {
                 .kind(),
             std::io::ErrorKind::UnexpectedEof
         );
+        // A child tunnel can close on another worker while the owner's future
+        // is still dropping its listener. Wait for that destructor to finish.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !retired.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the retired proxy must release its listener");
         assert!(TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).await.is_err());
     }
 }

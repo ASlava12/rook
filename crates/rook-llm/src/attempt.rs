@@ -81,6 +81,14 @@ impl Guard {
             _ => {}
         }
     }
+
+    fn error(&mut self, error: &crate::LlmError) {
+        if let crate::LlmError::IncompleteResponse { usage: Some(usage), .. } = error {
+            self.facts.usage = Some(usage.clone());
+            self.facts.usage_reported = true;
+            self.facts.completion_confirmed = false;
+        }
+    }
 }
 
 impl Drop for Guard {
@@ -120,6 +128,7 @@ pub(crate) async fn complete<P: Provider + ?Sized>(
             Ok(completed)
         }
         Err(error) => {
+            guard.error(&error);
             guard.finish(AttemptStatus::Failed)?;
             Err(error)
         }
@@ -137,6 +146,7 @@ pub(crate) async fn stream<P: Provider + ?Sized>(
     match provider.stream(request).await {
         Ok(stream) => Ok(Box::pin(Observed { stream, guard, ended: false })),
         Err(error) => {
+            guard.error(&error);
             guard.finish(AttemptStatus::Failed)?;
             Err(error)
         }
@@ -163,6 +173,7 @@ impl Stream for Observed {
             }
             Poll::Ready(Some(Err(error))) => {
                 self.ended = true;
+                self.guard.error(&error);
                 let recorded = self.guard.finish(AttemptStatus::Failed);
                 Poll::Ready(Some(Err(recorded.err().unwrap_or(error))))
             }

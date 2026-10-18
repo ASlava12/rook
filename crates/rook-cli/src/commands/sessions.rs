@@ -7,6 +7,30 @@ use anyhow::Result;
 use rook_core::SessionSummary;
 use std::path::Path;
 
+pub(crate) fn background_arguments(session: u128, arguments: &str) -> Result<(u128, Option<String>)> {
+    anyhow::ensure!(arguments.len() <= 128, "background arguments exceed 128 bytes");
+    let mut words = arguments.split_whitespace().peekable();
+    let selected = if words.peek().is_some_and(|w| *w != "--after") {
+        rook_store::parse_session_id(words.next().unwrap_or_default())
+            .ok_or_else(|| anyhow::anyhow!("use /background [session-id] [--after CURSOR]"))?
+    } else {
+        session
+    };
+    let after = match words.next() {
+        None => None,
+        Some("--after") => Some(
+            words
+                .next()
+                .and_then(rook_store::parse_session_id)
+                .map(rook_store::format_session_id)
+                .ok_or_else(|| anyhow::anyhow!("invalid background scan cursor"))?,
+        ),
+        _ => anyhow::bail!("use /background [session-id] [--after CURSOR]"),
+    };
+    anyhow::ensure!(words.next().is_none(), "use /background [session-id] [--after CURSOR]");
+    Ok((selected, after))
+}
+
 pub(crate) fn worktree_arguments(arguments: &str) -> Result<(u128, Option<String>)> {
     anyhow::ensure!(arguments.len() <= 256, "worktree arguments exceed 256 bytes");
     let fields: Vec<_> = arguments.split_whitespace().collect();
@@ -53,8 +77,44 @@ pub(crate) fn diagnostic_arguments(arguments: &str) -> Result<(bool, std::path::
     Ok((logs, path))
 }
 
+pub(crate) fn selection_arguments(text: &str) -> Result<(String, Option<rook_llm::Effort>)> {
+    anyhow::ensure!(text.len() <= 320, "model selection exceeds 320 bytes");
+    let (name, effort) = match text.rsplit_once(" --effort ") {
+        Some((name, effort)) => (
+            name.trim(),
+            Some(
+                rook_llm::Effort::parse(effort.trim())
+                    .ok_or_else(|| anyhow::anyhow!("use --effort low|medium|high|xhigh|max"))?,
+            ),
+        ),
+        None => (text.trim(), None),
+    };
+    anyhow::ensure!(!name.is_empty() && !name.contains(" --"), "use /model NAME [--effort LEVEL]");
+    Ok((name.to_owned(), effort))
+}
+
 pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, json: bool) -> Result<()> {
-    if let SessionCmd::Model { id, model, request_id, revision } = &cmd {
+    if let SessionCmd::Results { id } = &cmd {
+        let session = source.session_named(id, workspace)?;
+        println!("{}", serde_json::to_string_pretty(&source.delegated_results(session)?)?);
+        return Ok(());
+    }
+    if let SessionCmd::LastAnswer { id, summary } = &cmd {
+        let session = source.session_named(id, workspace)?;
+        let answer = source.last_answer(session, *summary)?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&answer)?);
+        } else {
+            let safe: String =
+                answer.text.chars().filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t')).collect();
+            println!("{safe}");
+            if answer.truncated {
+                eprintln!("Bounded excerpt; full answer is saved at event #{}", answer.seq);
+            }
+        }
+        return Ok(());
+    }
+    if let SessionCmd::Model { id, model, effort, request_id, revision } = &cmd {
         let session = source.session_named(id, workspace)?;
         if let Some(model) = model {
             let revision = match revision {
@@ -64,6 +124,7 @@ pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, js
             let receipt = source.select_model(
                 session,
                 &rook_core::model_selection::Request {
+                    effort: effort.as_deref().and_then(rook_llm::Effort::parse),
                     id: request_id
                         .clone()
                         .unwrap_or_else(|| rook_store::format_session_id(rook_store::new_session_id())),
@@ -218,6 +279,14 @@ pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, js
         // Always structured: the complete draft and attachments must survive
         // when this command is piped into another editor or client.
         println!("{}", serde_json::to_string_pretty(&forked)?);
+        return Ok(());
+    }
+    if let SessionCmd::Background { id, after } = &cmd {
+        let page = source.background_page(source.session_named(id, workspace)?, after.as_deref(), None)?;
+        println!(
+            "{}",
+            if json { serde_json::to_string_pretty(&page)? } else { rook_core::background::describe(&page) }
+        );
         return Ok(());
     }
     if let SessionCmd::Tree { id, after } = &cmd {
@@ -462,6 +531,7 @@ pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, js
         | SessionCmd::Unbookmark { .. }
         | SessionCmd::Branch { .. }
         | SessionCmd::Tree { .. }
+        | SessionCmd::Background { .. }
         | SessionCmd::Turns { .. }
         | SessionCmd::Queue { .. }
         | SessionCmd::History { .. }
@@ -475,6 +545,8 @@ pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, js
         | SessionCmd::ExportHtml { .. }
         | SessionCmd::Attention { .. }
         | SessionCmd::Model { .. }
+        | SessionCmd::LastAnswer { .. }
+        | SessionCmd::Results { .. }
         | SessionCmd::Find { .. }
         | SessionCmd::Entry { .. }
         | SessionCmd::Image { .. }

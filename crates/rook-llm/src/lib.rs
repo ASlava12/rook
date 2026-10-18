@@ -233,6 +233,7 @@ pub mod effort;
 pub mod images;
 pub use effort::{EffortReport, EffortUse};
 
+pub mod reasoning;
 pub mod retry;
 pub mod stream;
 pub mod types;
@@ -259,6 +260,10 @@ pub enum LlmError {
     },
     #[error("could not parse the provider's response: {0}")]
     Decode(String),
+    /// An explicit generation failure, rather than malformed transport JSON.
+    /// Reported counters still belong to the failed physical attempt.
+    #[error("{provider} returned an incomplete response: {reason}")]
+    IncompleteResponse { provider: &'static str, reason: &'static str, retryable: bool, usage: Option<Usage> },
     #[error(
         "this turn needs about {used} tokens and the model's window holds {window}.\n\
          Compacting cannot help when a single message is the problem — put the text in a file \
@@ -565,6 +570,12 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// Immutable effort accepted with the selected model at root admission.
+    /// Child/auxiliary requests retain their own explicit effort policies.
+    fn turn_effort(&self) -> Option<Effort> {
+        None
+    }
+
     /// An explicitly selected analysis source and its implementation source.
     /// The engine owns phase changes; transport adapters never infer them from
     /// prompt text. Ordinary providers and independent errands have no policy.
@@ -640,6 +651,20 @@ pub trait Provider: Send + Sync {
     /// a guarantee about how the model reasons or whether a gateway accepts it.
     fn effort_use(&self, _effort: Effort) -> EffortUse {
         EffortUse::Unknown
+    }
+
+    /// Accepted wire mapping for this attempt's actual output allocation.
+    fn effort_use_for(&self, effort: Effort, request: &Request) -> EffortUse {
+        if request.model_capabilities.reasoning == Some(false) {
+            return EffortUse::Omitted { reason: "request capabilities disable reasoning" };
+        }
+        request
+            .model_capabilities
+            .reasoning_override
+            .as_ref()
+            .filter(|settings| settings.control.is_some() || settings.supported == Some(false))
+            .map(|settings| settings.effort_use_for_output(effort, request.max_output_tokens))
+            .unwrap_or_else(|| self.effort_use(effort))
     }
 
     async fn complete(&self, request: Request) -> Result<Response>;

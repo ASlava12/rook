@@ -4009,3 +4009,84 @@ fn preset_picker_loads_without_submitting_and_restores_the_original_draft() {
         "no prompt or model call was submitted"
     );
 }
+
+#[test]
+fn copy_reads_saved_branch_prose_in_local_and_remote_tui_with_owned_clipboard_transport() {
+    use std::os::unix::fs::PermissionsExt;
+    let _one = one_at_a_time();
+    for remote in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let bin = home.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let capture = home.path().join("clipboard.txt");
+        for name in ["pbcopy", "wl-copy", "xclip", "xsel"] {
+            let helper = bin.join(name);
+            std::fs::write(&helper, "#!/bin/sh\n/bin/cat > \"$ROOK_COPY_CAPTURE\"\n").unwrap();
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        std::fs::write(home.path().join("config.toml"),"[agent]\ninstall_servers=false\n[memory]\nenabled=false\n[web]\nenabled=false\n[server]\nport=0\n").unwrap();
+        {
+            let store = rook_store::Store::open(home.path().join("store")).unwrap();
+            store
+                .create_session(&rook_store::SessionMeta::new(
+                    1,
+                    "copy source",
+                    workspace.path().display().to_string(),
+                    1,
+                ))
+                .unwrap();
+            for (kind, body) in [
+                (rook_store::EventKind::AssistantMessage, "PUBLIC_SAVED_Ответ"),
+                (rook_store::EventKind::Reasoning, "PRIVATE_REASONING"),
+                (
+                    rook_store::EventKind::Compaction,
+                    r#"{"summary":"INTERNAL_WORKING_SUMMARY","through_seq":0}"#,
+                ),
+            ] {
+                store
+                    .append_event(
+                        1,
+                        rook_store::NewEvent::new(kind, rook_store::Kind::Message, body.as_bytes()),
+                    )
+                    .unwrap();
+            }
+        }
+        let daemon = remote.then(|| Daemon::start(home.path(), workspace.path()));
+        let path = std::env::join_paths(
+            std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())),
+        )
+        .unwrap();
+        let mut args = vec!["--workspace", workspace.path().to_str().unwrap(), "tui"];
+        if !remote {
+            args.push("--alone");
+        }
+        let mut pty = Pty::spawn(
+            std::path::Path::new(env!("CARGO_BIN_EXE_rook")),
+            &args,
+            &[
+                ("ROOK_HOME", home.path().to_str().unwrap()),
+                ("ROOK_CONFIG_DIR", home.path().to_str().unwrap()),
+                ("ROOK_COPY_CAPTURE", capture.to_str().unwrap()),
+                ("PATH", path.to_str().unwrap()),
+                ("ROOK_LOG", "error"),
+                ("TERM", "xterm-256color"),
+            ],
+            100,
+            30,
+        );
+        pty.screen(100, 30);
+        pty.send(&format!("/tree {}\r", rook_store::format_session_id(1)));
+        pty.screen_showing(100, 30, "conversation tree");
+        pty.send("c");
+        pty.screen_showing(100, 30, "PUBLIC_SAVED_");
+        pty.send("/copy\r");
+        pty.screen_showing(100, 30, "Copied saved answer #0");
+        assert_eq!(std::fs::read_to_string(&capture).unwrap(), "PUBLIC_SAVED_Ответ");
+        pty.send("/copy --summary\r");
+        pty.screen_showing(100, 30, "Copied saved summary #2");
+        assert_eq!(std::fs::read_to_string(&capture).unwrap(), "INTERNAL_WORKING_SUMMARY");
+        drop(pty);
+        drop(daemon);
+    }
+}

@@ -40,7 +40,15 @@ impl<'a> AgentLoop<'a> {
         while crate::message_queue::followups::ready(self.rook, self.session)? {
             let (provider, effort) = match &self.followup_model {
                 Some(resolve) => resolve()?,
-                None => (self.provider.clone(), self.effort),
+                None => {
+                    let view = self.rook.model_selection(self.session)?;
+                    if view.selected.is_some() {
+                        let provider = self.rook.provider_for_turn(self.session, None)?;
+                        (std::sync::Arc::from(provider), self.effort)
+                    } else {
+                        (self.provider.clone(), self.effort)
+                    }
+                }
             };
             let Some((journal, message)) =
                 crate::execution::Journal::reserve_follow_up(self.rook, self.session)?

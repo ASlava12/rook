@@ -11,6 +11,41 @@ use rook_llm::{Api, Endpoint, LlmError, Provider};
 use crate::config::{Config, ModelSource};
 use crate::secrets::Vault;
 
+/// Explicit per-purpose chains. None inherits legacy global priorities; [] disables fallback.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Fallbacks {
+    pub main: Option<Vec<String>>,
+    pub compaction: Option<Vec<String>>,
+    pub errand: Option<Vec<String>>,
+}
+impl Fallbacks {
+    pub(crate) fn errors(&self, config: &Config) -> Vec<String> {
+        let mut errors = Vec::new();
+        for (purpose, chain) in
+            [("main", &self.main), ("compaction", &self.compaction), ("errand", &self.errand)]
+        {
+            let Some(chain) = chain else { continue };
+            let mut seen = std::collections::BTreeSet::new();
+            if chain.len() > 16 {
+                errors.push(format!("agent.fallbacks.{purpose}: at most 16 configured names"));
+            }
+            for name in chain.iter().take(17) {
+                if name.is_empty()
+                    || name.len() > 256
+                    || !config.models.contains_key(name)
+                    || !seen.insert(name)
+                {
+                    errors.push(format!(
+                        "agent.fallbacks.{purpose}: names must be unique configured sources of 1..256 bytes"
+                    ));
+                }
+            }
+        }
+        errors
+    }
+}
+
 /// Build the provider a setting names.
 ///
 /// A name in `[models]` wins. Anything else is the `provider/model` spelling
@@ -20,7 +55,8 @@ use crate::secrets::Vault;
 pub fn provider_for(config: &Config, vault: &Vault, name: &str) -> Result<Box<dyn Provider>, LlmError> {
     let name = name.trim();
     validate_route(config, name)?;
-    let inner = built(config, vault, name, rook_llm::Prefer::AsConfigured)?;
+    let inner =
+        built(config, vault, name, rook_llm::Prefer::AsConfigured, config.agent.fallbacks.main.as_deref())?;
     let Some(source) = config.models.get(name) else {
         return Ok(inner);
     };
@@ -51,11 +87,26 @@ pub fn errand_provider_for(
     vault: &Vault,
     name: &str,
 ) -> Result<Box<dyn Provider>, LlmError> {
-    let inner = built(config, vault, name, rook_llm::Prefer::WhicheverIsFree)?;
+    let inner = built(
+        config,
+        vault,
+        name,
+        rook_llm::Prefer::WhicheverIsFree,
+        config.agent.fallbacks.errand.as_deref(),
+    )?;
     Ok(match config.models.get(name.trim()) {
         Some(_) => Box::new(crate::phase_routing::Selected::new(name.trim(), "", inner)),
         None => inner,
     })
+}
+
+pub(crate) fn compaction_provider_for(
+    config: &Config,
+    vault: &Vault,
+    name: &str,
+) -> Result<Box<dyn Provider>, LlmError> {
+    validate_route(config, name)?;
+    built(config, vault, name, rook_llm::Prefer::AsConfigured, config.agent.fallbacks.compaction.as_deref())
 }
 
 fn built(
@@ -63,8 +114,12 @@ fn built(
     vault: &Vault,
     name: &str,
     prefer: rook_llm::Prefer,
+    chain: Option<&[String]>,
 ) -> Result<Box<dyn Provider>, LlmError> {
-    let endpoints = endpoints_for(config, vault, name)?;
+    if let Some(error) = config.agent.fallbacks.errors(config).into_iter().next() {
+        return Err(LlmError::Other(error));
+    }
+    let endpoints = endpoints_with_chain(config, vault, name, chain)?;
     let observations = crate::model_catalog::Snapshot::new(config);
     rook_llm::from_endpoints_configured(
         endpoints,
@@ -85,6 +140,15 @@ fn built(
 /// logs and, before long, a tool description, and an order that shuffles is an
 /// order nobody can read twice.
 pub fn endpoints_for(config: &Config, vault: &Vault, name: &str) -> Result<Vec<Endpoint>, LlmError> {
+    endpoints_with_chain(config, vault, name, config.agent.fallbacks.main.as_deref())
+}
+
+fn endpoints_with_chain(
+    config: &Config,
+    vault: &Vault,
+    name: &str,
+    chain: Option<&[String]>,
+) -> Result<Vec<Endpoint>, LlmError> {
     let asked = match endpoint_for(config, vault, name)? {
         Some(endpoint) => endpoint,
         None => {
@@ -105,6 +169,27 @@ pub fn endpoints_for(config: &Config, vault: &Vault, name: &str) -> Result<Vec<E
         }
     };
 
+    if let Some(chain) = chain {
+        if chain.len() > 16 {
+            return Err(LlmError::Other("fallback chain exceeds 16 sources".into()));
+        }
+        let mut endpoints = vec![asked];
+        for name in chain {
+            if endpoints.iter().any(|endpoint| endpoint.name == *name) {
+                continue;
+            }
+            match endpoint_for(config, vault, name) {
+                Ok(Some(endpoint)) => endpoints.push(endpoint),
+                Ok(None) => {
+                    return Err(LlmError::Other("fallback must name a configured model source".into()));
+                }
+                Err(error) => {
+                    tracing::warn!("{name} is unavailable in this purpose's fallback chain: {error}")
+                }
+            }
+        }
+        return Ok(endpoints);
+    }
     let mut after: Vec<(u32, &str)> = config
         .models
         .iter()
@@ -273,6 +358,9 @@ fn checked_address<'a>(
             ),
         })
     })?;
+    if let Some(reasoning) = &source.reasoning {
+        reasoning.validate(api)?;
+    }
     if address.url.trim().is_empty() {
         return Err(LlmError::Other(format!(
             "`[{at}] url` is not set, so there is nowhere to send the request. Most \
@@ -458,6 +546,16 @@ pub(crate) fn reference_identity(config: &Config, name: &str) -> Result<Option<&
 
 /// Cache namespaces describe configuration without executing credential helpers.
 pub(crate) fn catalog_scope(config: &Config, vault: &Vault, name: &str) -> Result<String, LlmError> {
+    source_scope(config, vault, name, true)
+}
+
+// A capability edit invalidates observations, not the user's durable model
+// selection. Endpoint/model/credential/proxy changes still require reselection.
+pub(crate) fn selection_scope(config: &Config, vault: &Vault, name: &str) -> Result<String, LlmError> {
+    source_scope(config, vault, name, false)
+}
+
+fn source_scope(config: &Config, vault: &Vault, name: &str, capabilities: bool) -> Result<String, LlmError> {
     use sha2::{Digest, Sha256};
     let mut parts = if let Some(source) = config.models.get(name.trim()) {
         let (address, api) = checked_address(config, name, source)?;
@@ -488,6 +586,12 @@ pub(crate) fn catalog_scope(config: &Config, vault: &Vault, name: &str) -> Resul
     };
     // A proxy can route the same hostname to another server/account. Runtime
     // capability decisions must not cross that boundary either.
+    if capabilities
+        && let Some(reasoning) = config.models.get(name.trim()).and_then(|source| source.reasoning.as_ref())
+    {
+        parts.push("reasoning-override-v1".into());
+        parts.push(serde_json::to_string(reasoning).map_err(|error| LlmError::Other(error.to_string()))?);
+    }
     parts.push("catalog-scope-v2".into());
     for variable in [
         "HTTP_PROXY",

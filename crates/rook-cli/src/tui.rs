@@ -2511,11 +2511,14 @@ impl App {
                 if !models.is_empty() {
                     self.endpoints = models;
                 }
-                let selected = self
-                    .chat
-                    .session
-                    .and_then(|session| self.source.model_selection(session).ok())
-                    .and_then(|view| view.selected);
+                let selection =
+                    self.chat.session.and_then(|session| self.source.model_selection(session).ok());
+                let effort = selection
+                    .as_ref()
+                    .and_then(|view| view.selected_effort)
+                    .map(|value| value.as_str().to_owned())
+                    .unwrap_or(effort);
+                let selected = selection.and_then(|view| view.selected);
                 if let Some(selected) = selected {
                     *self.shared.model.borrow_mut() = Some(selected);
                 } else if !model.is_empty() {
@@ -2753,12 +2756,15 @@ impl App {
                         });
                         match loaded {
                             Ok(preset) => {
-                                if let Some(model) = preset.model {
-                                    self.run_on(&model);
-                                }
-                                if let Some(effort) = preset.effort {
-                                    self.shared.effort.set(effort);
-                                    self.tell_the_daemon("effort", effort.as_str());
+                                if preset.model.is_some() || preset.effort.is_some() {
+                                    let model = preset
+                                        .model
+                                        .clone()
+                                        .or_else(|| self.shared.model.borrow().clone())
+                                        .unwrap_or_else(|| self.model.clone());
+                                    if !self.run_on_with_effort(&model, preset.effort) {
+                                        return;
+                                    }
                                 }
                                 self.chat.input.set(&preset.prompt);
                                 self.overlay = None;
@@ -3692,12 +3698,15 @@ impl App {
                         serde_json::from_value(reply["preset"].clone());
                     match preset {
                         Ok(preset) => {
-                            if let Some(model) = &preset.model {
-                                self.run_on(model);
-                            }
-                            if let Some(effort) = preset.effort {
-                                self.shared.effort.set(effort);
-                                self.tell_the_daemon("effort", effort.as_str());
+                            if preset.model.is_some() || preset.effort.is_some() {
+                                let model = preset
+                                    .model
+                                    .clone()
+                                    .or_else(|| self.shared.model.borrow().clone())
+                                    .unwrap_or_else(|| self.model.clone());
+                                if !self.run_on_with_effort(&model, preset.effort) {
+                                    return;
+                                }
                             }
                             self.chat.input.set(&preset.prompt);
                             self.chat.push("stat", "Preset loaded into the draft. Review settings and press Enter to submit. F8 loads presets while retaining an existing draft.");
@@ -3936,6 +3945,17 @@ impl App {
             self.chat.push("stat", &said);
             return;
         }
+        if name == "background" {
+            let Some(session) = self.chat.session else {
+                return self.chat.push("err", "start or resume a session first");
+            };
+            if self.history.background(session, rest, self.shared.jobs.clone()) {
+                self.chat.push("stat", "Reading background work in the history worker…");
+            } else {
+                self.chat.push("err", "History worker busy or arguments too long; try again.");
+            }
+            return;
+        }
         if name == "diagnostics" {
             let said = match self.chat.session {
                 Some(session) => {
@@ -3969,6 +3989,40 @@ impl App {
             let said =
                 page.map(|page| rook_core::attention::describe(&page)).unwrap_or_else(|e| e.to_string());
             self.chat.push("stat", &said);
+            return;
+        }
+        if name == "daemon" {
+            match self.source.drain_command(rest).and_then(|view| Ok(serde_json::to_string_pretty(&view)?)) {
+                Ok(text) => self.chat.push("stat", &text),
+                Err(error) => self.chat.push("err", &error.to_string()),
+            }
+            return;
+        }
+        if name == "results" {
+            let Some(session) = self.chat.session else {
+                return self.chat.push("err", "start or resume a session first");
+            };
+            match self
+                .source
+                .delegated_results(session)
+                .and_then(|value| Ok(serde_json::to_string_pretty(&value)?))
+            {
+                Ok(text) => self.chat.push("stat", &text),
+                Err(error) => self.chat.push("err", &error.to_string()),
+            }
+            return;
+        }
+        if name == "copy" {
+            let Some(session) = self.chat.session else {
+                return self.chat.push("err", "start or resume a session first");
+            };
+            let result = crate::clipboard::arguments(rest)
+                .and_then(|summary| self.source.last_answer(session, summary))
+                .map(|answer| crate::clipboard::copy(&answer));
+            match result {
+                Ok(text) => self.chat.push("stat", &text),
+                Err(error) => self.chat.push("err", &error.to_string()),
+            }
             return;
         }
         if name == "export-preview" {
@@ -4239,11 +4293,16 @@ impl App {
     /// from the list the engine gave, so there is nothing to check that the
     /// engine has not already checked.
     fn run_on(&mut self, name: &str) {
+        self.run_on_with_effort(name, None);
+    }
+
+    fn run_on_with_effort(&mut self, name: &str, effort: Option<rook_llm::Effort>) -> bool {
         if let Some(session) = self.chat.session {
             let receipt = self.source.model_selection(session).and_then(|view| {
                 self.source.select_model(
                     session,
                     &rook_core::model_selection::Request {
+                        effort,
                         id: rook_store::format_session_id(rook_store::new_session_id()),
                         expected_revision: view.revision,
                         model: name.into(),
@@ -4252,21 +4311,32 @@ impl App {
             });
             match receipt {
                 Ok(receipt) => {
-                    self.endpoint_note =
-                        format!("{} saved, revision {}; next turn", receipt.model, receipt.revision);
+                    self.endpoint_note = format!(
+                        "{}{} saved, revision {}; next turn",
+                        receipt.model,
+                        receipt.effort.map(|level| format!(" / {}", level.as_str())).unwrap_or_default(),
+                        receipt.revision
+                    );
                 }
                 Err(error) => {
                     self.endpoint_note = error.to_string();
                     self.chat.push("err", &self.endpoint_note);
-                    return;
+                    return false;
                 }
             }
         } else {
             self.tell_the_daemon("model", name);
+            if let Some(effort) = effort {
+                self.tell_the_daemon("effort", effort.as_str());
+            }
             self.endpoint_note = format!("the next new session uses {name}");
         }
         *self.shared.model.borrow_mut() = Some(name.to_string());
+        if let Some(effort) = effort {
+            self.shared.effort.set(effort);
+        }
         self.chat.push("stat", &self.endpoint_note);
+        true
     }
 
     /// Put every endpoint back in the rotation and ask each one.
@@ -4480,6 +4550,8 @@ impl App {
                 || command.starts_with("mcp ")
                 || command == "task"
                 || command.starts_with("task ")
+                || command == "background"
+                || command.starts_with("background ")
                 || command == "diagnostics"
                 || command.starts_with("diagnostics ")
                 || command == "export-html"
@@ -6591,6 +6663,39 @@ fn kind_style(kind: &str) -> Style {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn background_read_uses_the_worker_and_preserves_a_busy_session_and_draft() {
+        let home = tempfile::tempdir().unwrap();
+        let rook = std::sync::Arc::new(rook_core::Rook::from_parts(
+            rook_store::Store::open(home.path().join("store")).unwrap(),
+            Default::default(),
+            rook_skills::Environment::bare("test", "test", "1"),
+            Default::default(),
+            home.path().into(),
+        ));
+        let session = rook.start_session("parent").unwrap();
+        let child = rook.fork_for_subtask(session, "visible child").unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let mut app = super::App::new(crate::source::Source::Local(rook), runtime, true);
+        app.chat.session = Some(session);
+        app.chat.busy = true;
+        app.chat.input.set("UNSENT_DRAFT");
+        app.command("background");
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let result = loop {
+            app.history.poll();
+            if let Some(result) = app.history.take_worktree() {
+                break result;
+            }
+            assert!(std::time::Instant::now() < until, "background worker never completed");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert!(result.contains(&rook_store::format_session_id(child)), "{result}");
+        assert_eq!(app.chat.session, Some(session));
+        assert!(app.chat.busy);
+        assert_eq!(app.chat.input.as_str(), "UNSENT_DRAFT");
+    }
+
     #[test]
     fn stopping_an_idle_daemon_observer_quits_without_sending_a_stop_to_any_branch() {
         let home = tempfile::tempdir().unwrap();

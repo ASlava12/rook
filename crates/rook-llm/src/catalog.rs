@@ -72,6 +72,9 @@ impl CatalogLimits {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelCapabilities {
+    /// Present only for an explicit operator configuration override.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_override: Option<crate::reasoning::Override>,
     pub tools: Option<bool>,
     pub image_input: Option<bool>,
     pub reasoning: Option<bool>,
@@ -110,6 +113,7 @@ impl ModelCapabilities {
             })
         });
         Self {
+            reasoning_override: None,
             tools: None,
             image_input: support("image_input"),
             reasoning: support("thinking"),

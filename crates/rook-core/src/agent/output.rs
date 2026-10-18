@@ -13,6 +13,11 @@ impl<'a> AgentLoop<'a> {
         outcome: &mut TurnOutcome,
         on_progress: &mut impl FnMut(Progress<'_>),
     ) -> Result<()> {
+        if self.delegated_result_contract {
+            let value = crate::delegated_results::delivered(&outcome.reply, &self.vault)?;
+            outcome.reply = String::from_utf8(crate::persistence::encode_with_limit(&value, 65536)?)
+                .map_err(|error| CoreError::Other(error.to_string()))?;
+        }
         if self.review_only {
             let narrative =
                 super::review::normalize_reply(&mut outcome.reply, self.rook.config.review.page_bytes)?;

@@ -49,6 +49,13 @@ impl Config {
                 errors.push(format!("agent.{name}: expected {low}..={high}"));
             }
         }
+        if self.agent.compaction_timeout_secs.is_some_and(|v| !(1..=86400).contains(&v)) {
+            errors.push("agent.compaction_timeout_secs: expected 1..=86400 or omit".into());
+        }
+        if self.agent.compaction_output_tokens.is_some_and(|v| !(128..=131072).contains(&v)) {
+            errors.push("agent.compaction_output_tokens: expected 128..=131072 or omit".into());
+        }
+        errors.extend(self.agent.fallbacks.errors(self));
         errors.extend(self.price_catalog.errors());
         errors.extend(self.review.errors());
         errors.extend(self.shell_undo.errors());

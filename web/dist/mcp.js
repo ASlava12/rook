@@ -18,6 +18,8 @@ export function mcpPanel(session) {
     rows.replaceChildren(...report.servers.map(server => el('article', { class: 'entry' },
       el('strong', {}, server.name),
       el('p', {}, `${server.state}${server.reconnecting ? ' (reconnecting)' : ''} · ${server.tools} tools${server.resources ? ' · resources' : ''} · ${server.active_requests} active requests · generation ${server.generation}`),
+      server.catalog ? el('p', {}, !server.catalog.configured ? 'Tool-list refresh off' : `Catalog generation ${server.catalog.generation} · ${server.catalog.stale ? 'stale' : 'current'} · ${server.catalog.notifications || ''}${server.catalog.negotiated ? '' : ' · listChanged not negotiated'}${server.catalog.retry_after_secs != null ? ` · retry after ${server.catalog.retry_after_secs}s` : ''}`) : null,
+      server.catalog?.error ? el('p', { class: 'warn' }, server.catalog.error) : null,
       server.error ? el('p', { class: 'warn' }, server.error) : null,
       server.last_request_error ? el('p', { class: 'warn' }, `Last request: ${server.last_request_error}`) : null,
       el('button', { type: 'button', onclick: () => load(server.name) }, `Reconnect ${server.name}`),

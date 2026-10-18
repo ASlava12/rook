@@ -1821,6 +1821,44 @@ recorded so the design question survives the session that raised it.
 
 ## Next
 
+**Reference delivery cycle, 2026-10-18 (0.17.0).** The seven R17 runtime items,
+live MCP catalog refresh, Gemini malformed-output recovery and a session-family
+background-work overview are implemented. Refactoring, audit corrections, the
+final integrated gate and native frontend checks passed. See the
+[cycle tracker](reference-cycle-20261018.md) and
+[new source review](research/reference-review-20261018-cycle.md).
+
+**Reference review R17, 2026-10-16, after v0.16.0.** All ten reference
+repositories were checked; eight gitlinks advanced and two already matched
+their fetched tips. The [new review](research/reference-review-20261016-r17.md)
+records the exact snapshots, 388 incoming commit subjects, source evidence,
+existing equivalents and acceptance criteria. On 2026-10-16 the user accepted
+all eight candidates into the backlog. On 2026-10-18 the user requested their
+implementation. Seven runtime items are **implemented and verified**; the
+summarizer experiment remains pending. Per-item delivery, validation results and limitations are tracked
+in the [R17 adoption record](reference-r17-adoption.md). The summarizer budget
+keeps its current default until a measured improvement is established.
+
+| ID | Priority | Status | Backlog item | Completion criteria |
+|---|---|---|---|---|
+| R17-1 | P1 | Implemented; verified | Atomic durable model/effort selection | One receipt commits both settings; busy/idle switches, restart and A→B→retry-A preserve the chosen pair; selected/effective status agrees across frontends. |
+| R17-2 | P1 | Implemented; verified | Drain before daemon restart | New admissions stop while current work drains; pending questions remain reachable and may be declined; descendants/jobs/writers participate in quiescence; timeout never forces restart implicitly. |
+| R17-3 | P1 | Implemented; verified | Compaction cancellation and phase budgets | Configured phase/remaining-turn budgets bound summary work; cancellation prevents late commits; fallback preserves source references and pending input; ordinary answer streams retain silence-based timeouts. |
+| R17-4 | P2 | Implemented; verified | Purpose-specific model fallback chains | Main work, compaction and errands resolve their permitted ordered chains independently; omitted settings preserve current behavior; empty chains, route credentials, context limits and actual-attempt receipts are checked. |
+| R17-5 | P2 | Implemented; verified | Typed delegated result contracts | Per-task bounded schemas validate the delivered/redacted result; typed receipts identify status, omissions and the complete saved answer; schema failure does not rerun child tools. |
+| R17-6 | P2 | Implemented; verified | Copy the last assistant answer | Shared branch-aware selection feeds browser copy, TUI/REPL `/copy` and CLI retrieval; clipboard absence, large/empty replies and UTF-8 are handled; internal summaries require an explicit choice. |
+| R17-7 | P2, experiment | Experiment pending | Summarizer-specific output budget | Compare current and model-aware bounded budgets on real transcripts, recording preservation quality, latency and tokens; record the adoption decision. Without measured improvement, retain the current default. An unavailable model leaves the experiment pending. |
+| R17-8 | P2 | Implemented; verified | Explicit reasoning capabilities for configured models | Validated per-source declarations describe supported controls, levels and budgets; provenance/effective settings are visible; unknown aliases, stale metadata, explicit disable, fallback and endpoint rejection are covered. |
+
+The [R17 source review](research/reference-review-20261016-r17.md) defines the
+full scope and acceptance cases for each ID. Implement shared behavior with
+CLI/API/TUI/browser parity, preserving bounded state and permission/private-input
+rules. A declined or unanswered credential is not consent and must not block
+unrelated available work. Update each item's status here as work starts and
+link delivery evidence before marking it complete.
+
+ACP v2 and content-bound extension trust remain separately scoped directions.
+
 **Reference follow-up, 2026-10-15, after v0.14.0.** All ten reference
 pointers were advanced again to the fetched branch tips. The previous October 15
 candidate table is superseded: its diagnostics, MCP resources, private input,
@@ -1838,7 +1876,7 @@ All eight candidates are implemented. The original priority table remains in
 [the dated source review](research/reference-review-20261015.md); implementation
 limits and verification are recorded in the adoption log above.
 
-ACP changes in this refresh are registry-only. Keep v1 compatible; any future
+ACP changes in that October 15 refresh were registry-only. Keep v1 compatible; any future
 v2 adapter needs explicit negotiation. Translation, semantic retrieval and other
 performance/quality experiments still require local measurements before adoption.
 A user may decline or ignore a question or secret request; absence is not consent.

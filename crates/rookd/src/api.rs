@@ -46,6 +46,12 @@ pub fn router(state: Shared) -> Router {
         .merge(crate::inbound::routes())
         .merge(crate::telegram::routes())
         .route("/api/health", get(health))
+        .route(
+            "/api/daemon/drain",
+            get(crate::drain::status)
+                .post(crate::drain::change)
+                .layer(axum::extract::DefaultBodyLimit::max(4096)),
+        )
         .route("/api/presets", post(preset_request).layer(axum::extract::DefaultBodyLimit::max(65536)))
         .route("/api/store/stats", get(stats))
         .route("/api/store/objects", get(objects))
@@ -60,6 +66,7 @@ pub fn router(state: Shared) -> Router {
             get(worktree_diagnosis).post(restore_worktree).layer(axum::extract::DefaultBodyLimit::max(4096)),
         )
         .route("/api/sessions/{id}/diagnostics", get(diagnostics))
+        .route("/api/sessions/{id}/background", get(background))
         .route(
             "/api/sessions/{session}/private-input/{id}",
             post(private_input).layer(axum::extract::DefaultBodyLimit::max(65536)),
@@ -74,6 +81,8 @@ pub fn router(state: Shared) -> Router {
         .route("/api/sessions/{id}/rename", post(rename_branch))
         .route("/api/sessions/{id}/bookmarks", get(bookmarks).post(mark_bookmark))
         .route("/api/sessions/{id}/history", get(history_page))
+        .route("/api/sessions/{id}/last-answer", get(last_answer))
+        .route("/api/sessions/{id}/delegated-results", get(delegated_results))
         .route(
             "/api/sessions/{id}/export",
             post(conversation_export).layer(axum::extract::DefaultBodyLimit::max(4096)),
@@ -179,6 +188,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/jobs/{id}/stop", post(stop_job))
         .route("/api/search", get(search))
         .route("/api/files", get(naming))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), crate::drain::fence))
         .layer(axum::middleware::from_fn_with_state(allowed, crate::chat::trusted_authority))
         .with_state(state)
 }
@@ -589,6 +599,56 @@ struct DiagnosticQuery {
     logs: bool,
 }
 
+async fn background(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Query(query): Query<rook_core::branches::Query>,
+) -> ApiResult<rook_core::background::Page> {
+    let sid = session_id(&id)?;
+    let workspace = s
+        .rook
+        .read()
+        .await
+        .store
+        .get_session(sid)
+        .map_err(CoreError::from)?
+        .ok_or(CoreError::NoSession(id))?
+        .workspace;
+    // Saved family metadata remains readable when its old workspace/config is unavailable.
+    let engine =
+        s.engine_for(Some(std::path::Path::new(&workspace))).await.unwrap_or_else(|_| s.rook.clone());
+    let mut page = rook_core::background::page(&*engine.read().await, sid, &query, None)?;
+    let ids = page.entries.iter().filter_map(|e| rook_store::parse_session_id(&e.session)).collect();
+    // All already-created project registries, including delegated worktrees.
+    // Reading this map never constructs equipment or launches a process.
+    for equipment in s.equipment.read().await.values() {
+        if let Some(shared) = equipment.get() {
+            let overview = shared.jobs.overview(&ids, 256usize.saturating_sub(page.jobs.len()));
+            page.jobs.extend(overview.jobs);
+            page.omitted_jobs += overview.omitted;
+            page.unassigned_jobs += overview.unassigned;
+            page.jobs_observed = true;
+        }
+    }
+    let lives: Vec<_> = s.live.read().await.values().cloned().collect();
+    for entry in &mut page.entries {
+        let Some(id) = rook_store::parse_session_id(&entry.session) else { continue };
+        let activity =
+            lives.iter().filter_map(|live| live.family_activity(id)).find(|a| a.owner_live == Some(true));
+        let activity = match activity {
+            Some(a) => Some(a),
+            None => s.work.activity(id).await,
+        };
+        entry.owner_live = Some(activity.as_ref().is_some_and(|a| a.owner_live == Some(true)));
+        if let Some(activity) = activity {
+            entry.activity = Some(activity);
+        } else if let Some(activity) = &mut entry.activity {
+            activity.owner_live = Some(false);
+        }
+    }
+    Ok(Json(page))
+}
+
 async fn diagnostics(
     State(s): State<Shared>,
     Path(id): Path<String>,
@@ -749,6 +809,28 @@ async fn history_read<T: Send + 'static>(
     .map_err(|e| Fail(StatusCode::INTERNAL_SERVER_ERROR, ApiError::new("internal", e.to_string())))??;
     Ok(Json(result))
 }
+#[derive(Deserialize, Default)]
+struct LastAnswerQuery {
+    #[serde(default)]
+    summary: bool,
+}
+async fn last_answer(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    Query(query): Query<LastAnswerQuery>,
+) -> ApiResult<rook_core::last_answer::Answer> {
+    let session = session_id(&id)?;
+    history_read(state, move |rook| rook.last_answer(session, query.summary)).await
+}
+
+async fn delegated_results(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+) -> ApiResult<Vec<rook_core::delegated_results::Receipt>> {
+    let session = session_id(&id)?;
+    history_read(s, move |rook| rook.delegated_results(session)).await
+}
+
 async fn model_selection(
     State(s): State<Shared>,
     Path(id): Path<String>,
@@ -2176,6 +2258,8 @@ mod tests {
             arch: std::env::consts::ARCH.to_string(),
         };
         let state = Arc::new(AppState {
+            drain: Default::default(),
+            restart_cli: std::path::PathBuf::from("missing-rook-restart-controller"),
             work: Default::default(),
             oauth: Default::default(),
             rook: Arc::new(tokio::sync::RwLock::new(rook)),
@@ -2193,6 +2277,88 @@ mod tests {
             stopping: tokio::sync::Notify::new(),
         });
         Fixture { _home: home, _workspace: workspace, router: router(state.clone()), state, session }
+    }
+
+    #[tokio::test]
+    async fn background_overview_reads_saved_family_without_starting_equipment_or_replaying_payloads() {
+        let f = fixture();
+        let child = f.state.rook.read().await.fork_for_subtask(f.session, "child").unwrap();
+        let tracker = rook_core::activity::Tracker::new(child, 30);
+        rook_core::activity::begin(&f.state.rook.read().await.store, child, &tracker.snapshot(true)).unwrap();
+        let id = rook_store::format_session_id(child);
+        let (status, body) = get(&f, &format!("/api/sessions/{id}/background")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["tree"]["selected"]["id"], id);
+        assert_eq!(body["tree"]["ancestors"][0]["id"], rook_store::format_session_id(f.session));
+        let selected = body["entries"].as_array().unwrap().iter().find(|e| e["session"] == id).unwrap();
+        assert_eq!(selected["owner_live"], false);
+        assert_eq!(selected["activity"]["owner_live"], false);
+        assert_eq!(body["jobs_observed"], false);
+        assert!(f.state.equipment.read().await.is_empty(), "polling never creates an equipment slot");
+        assert!(
+            !body.to_string().contains("find the leak"),
+            "conversation bodies stay out of the metadata view"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_fences_new_mutations_keeps_readers_and_exact_cancel_and_never_stops_busy_turns() {
+        let f = fixture();
+        let turn = f.state.turn_started();
+        let request =
+            serde_json::json!({"action":"start","id":"drain-first","timeout_secs":300,"restart":false});
+        let (status, view) = post(&f, "/api/daemon/drain", request.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(view["phase"], "draining");
+        assert_eq!(view["counts"]["turns"], 1);
+        assert_eq!(post(&f, "/api/daemon/drain", request).await.0, StatusCode::OK);
+        let path = format!("/api/sessions/{}/model-selection", rook_store::format_session_id(f.session));
+        assert_eq!(
+            post(&f, &path, serde_json::json!({"id":"pick","model":"anything","expected_revision":0}))
+                .await
+                .0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(get(&f, "/api/health").await.0, StatusCode::OK);
+        let private =
+            format!("/api/sessions/{}/private-input/not-a-prompt", rook_store::format_session_id(f.session));
+        assert_ne!(
+            post(&f, &private, serde_json::json!({"action":"decline"})).await.0,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "private answers must reach their normal owner validation"
+        );
+        assert_eq!(
+            post(&f, "/api/daemon/drain", serde_json::json!({"action":"cancel","id":"wrong"})).await.0,
+            StatusCode::CONFLICT
+        );
+        drop(turn);
+        assert_eq!(get(&f, "/api/daemon/drain").await.1["phase"], "ready");
+        assert_eq!(
+            post(&f, "/api/daemon/drain", serde_json::json!({"action":"cancel","id":"drain-first"})).await.1
+                ["phase"],
+            "cancelled"
+        );
+        assert!(!f.state.drain.active());
+    }
+
+    #[tokio::test]
+    async fn last_answer_endpoint_never_selects_reasoning_or_the_internal_summary_implicitly() {
+        let f = fixture();
+        {
+            let rook = f.state.rook.read().await;
+            rook.log(f.session, rook_store::EventKind::AssistantMessage, "", "saved public answer").unwrap();
+            rook.log(f.session, rook_store::EventKind::Reasoning, "", "private reasoning").unwrap();
+            rook.log(
+                f.session,
+                rook_store::EventKind::Compaction,
+                "",
+                r#"{"summary":"internal working summary","through_seq":0}"#,
+            )
+            .unwrap();
+        }
+        let path = format!("/api/sessions/{}/last-answer", rook_store::format_session_id(f.session));
+        assert_eq!(get(&f, &path).await.1["text"], "saved public answer");
+        assert_eq!(get(&f, &format!("{path}?summary=true")).await.1["text"], "internal working summary");
     }
 
     #[tokio::test]

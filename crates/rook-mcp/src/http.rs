@@ -15,6 +15,7 @@ use futures_util::StreamExt;
 use crate::protocol::{Incoming, Notification, Request};
 use crate::transport::Transport;
 use crate::{McpError, Result};
+mod notifications;
 
 const SESSION_HEADER: &str = "mcp-session-id";
 
@@ -68,6 +69,8 @@ async fn quoted_text(mut response: reqwest::Response) -> String {
 }
 
 pub(crate) struct Http {
+    catalog_clock: std::sync::Arc<crate::catalog::Clock>,
+    catalog_listener: Mutex<Option<tokio::task::JoinHandle<()>>>,
     name: String,
     url: String,
     client: reqwest::Client,
@@ -87,6 +90,7 @@ impl Http {
         headers: &std::collections::HashMap<String, String>,
         proxy: &rook_llm::Proxy,
         token: Option<std::sync::Arc<dyn crate::oauth::TokenSource>>,
+        catalog_clock: std::sync::Arc<crate::catalog::Clock>,
     ) -> Result<Self> {
         rook_llm::init_tls();
         let client = reqwest::Client::builder()
@@ -103,6 +107,8 @@ impl Http {
             .build()
             .map_err(|e| McpError::Transport { server: name.into(), message: e.to_string() })?;
         Ok(Self {
+            catalog_clock,
+            catalog_listener: Default::default(),
             name: name.to_string(),
             url: url.to_string(),
             client,
@@ -234,6 +240,9 @@ impl Http {
 
 #[async_trait]
 impl Transport for Http {
+    fn watch_catalog(&self, patience: Duration) {
+        self.watch_catalog_stream(patience);
+    }
     fn negotiated(&self, version: &str) -> Result<()> {
         let invalid = || McpError::Decode {
             server: self.name.clone(),
@@ -287,7 +296,15 @@ impl Transport for Http {
         Ok(())
     }
 
-    async fn shutdown(&self) {}
+    async fn shutdown(&self) {
+        self.stop_catalog_stream();
+    }
+}
+
+impl Drop for Http {
+    fn drop(&mut self) {
+        self.stop_catalog_stream();
+    }
 }
 
 // Keep the actual credential with its response, not in a connection-wide
@@ -385,6 +402,7 @@ async fn read_event_stream(
                     from+=used;
                     let Some(message)=message else {continue};
                     if credential.is_some_and(|token|reflects(&message,token)) {return Err(failure("response withheld because it contains the request credential"));}
+                    http.catalog_clock.observe(&message);
                     if message.method.is_some() && message.id.is_some() {
                         if !message.id.as_ref().is_some_and(|id|http.seen.admit(id)) {return Err(failure("invalid or reused MCP server request ID"));}
                         if dialogs.len()>=4 {return Err(failure("too many concurrent MCP server requests"));}
@@ -405,10 +423,11 @@ struct EventReader {
     bytes: Vec<u8>,
     after_cr: bool,
     limit: usize,
+    retry_ms: Option<u64>,
 }
 impl EventReader {
     fn new(limit: usize) -> Self {
-        Self { bytes: Vec::new(), after_cr: false, limit }
+        Self { bytes: Vec::new(), after_cr: false, limit, retry_ms: None }
     }
     fn next_frame(&mut self, chunk: &[u8]) -> std::result::Result<(usize, Option<Incoming>), ()> {
         for (index, &byte) in chunk.iter().enumerate() {
@@ -426,6 +445,17 @@ impl EventReader {
             if complete {
                 let mut data = Vec::new();
                 for line in self.bytes.split(|&b| b == b'\n') {
+                    if let Some(value) = line.strip_prefix(b"retry:") {
+                        let value = value.strip_prefix(b" ").unwrap_or(value);
+                        if !value.is_empty() && value.iter().all(u8::is_ascii_digit) {
+                            self.retry_ms = Some(
+                                std::str::from_utf8(value)
+                                    .ok()
+                                    .and_then(|s| s.parse().ok())
+                                    .unwrap_or(u64::MAX),
+                            );
+                        }
+                    }
                     if let Some(value) = line.strip_prefix(b"data:") {
                         if !data.is_empty() {
                             data.push(b'\n');

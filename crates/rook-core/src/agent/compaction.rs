@@ -68,7 +68,7 @@ pub(super) fn render_span(entries: &[crate::TranscriptEntry], budget_tokens: usi
     lines.join("\n\n")
 }
 
-fn summary_request(mut material: String, window: usize) -> Result<Request> {
+fn summary_request(mut material: String, window: usize, output_tokens: u32) -> Result<Request> {
     if window < 512 {
         return Err(CoreError::Other(
             "compaction model context is too small; configure a larger summarizer".into(),
@@ -86,7 +86,7 @@ fn summary_request(mut material: String, window: usize) -> Result<Request> {
             "compaction instructions leave no usable summary space; select a larger model".into(),
         ));
     }
-    request.max_output_tokens = output_room.min(2048) as u32;
+    request.max_output_tokens = output_room.min(output_tokens.clamp(128, 131072) as usize) as u32;
     let input_limit = usable.saturating_sub(request.max_output_tokens as usize);
     loop {
         request.messages = vec![
@@ -367,31 +367,79 @@ impl<'a> AgentLoop<'a> {
     ///
     /// A configured model that cannot be built is not a reason to fail the
     /// compaction: the turn goes on with the model it has, and says so once.
-    pub(super) fn summariser(&self) -> std::sync::Arc<dyn Provider> {
+    pub(super) fn summariser(&self) -> Result<std::sync::Arc<dyn Provider>> {
         if let Some(chosen) = &self.summariser {
-            return chosen.clone();
+            return Ok(chosen.clone());
         }
         let config = &self.rook.config.agent;
         let spec = config.compaction_model.trim();
-        if spec.is_empty() || spec == config.model {
-            return self.provider.clone();
+        if (spec.is_empty() || spec == config.model)
+            && config.fallbacks.compaction.is_none()
+            && config.fallbacks.main.is_none()
+        {
+            return Ok(self.provider.clone());
         }
-        match crate::models::provider_for(&self.rook.config, &self.vault, spec) {
-            Ok(provider) => std::sync::Arc::from(provider),
+        let spec =
+            if spec.is_empty() { self.provider.configured_source().unwrap_or(&config.model) } else { spec };
+        match crate::models::compaction_provider_for(&self.rook.config, &self.vault, spec) {
+            Ok(provider) => Ok(std::sync::Arc::from(provider)),
+            Err(e) if config.fallbacks.compaction.is_some() || config.fallbacks.main.is_some() => {
+                Err(CoreError::Other(format!("explicit compaction route unavailable: {e}")))
+            }
             Err(e) => {
                 tracing::warn!(
                     "`[agent] compaction_model` {spec:?} could not be built ({e}); using {}",
                     config.model
                 );
-                self.provider.clone()
+                Ok(self.provider.clone())
             }
         }
     }
 
     async fn ask_for_summary(&self, material: String) -> Result<String> {
-        let asked = self.summariser();
+        let now = std::time::Instant::now();
+        let phase = self
+            .rook
+            .config
+            .agent
+            .compaction_timeout_secs
+            .map(|seconds| now + std::time::Duration::from_secs(seconds.clamp(1, 86400)));
+        let deadline = match (self.by, phase) {
+            (Some(turn), Some(phase)) => Some(turn.min(phase)),
+            (turn, phase) => turn.or(phase),
+        };
+        let Some(deadline) = deadline else {
+            return self.summary_within_budget(material).await;
+        };
+        let expired = || {
+            CoreError::Other(
+                "compaction phase deadline expired; summary discarded and saved source retained".into(),
+            )
+        };
+        if std::time::Instant::now() >= deadline {
+            return Err(expired());
+        }
+        let result = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.summary_within_budget(material),
+        )
+        .await
+        .map_err(|_| expired())?;
+        // A provider completing on the deadline must not win by polling order.
+        if std::time::Instant::now() >= deadline {
+            return Err(expired());
+        }
+        result
+    }
+
+    async fn summary_within_budget(&self, material: String) -> Result<String> {
+        let asked = self.summariser()?;
         let request_window = asked.context_window();
-        let mut request = summary_request(material, request_window)?;
+        let mut request = summary_request(
+            material,
+            request_window,
+            self.rook.config.agent.compaction_output_tokens.unwrap_or(2048),
+        )?;
         // The same reason a sub-agent runs low: condensing a transcript is
         // mechanical, and a turn configured to think hard would otherwise spend
         // that thinking on writing its own summary.
@@ -487,8 +535,9 @@ mod summary_budget_tests {
     #[test]
     fn auxiliary_request_fits_its_own_window_with_wrappers_and_output() {
         for window in [4096, 8192, 32768] {
-            let request = super::summary_request("Русский текст 🦀 and saved goals. ".repeat(20_000), window)
-                .expect("fits by bounded elision");
+            let request =
+                super::summary_request("Русский текст 🦀 and saved goals. ".repeat(20_000), window, 2048)
+                    .expect("fits by bounded elision");
             assert!(
                 super::super::budget::measure(&request.messages) + request.max_output_tokens as usize
                     <= window * 9 / 10

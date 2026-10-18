@@ -20,6 +20,7 @@ struct App {
     session: u128,
     server: Arc<rook_mcp::Server>,
     generation: u64,
+    catalog_generation: u64,
     uri: String,
     opened: Instant,
     uncertain: bool,
@@ -95,27 +96,30 @@ impl Rook {
         {
             return Err(bad("measured experiment source is frozen; app tools cannot change it"));
         }
-        let connections = manager.servers();
-        let report = manager.report();
+        let connections = manager.bound_servers();
         let generation = |name: &str| {
-            report
-                .servers
+            connections
                 .iter()
-                .find(|entry| entry.name == name && entry.state == "connected")
-                .map(|entry| entry.generation)
+                .find(|(server, _, _)| server.name() == name)
+                .and_then(|(server, _, _)| manager.connection_generation(server))
         };
         {
             let mut apps = manager.apps.0.lock().unwrap_or_else(|e| e.into_inner());
             apps.retain(|_, app| {
                 app.opened.elapsed() < Duration::from_secs(600)
                     && generation(app.server.name()) == Some(app.generation)
-                    && connections.iter().any(|(server, _)| Arc::ptr_eq(server, &app.server))
+                    && connections.iter().any(|(server, revision, _)| {
+                        Arc::ptr_eq(server, &app.server) && *revision == app.catalog_generation && {
+                            let current = server.catalog_status();
+                            current.generation == *revision && !current.stale
+                        }
+                    })
             });
         }
         if let Request::List = request {
             let mut items = Vec::new();
             let mut remaining = MAX_HTML;
-            for (server, tools) in &connections {
+            for (server, _, tools) in &connections {
                 for tool in tools {
                     if let Some(uri) = uri_of(tool) {
                         if tool.name.len() > 256 || server.name().len() > 256 {
@@ -140,10 +144,16 @@ impl Rook {
             if generation(&server) != Some(expected) {
                 return Err(bad("MCP connection changed; refresh the app list"));
             }
-            let (connection, tools) = connections
+            let (connection, catalog_generation, tools) = connections
                 .iter()
-                .find(|(s, _)| s.name() == server)
+                .find(|(s, _, _)| s.name() == server)
                 .ok_or_else(|| bad("MCP server is not connected"))?;
+            let current = connection.catalog_status();
+            if current.stale || current.generation != *catalog_generation {
+                return Err(bad(
+                    "MCP tool catalog changed; reconnect or run another turn, then refresh the app list",
+                ));
+            }
             if !tools.iter().any(|tool| uri_of(tool) == Some(uri.as_str())) {
                 return Err(bad("UI resource was not declared by this server's installed tools"));
             }
@@ -193,6 +203,7 @@ impl Rook {
                     session,
                     server: connection.clone(),
                     generation: expected,
+                    catalog_generation: *catalog_generation,
                     uri: uri.clone(),
                     opened: Instant::now(),
                     uncertain: false,
@@ -231,8 +242,8 @@ impl Rook {
             }
             let tools = connections
                 .iter()
-                .find(|(s, _)| Arc::ptr_eq(s, &app.server))
-                .map(|(_, t)| t)
+                .find(|(s, _, _)| Arc::ptr_eq(s, &app.server))
+                .map(|(_, _, t)| t)
                 .ok_or_else(|| bad("MCP connection changed"))?;
             match request {
                 Request::Prepare { tool, arguments, .. } => {
@@ -323,8 +334,8 @@ impl Rook {
         self.store.flush()?;
         let descriptor = connections
             .iter()
-            .find(|(s, _)| Arc::ptr_eq(s, &server))
-            .and_then(|(_, tools)| tools.iter().find(|d| d.name == pending.tool))
+            .find(|(s, _, _)| Arc::ptr_eq(s, &server))
+            .and_then(|(_, _, tools)| tools.iter().find(|d| d.name == pending.tool))
             .ok_or_else(|| bad("tool unavailable"))?;
         let adapter = rook_tools::mcp::McpTool::new(server, descriptor.clone());
         let mut context = ToolContext::new(self.workspace.clone());

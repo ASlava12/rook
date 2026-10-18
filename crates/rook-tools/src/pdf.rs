@@ -383,11 +383,18 @@ mod tests {
             async move { helper(&ctx, &cwd, "echo $$ > owned.pid; exec sleep 30", 1024).await }
         });
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        while !dir.path().join("owned.pid").exists() {
-            assert!(tokio::time::Instant::now() < deadline);
+        let pid: i32 = loop {
+            // Creation precedes the shell's write; wait for the complete line.
+            if let Some(pid) = std::fs::read_to_string(dir.path().join("owned.pid"))
+                .ok()
+                .and_then(|line| line.strip_suffix('\n').and_then(|pid| pid.parse().ok()))
+            {
+                break pid;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "decoder did not publish its PID");
             tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        let pid: i32 = std::fs::read_to_string(dir.path().join("owned.pid")).unwrap().trim().parse().unwrap();
+        };
+        assert!(pid > 0);
         assert_eq!(unsafe { libc::kill(-pid, 0) }, 0, "the owned group was running before cancellation");
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());

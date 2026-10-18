@@ -109,6 +109,62 @@ impl Source {
         }
     }
 
+    pub fn drain_command(&self, arguments: &str) -> Result<rook_core::drain::View> {
+        anyhow::ensure!(arguments.len() <= 4096, "daemon arguments exceed 4096 bytes");
+        let daemon = match self {
+            Self::Daemon(daemon) => daemon,
+            Self::Local(_) => anyhow::bail!("daemon is not running; use rook daemon start"),
+        };
+        let action = if arguments.trim_start().starts_with('{') {
+            Some(serde_json::from_str::<rook_core::drain::Action>(arguments)?)
+        } else {
+            let parts: Vec<_> = arguments.split_whitespace().collect();
+            match parts.as_slice() {
+                [] | ["status"] => None,
+                ["cancel", id] => Some(rook_core::drain::Action::Cancel { id: (*id).into() }),
+                [action @ ("drain" | "restart")] | [action @ ("drain" | "restart"), _] => {
+                    let timeout_secs =
+                        parts.get(1).map(|value| value.parse::<u64>()).transpose()?.unwrap_or(300);
+                    Some(rook_core::drain::Action::Start {
+                        id: rook_store::format_session_id(rook_store::new_session_id()),
+                        timeout_secs,
+                        restart: *action == "restart",
+                    })
+                }
+                _ => anyhow::bail!(
+                    "use /daemon status|drain [seconds]|restart [seconds]|cancel ID, or exact JSON"
+                ),
+            }
+        };
+        let body = action.map(serde_json::to_value).transpose()?;
+        daemon.request_bounded("/api/daemon/drain", body.as_ref(), 16384)
+    }
+
+    pub fn delegated_results(&self, session: u128) -> Result<Vec<rook_core::delegated_results::Receipt>> {
+        match self {
+            Self::Local(rook) => Ok(rook.delegated_results(session)?),
+            Self::Daemon(daemon) => daemon.request_bounded(
+                &format!("/api/sessions/{}/delegated-results", rook_store::format_session_id(session)),
+                None,
+                8 * 1024 * 1024,
+            ),
+        }
+    }
+
+    pub fn last_answer(&self, session: u128, summary: bool) -> Result<rook_core::last_answer::Answer> {
+        match self {
+            Self::Local(rook) => Ok(rook.last_answer(session, summary)?),
+            Self::Daemon(daemon) => daemon.request_bounded(
+                &format!(
+                    "/api/sessions/{}/last-answer?summary={summary}",
+                    rook_store::format_session_id(session)
+                ),
+                None,
+                512 * 1024,
+            ),
+        }
+    }
+
     pub fn model_selection(&self, session: u128) -> Result<rook_core::model_selection::View> {
         match self {
             Self::Local(rook) => Ok(rook.model_selection(session)?),
@@ -1264,6 +1320,40 @@ impl Source {
         })
     }
 
+    pub(crate) fn background_page(
+        &self,
+        session: u128,
+        after: Option<&str>,
+        jobs: Option<&rook_tools::jobs::Jobs>,
+    ) -> Result<rook_core::background::Page> {
+        let after = after
+            .map(|id| {
+                rook_store::parse_session_id(id)
+                    .map(rook_store::format_session_id)
+                    .ok_or_else(|| anyhow::anyhow!("invalid background scan cursor"))
+            })
+            .transpose()?;
+        match self {
+            Self::Local(rook) => {
+                Ok(rook_core::background::page(rook, session, &rook_core::branches::Query { after }, jobs)?)
+            }
+            Self::Daemon(d) => d.get_bounded(&format!(
+                "/api/sessions/{}/background{}",
+                rook_store::format_session_id(session),
+                after.map(|after| format!("?after={after}")).unwrap_or_default()
+            )),
+        }
+    }
+    pub(crate) fn background_command(
+        &self,
+        session: u128,
+        arguments: &str,
+        jobs: Option<&rook_tools::jobs::Jobs>,
+    ) -> Result<String> {
+        let (session, after) = crate::commands::sessions::background_arguments(session, arguments)?;
+        Ok(rook_core::background::describe(&self.background_page(session, after.as_deref(), jobs)?))
+    }
+
     pub(crate) fn branch_page(
         &self,
         session: u128,
@@ -1834,7 +1924,7 @@ impl Daemon {
         self.request_bounded(path, None, 2 * 1024 * 1024)
     }
 
-    fn request_bounded<T: DeserializeOwned>(
+    pub(crate) fn request_bounded<T: DeserializeOwned>(
         &self,
         path: &str,
         body: Option<&serde_json::Value>,

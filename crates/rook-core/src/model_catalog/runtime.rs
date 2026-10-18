@@ -78,6 +78,7 @@ impl Snapshot {
             credential,
             model: endpoint.model.clone(),
             metadata_api,
+            reasoning_override: config.models.get(&endpoint.name).and_then(|source| source.reasoning.clone()),
         })
     }
 }
@@ -91,11 +92,25 @@ struct Observed {
     credential: String,
     model: String,
     metadata_api: rook_llm::MetadataApi,
+    reasoning_override: Option<rook_llm::reasoning::Override>,
 }
 
 impl Observed {
     fn capabilities(&self) -> ModelCapabilities {
-        self.observed.as_ref().map(|model| model.capabilities.clone()).unwrap_or_default()
+        let mut facts = self.observed.as_ref().map(|model| model.capabilities.clone()).unwrap_or_default();
+        if let Some(overrides) = &self.reasoning_override {
+            overrides.apply(&mut facts);
+        }
+        facts
+    }
+
+    fn mapped_effort(&self, effort: Effort) -> EffortUse {
+        match &self.reasoning_override {
+            Some(overrides) if overrides.control.is_some() || overrides.supported == Some(false) => {
+                overrides.effort_use(effort)
+            }
+            _ => self.inner.effort_use(effort),
+        }
     }
 
     fn selected_effort(&self, requested: Effort) -> Option<Effort> {
@@ -108,7 +123,7 @@ impl Observed {
         // flag cannot teach a client an unknown provider-specific parameter.
         let candidates: Vec<_> = Effort::ALL
             .into_iter()
-            .filter_map(|effort| match self.inner.effort_use(effort) {
+            .filter_map(|effort| match self.mapped_effort(effort) {
                 EffortUse::Parameter { value, .. } => {
                     let applied = Effort::parse(&value).unwrap_or(effort);
                     allowed.contains(&applied).then_some((effort, applied))
@@ -146,6 +161,15 @@ impl Observed {
                 rook_llm::Request::new(rook_llm::prompted::history(&request.messages)).messages;
         }
         request.effort = request.effort.and_then(|level| self.selected_effort(level));
+        if request.effort.is_some()
+            && let Some(overrides) = &self.reasoning_override
+            && overrides.control == Some(rook_llm::reasoning::Control::GoogleBudget)
+            && overrides.budget_min.unwrap_or(512).saturating_add(128) > request.max_output_tokens
+        {
+            return Err(LlmError::Other(
+                "configured thinking budget leaves no visible output room in this request".into(),
+            ));
+        }
         request.model_capabilities = facts;
         Ok(request)
     }
@@ -186,17 +210,27 @@ impl Provider for Observed {
         self.inner.can_resume_reasoning(messages)
     }
     fn takes_effort(&self) -> bool {
-        self.inner.takes_effort()
+        (self.reasoning_override.as_ref().is_some_and(|settings| settings.control.is_some())
+            || self.inner.takes_effort())
             && Effort::ALL.into_iter().any(|level| self.selected_effort(level).is_some())
     }
     fn effort_use(&self, effort: Effort) -> EffortUse {
         match self.selected_effort(effort) {
-            Some(level) => self.inner.effort_use(level),
+            Some(level) => self.mapped_effort(level),
             None => EffortUse::Omitted {
-                reason: "catalog does not offer an effort level supported by this dialect",
+                reason: "configuration/catalog offers no effort level supported by this dialect",
             },
         }
     }
+    fn effort_use_for(&self, effort: Effort, request: &Request) -> EffortUse {
+        match (self.selected_effort(effort), &self.reasoning_override) {
+            (Some(level), Some(settings)) if settings.control.is_some() => {
+                settings.effort_use_for_output(level, request.max_output_tokens)
+            }
+            _ => self.effort_use(effort),
+        }
+    }
+
     fn supports_streaming(&self) -> bool {
         self.inner.supports_streaming()
     }

@@ -641,6 +641,9 @@ pub struct ToolBox {
     mcp_catalog: mcp::CatalogSummary,
     mcp_sources: Arc<Vec<(Arc<rook_mcp::Server>, Vec<rook_mcp::ToolDescriptor>)>>,
     mcp_names: Arc<std::collections::BTreeSet<String>>,
+    mcp_versions: Arc<Vec<u64>>,
+    mcp_dropped: Arc<std::collections::BTreeSet<String>>,
+    mcp_limits: mcp::CatalogLimits,
 }
 
 impl ToolBox {
@@ -669,12 +672,24 @@ impl ToolBox {
     /// instruction it may weigh against the rest of its prompt becomes a tool it
     /// cannot call, because it was never given one.
     pub fn without(&self, dropped: &[&str]) -> Self {
-        Self {
+        let mut limited = Self {
             tools: self.tools.iter().filter(|t| !dropped.contains(&t.name())).cloned().collect(),
             mcp_catalog: self.mcp_catalog.clone(),
             mcp_sources: self.mcp_sources.clone(),
             mcp_names: self.mcp_names.clone(),
+            mcp_versions: self.mcp_versions.clone(),
+            mcp_dropped: Arc::new(
+                self.mcp_dropped.iter().cloned().chain(dropped.iter().map(|s| (*s).to_owned())).collect(),
+            ),
+            mcp_limits: self.mcp_limits,
+        };
+        // Deferred routes must obey removal immediately, not only after a
+        // later notification rebuilds their discovery/call helpers.
+        if !self.mcp_sources.is_empty() {
+            limited.register_mcp_catalog(self.mcp_sources.iter().cloned(), self.mcp_limits);
+            limited.mcp_versions = self.mcp_versions.clone();
         }
+        limited
     }
 
     pub fn register_mcp_catalog(
@@ -684,10 +699,77 @@ impl ToolBox {
     ) {
         self.tools.retain(|tool| !self.mcp_names.contains(tool.name()));
         let sources: Vec<_> = servers.into_iter().collect();
-        let before = self.tools.len();
-        self.install_mcp_catalog(sources.iter().cloned(), limits);
-        self.mcp_names = Arc::new(self.tools[before..].iter().map(|tool| tool.name().to_owned()).collect());
+        self.mcp_limits = limits;
+        let mut catalog = Self { mcp_dropped: self.mcp_dropped.clone(), ..Default::default() };
+        catalog.install_mcp_catalog(sources.iter().cloned(), limits);
+        catalog.tools.retain(|tool| !self.mcp_dropped.contains(tool.name()));
+        self.mcp_names = Arc::new(catalog.tools.iter().map(|tool| tool.name().to_owned()).collect());
+        self.mcp_catalog = catalog.mcp_catalog;
+        for tool in catalog.tools {
+            self.register(tool);
+        }
+        // The caller supplied descriptors without a version. Reconcile enabled
+        // sources once before using them, instead of tagging old bytes with a
+        // concurrently published generation.
+        self.mcp_versions = Arc::new(
+            sources
+                .iter()
+                .map(|(server, _)| {
+                    let status = server.catalog_status();
+                    if status.configured { 0 } else { status.generation }
+                })
+                .collect(),
+        );
         self.mcp_sources = Arc::new(sources);
+    }
+    pub fn mcp_catalog_changed(&self) -> bool {
+        self.mcp_sources.iter().zip(self.mcp_versions.iter()).any(|((server, _), version)| {
+            let status = server.catalog_status();
+            status.configured
+                && ((status.stale && status.retry_after_secs.is_none()) || status.generation != *version)
+        })
+    }
+
+    /// Refresh only the connections admitted to this box, retaining the Arc
+    /// bindings of previously cloned boxes and already admitted calls.
+    pub async fn refresh_mcp_catalog(
+        &mut self,
+        limits: mcp::CatalogLimits,
+        timeout: std::time::Duration,
+    ) -> bool {
+        use futures_util::{StreamExt, stream};
+        let sources = self.mcp_sources.clone();
+        let servers: Vec<_> = sources.iter().map(|(server, _)| server.clone()).collect();
+        let refresh = stream::iter(
+            servers.into_iter().map(|server| async move { server.refresh_tool_catalog().await }),
+        )
+        .buffer_unordered(4);
+        let _ = tokio::time::timeout(
+            timeout.min(std::time::Duration::from_secs(300)),
+            refresh.collect::<Vec<_>>(),
+        )
+        .await;
+        let changed = sources.iter().zip(self.mcp_versions.iter()).any(|((server, _), version)| {
+            let status = server.catalog_status();
+            status.configured && status.generation != *version
+        });
+        if changed {
+            let mut versions = Vec::new();
+            let current = sources
+                .iter()
+                .zip(self.mcp_versions.iter())
+                .map(|((server, old), version)| {
+                    let snapshot =
+                        server.catalog_status().configured.then(|| server.cached_tools()).flatten();
+                    let (generation, tools) = snapshot.unwrap_or_else(|| (*version, old.clone()));
+                    versions.push(generation);
+                    (server.clone(), tools)
+                })
+                .collect::<Vec<_>>();
+            self.register_mcp_catalog(current, limits);
+            self.mcp_versions = Arc::new(versions);
+        }
+        changed
     }
     pub fn restrict_mcp(&mut self, allowed: &std::collections::BTreeSet<String>, limits: mcp::CatalogLimits) {
         let sources: Vec<_> =

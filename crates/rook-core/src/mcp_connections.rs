@@ -13,6 +13,7 @@ pub struct Settings {
     pub apps_enabled: bool,
     pub max_servers: usize,
     pub parallel_connects: usize,
+    pub refresh_timeout_secs: u64,
     pub oauth_max_entries: usize,
     pub oauth_max_pending: usize,
     pub oauth_max_bytes: usize,
@@ -24,6 +25,7 @@ impl Default for Settings {
             apps_enabled: false,
             max_servers: 32,
             parallel_connects: 4,
+            refresh_timeout_secs: 30,
             oauth_max_entries: 64,
             oauth_max_pending: 16,
             oauth_max_bytes: 1048576,
@@ -37,6 +39,8 @@ impl Settings {
             Some("mcp_connections.max_servers: expected 1..=256")
         } else if !(1..=32).contains(&self.parallel_connects) {
             Some("mcp_connections.parallel_connects: expected 1..=32")
+        } else if !(1..=300).contains(&self.refresh_timeout_secs) {
+            Some("mcp_connections.refresh_timeout_secs: expected 1..=300")
         } else if !(1..=64).contains(&self.oauth_max_pending) {
             Some("mcp_connections.oauth_max_pending: expected 1..=64")
         } else if !(1..=256).contains(&self.oauth_max_entries) {
@@ -49,7 +53,7 @@ impl Settings {
     }
 }
 
-type Connection = (Arc<Server>, Vec<ToolDescriptor>);
+type Connection = Arc<Server>;
 
 struct Entry {
     name: String,
@@ -108,6 +112,8 @@ pub struct Status {
     pub active_requests: usize,
     pub last_request_error: Option<String>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub catalog: rook_mcp::CatalogStatus,
 }
 
 #[derive(Default)]
@@ -154,13 +160,21 @@ impl McpSession {
 
     /// A fixed snapshot for one turn: swapping the manager cannot move an
     /// already-approved invocation onto a different server halfway through.
-    pub fn servers(&self) -> Vec<Connection> {
+    pub fn servers(&self) -> Vec<(Arc<Server>, Vec<ToolDescriptor>)> {
+        self.bound_servers().into_iter().map(|(server, _, tools)| (server, tools)).collect()
+    }
+
+    pub(crate) fn bound_servers(&self) -> Vec<(Arc<Server>, u64, Vec<ToolDescriptor>)> {
         self.state
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .entries
             .iter()
-            .filter_map(|entry| entry.installed.clone())
+            .filter_map(|entry| entry.installed.as_ref())
+            .map(|server| {
+                let (generation, tools) = server.cached_tools().unwrap_or_else(|| (0, Vec::new()));
+                (server.clone(), generation, tools)
+            })
             .collect()
     }
 
@@ -177,6 +191,18 @@ impl McpSession {
         failures
     }
 
+    pub(crate) fn connection_generation(&self, server: &Arc<Server>) -> Option<u64> {
+        let state = self.state.read().unwrap_or_else(|e| e.into_inner());
+        if state.closed {
+            return None;
+        }
+        state
+            .entries
+            .iter()
+            .find(|entry| entry.installed.as_ref().is_some_and(|current| Arc::ptr_eq(current, server)))
+            .map(|entry| entry.generation)
+    }
+
     pub fn tool_count(&self) -> usize {
         self.state
             .read()
@@ -184,7 +210,7 @@ impl McpSession {
             .entries
             .iter()
             .filter_map(|entry| entry.installed.as_ref())
-            .map(|(_, tools)| tools.len())
+            .map(|server| server.catalog_status().tools)
             .sum()
     }
 
@@ -195,33 +221,38 @@ impl McpSession {
             servers: state
                 .entries
                 .iter()
-                .map(|entry| Status {
-                    name: entry.name.clone(),
-                    transport: entry.transport.into(),
-                    state: if state.closed {
-                        "closed"
-                    } else if !entry.enabled {
-                        "disabled"
-                    } else if entry.installed.is_some() {
-                        "connected"
-                    } else {
-                        "failed"
+                .map(|entry| {
+                    let catalog =
+                        entry.installed.as_ref().map(|server| server.catalog_status()).unwrap_or_default();
+                    Status {
+                        name: entry.name.clone(),
+                        transport: entry.transport.into(),
+                        state: if state.closed {
+                            "closed"
+                        } else if !entry.enabled {
+                            "disabled"
+                        } else if entry.installed.is_some() {
+                            "connected"
+                        } else {
+                            "failed"
+                        }
+                        .into(),
+                        reconnecting: state.reconnecting.as_deref() == Some(&entry.name),
+                        generation: entry.generation,
+                        tools: catalog.tools,
+                        resources: entry.installed.as_ref().is_some_and(|server| server.has_resources()),
+                        active_requests: entry
+                            .installed
+                            .as_ref()
+                            .map_or(0, |server| server.active_requests()),
+                        last_request_error: entry
+                            .installed
+                            .as_ref()
+                            .and_then(|server| server.last_request_error())
+                            .map(str::to_owned),
+                        error: entry.error.map(str::to_owned),
+                        catalog,
                     }
-                    .into(),
-                    reconnecting: state.reconnecting.as_deref() == Some(&entry.name),
-                    generation: entry.generation,
-                    tools: entry.installed.as_ref().map_or(0, |(_, tools)| tools.len()),
-                    resources: entry.installed.as_ref().is_some_and(|(server, _)| server.has_resources()),
-                    active_requests: entry
-                        .installed
-                        .as_ref()
-                        .map_or(0, |(server, _)| server.active_requests()),
-                    last_request_error: entry
-                        .installed
-                        .as_ref()
-                        .and_then(|(server, _)| server.last_request_error())
-                        .map(str::to_owned),
-                    error: entry.error.map(str::to_owned),
                 })
                 .collect(),
         }
@@ -314,7 +345,7 @@ impl McpSession {
             state.closed = true;
             state.entries.iter_mut().filter_map(|entry| entry.installed.take()).collect()
         };
-        for (server, _) in servers {
+        for server in servers {
             server.shutdown().await;
         }
     }
@@ -373,12 +404,12 @@ async fn candidate(
     );
     // Resources-only servers need not implement tools/list. Legacy servers
     // omitting capabilities still receive the original discovery probe.
-    let tools = if server.has_resources() && server.info().capabilities.get("tools").is_none() {
-        Vec::new()
-    } else {
-        server.list_tools().await.map_err(safe_error)?
-    };
-    Ok((server, tools))
+    if !(server.has_resources() && server.info().capabilities.get("tools").is_none()) {
+        // The server owns the complete cached snapshot. Do not retain an
+        // obsolete startup copy after later notification-driven publications.
+        server.list_tools().await.map_err(safe_error)?;
+    }
+    Ok(server)
 }
 
 fn safe_error(error: McpError) -> &'static str {

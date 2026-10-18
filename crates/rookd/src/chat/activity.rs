@@ -9,6 +9,57 @@ impl rook_core::agent::observe::Observer for Observation {
     fn observe(&self, event: rook_core::agent::observe::Event<'_>) {
         use rook_core::agent::{Progress, observe::Event};
         use rook_proto::activity::Stage;
+        // A child is live only while this observer owns its admitted future.
+        // No task text or model/tool payload is copied into this projection.
+        {
+            let mut children = self.children.lock().unwrap_or_else(|e| e.into_inner());
+            match &event {
+                Event::ChildStarted { child, .. } => {
+                    if children.len() >= 128 {
+                        let finished = children.iter().find_map(|(id, (_, live))| (!live).then_some(*id));
+                        if let Some(id) = finished {
+                            children.remove(&id);
+                        }
+                    }
+                    if children.len() < 128 {
+                        children.insert(*child, (Tracker::new(*child, 0), true));
+                    }
+                }
+                Event::ChildEnded { child, .. } => {
+                    if let Some((tracker, live)) = children.get_mut(child) {
+                        *live = false;
+                        tracker.observe_phase(Stage::Finished);
+                    }
+                }
+                Event::ModelQueued { session }
+                | Event::ModelStarted { session }
+                | Event::ToolOutput { session }
+                | Event::CompactionStarted { session, .. }
+                | Event::CompactionEnded { session, .. }
+                | Event::Progress { session, .. } => {
+                    if let Some((tracker, live)) = children.get_mut(session)
+                        && *live
+                    {
+                        match &event {
+                            Event::ModelQueued { .. } => tracker.observe_phase(Stage::Queued),
+                            Event::ToolOutput { .. } => tracker.observe_phase(Stage::Tool),
+                            Event::Progress { workspace, progress, .. } => {
+                                if !matches!(
+                                    progress,
+                                    Progress::Delegating { .. }
+                                        | Progress::Working { .. }
+                                        | Progress::Waiting { .. }
+                                ) && let Some(event) = super::as_event(**progress, workspace)
+                                {
+                                    tracker.observe(&event);
+                                }
+                            }
+                            _ => tracker.observe_phase(Stage::Model),
+                        }
+                    }
+                }
+            }
+        }
         let stage = match event {
             Event::ModelQueued { session } if session == self.session => Some(Stage::Queued),
             Event::ModelStarted { session } if session == self.session => Some(Stage::Model),
@@ -52,6 +103,7 @@ impl rook_core::agent::observe::Observer for Observation {
 
 pub(crate) struct Observation {
     tracker: Mutex<Tracker>,
+    children: Mutex<std::collections::BTreeMap<u128, (Tracker, bool)>>,
     store: Arc<rook_store::Store>,
     pub(crate) session: u128,
     running: std::sync::atomic::AtomicBool,
@@ -61,6 +113,7 @@ impl Observation {
     pub(crate) fn new(rook: &rook_core::Rook, session: u128) -> Arc<Self> {
         Arc::new(Self {
             tracker: Mutex::new(Tracker::new(session, rook.config.telemetry.stall_after_secs)),
+            children: Mutex::new(std::collections::BTreeMap::new()),
             store: rook.store.clone(),
             session,
             running: std::sync::atomic::AtomicBool::new(true),
@@ -76,6 +129,17 @@ impl Observation {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .snapshot(running && self.running.load(std::sync::atomic::Ordering::Acquire))
+    }
+
+    pub(crate) fn for_session(&self, session: u128, running: bool) -> Option<Snapshot> {
+        if session == self.session {
+            return Some(self.snapshot(running));
+        }
+        let mut children = self.children.lock().unwrap_or_else(|e| e.into_inner());
+        children.get_mut(&session).map(|(tracker, live)| {
+            tracker.check(false, false);
+            tracker.snapshot(*live && running && self.running.load(std::sync::atomic::Ordering::Acquire))
+        })
     }
 
     fn save(&self, snapshot: &Snapshot) {
@@ -288,5 +352,71 @@ mod tests {
         watchdog.await.unwrap_err();
         assert_eq!(rook.diagnostics(session, false).unwrap().activity.unwrap().owner_live, None);
         assert!(!live.activity().unwrap().owner_live.unwrap());
+    }
+}
+
+#[cfg(test)]
+mod child_observation_tests {
+    use super::*;
+    use rook_core::agent::observe::{Event, Observer};
+    #[test]
+    fn child_liveness_requires_owned_admission_and_ends_with_that_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let rook = rook_core::Rook::from_parts(
+            rook_store::Store::open(dir.path().join("store")).unwrap(),
+            Default::default(),
+            rook_skills::Environment::bare("test", "test", "1"),
+            Default::default(),
+            dir.path().into(),
+        );
+        let root = rook.start_session("parent").unwrap();
+        let child = rook.fork_for_subtask(root, "PRIVATE_TASK").unwrap();
+        let observation = Observation::new(&rook, root);
+        assert!(observation.for_session(child, true).is_none());
+        Observer::observe(&*observation, Event::ChildStarted { parent: root, child, task: "PRIVATE_TASK" });
+        Observer::observe(&*observation, Event::ModelStarted { session: child });
+        let snapshot = observation.for_session(child, true).unwrap();
+        assert_eq!(snapshot.owner_live, Some(true));
+        assert_eq!(snapshot.stage, rook_proto::activity::Stage::Model);
+        assert!(!serde_json::to_string(&snapshot).unwrap().contains("PRIVATE_TASK"));
+        Observer::observe(&*observation, Event::ChildEnded { child, result: None });
+        assert_eq!(observation.for_session(child, true).unwrap().owner_live, Some(false));
+        Observer::observe(&*observation, Event::ChildStarted { parent: root, child, task: "task" });
+        observation.finish();
+        assert_eq!(observation.for_session(child, true).unwrap().owner_live, Some(false));
+    }
+    #[test]
+    fn child_projection_reaches_its_bound_and_prunes_finished_observations_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let rook = rook_core::Rook::from_parts(
+            rook_store::Store::open(dir.path().join("store")).unwrap(),
+            Default::default(),
+            rook_skills::Environment::bare("test", "test", "1"),
+            Default::default(),
+            dir.path().into(),
+        );
+        let root = rook.start_session("parent").unwrap();
+        let observation = Observation::new(&rook, root);
+        for child in 1..=129 {
+            Observer::observe(
+                &*observation,
+                Event::ChildStarted { parent: root, child, task: "not retained" },
+            );
+        }
+        assert_eq!(
+            observation.children.lock().unwrap().len(),
+            128,
+            "129 admissions exceed the actual projection cap"
+        );
+        assert!(observation.for_session(129, true).is_none(), "a missing observation cannot attest an owner");
+        assert_eq!(observation.for_session(1, true).unwrap().owner_live, Some(true));
+        Observer::observe(&*observation, Event::ChildEnded { child: 1, result: None });
+        Observer::observe(
+            &*observation,
+            Event::ChildStarted { parent: root, child: 130, task: "not retained" },
+        );
+        assert!(observation.for_session(1, true).is_none(), "finished entries can be pruned");
+        assert_eq!(observation.for_session(2, true).unwrap().owner_live, Some(true));
+        assert_eq!(observation.for_session(130, true).unwrap().owner_live, Some(true));
     }
 }

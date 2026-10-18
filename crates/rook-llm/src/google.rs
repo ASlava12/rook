@@ -242,6 +242,19 @@ impl Provider for Google {
             .map_err(|e| LlmError::Decode(format!("{e}: {}", truncate(&text, 500))))?;
         let candidate = wire.candidates.into_iter().next();
         let finish = candidate.as_ref().and_then(|c| c.finish_reason.clone());
+        let called = candidate
+            .as_ref()
+            .is_some_and(|candidate| candidate.content.parts.iter().any(|part| part.function_call.is_some()));
+        if let Some((reason, retryable)) = invalid_finish(finish.as_deref(), called) {
+            return Err(LlmError::IncompleteResponse {
+                provider: "google",
+                reason,
+                retryable,
+                usage: (wire.usage.prompt_token_count.is_some()
+                    && wire.usage.candidates_token_count.is_some())
+                .then(|| wire.usage.into()),
+            });
+        }
 
         let mut content = String::new();
         let mut tool_calls = Vec::new();
@@ -354,6 +367,18 @@ impl Provider for Google {
                             usage.cache_read_tokens = cached;
                         }
                         for candidate in wire.candidates {
+                            // Reject the whole failed frame before exposing any
+                            // tool call it contains. Earlier deltas, if any,
+                            // prevent the common retry wrapper from replaying it.
+                            let called = calls > 0 || candidate.content.parts.iter().any(|part| part.function_call.is_some());
+                            if let Some((reason, retryable)) = invalid_finish(candidate.finish_reason.as_deref(), called) {
+                                Err(LlmError::IncompleteResponse {
+                                    provider: "google",
+                                    reason,
+                                    retryable,
+                                    usage: (input_reported && output_reported).then(|| usage.clone()),
+                                })?;
+                            }
                             if candidate.finish_reason.is_some() {
                                 finish = candidate.finish_reason;
                             }
@@ -392,11 +417,42 @@ impl Provider for Google {
 /// themselves are what says the turn is not over.
 fn stop_reason(raw: Option<&str>, called_tools: bool) -> StopReason {
     match raw {
+        raw if refused(raw) => StopReason::Refusal,
         _ if called_tools => StopReason::ToolUse,
         Some("MAX_TOKENS") => StopReason::MaxTokens,
-        Some("SAFETY") | Some("BLOCKLIST") | Some("PROHIBITED_CONTENT") | Some("SPII") => StopReason::Refusal,
         Some("STOP") => StopReason::EndTurn,
         _ => StopReason::Other,
+    }
+}
+
+fn refused(raw: Option<&str>) -> bool {
+    matches!(
+        raw,
+        Some(
+            "SAFETY"
+                | "RECITATION"
+                | "LANGUAGE"
+                | "BLOCKLIST"
+                | "PROHIBITED_CONTENT"
+                | "SPII"
+                | "IMAGE_SAFETY"
+                | "IMAGE_PROHIBITED_CONTENT"
+                | "IMAGE_RECITATION"
+                | "ESCALATION"
+                | "PUP_LIMITED_DISABLED"
+        )
+    )
+}
+
+fn invalid_finish(raw: Option<&str>, called_tools: bool) -> Option<(&'static str, bool)> {
+    match raw {
+        Some("MALFORMED_RESPONSE") => Some(("MALFORMED_RESPONSE", true)),
+        Some("MALFORMED_FUNCTION_CALL") => Some(("MALFORMED_FUNCTION_CALL", false)),
+        Some("UNEXPECTED_TOOL_CALL") => Some(("UNEXPECTED_TOOL_CALL", false)),
+        Some("TOO_MANY_TOOL_CALLS") => Some(("TOO_MANY_TOOL_CALLS", false)),
+        Some("MISSING_THOUGHT_SIGNATURE") => Some(("MISSING_THOUGHT_SIGNATURE", false)),
+        raw if refused(raw) && called_tools => Some(("refused generation included tool calls", false)),
+        _ => None,
     }
 }
 
@@ -479,8 +535,20 @@ fn wire_request(model: &str, request: &Request) -> Value {
     }
     // Only when the caller asked: a model without a thinking budget rejects the
     // field outright, and most requests do not set an effort.
-    if let Some((name, value)) = request.effort.and_then(|effort| thinking_parameter(model, effort)) {
+    if let Some((name, value)) =
+        crate::reasoning::effort(request).and_then(|effort| thinking_parameter(model, effort))
+    {
         body["generationConfig"]["thinkingConfig"] = json!({ name: value });
+    }
+    if let Some((name, value)) = crate::reasoning::effort(request).and_then(|effort| {
+        request
+            .model_capabilities
+            .reasoning_override
+            .as_ref()?
+            .parameter_for_output(effort, request.max_output_tokens)
+    }) {
+        let name = name.rsplit('.').next().unwrap_or(name);
+        body["generationConfig"]["thinkingConfig"] = json!({name:value});
     }
     body
 }

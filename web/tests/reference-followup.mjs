@@ -42,13 +42,27 @@ test('presets save without clearing drafts, load only into drafts, and restore p
  globalThis.confirm=()=>false;const before=requests.length;await panel.button('Replace').listeners.click();assert.equal(requests.length,before);
  globalThis.confirm=()=>true;await panel.button('Replace').listeners.click();await flush();assert(requests.some(request=>request.action==='save'&&request.expected==='reviewed-revision'));
 });
-test('active work or dismissed settings confirmation leaves draft and session settings intact',async()=>{
- const input=new Node('textarea');input.value='keep';const applied=[];
+test('busy presets require confirmed paired settings and retain drafts when acknowledgement is refused',async()=>{
+ const input=new Node('textarea');input.value='keep';const applied=[];let accepted=false;
  const item={name:'settings',revision:'x',preset:{prompt:'other',model:'fixture',effort:'high'}};
  globalThis.fetch=async(_,options)=>response(JSON.parse(options.body).action==='list'?{items:[item]}:item);
- const panel=presetPanel(input,p=>applied.push(p));panel.open=true;await panel.listeners.toggle();await flush();
- state.chat.busy=true;await panel.button('Load draft').listeners.click();assert.equal(input.value,'keep');assert.deepEqual(applied,[]);
- state.chat.busy=false;globalThis.confirm=()=>false;await panel.button('Load draft').listeners.click();assert.equal(input.value,'keep');assert.deepEqual(applied,[]);
+ const panel=presetPanel(input,p=>{if(!accepted)return false;applied.push(p);return true;});panel.open=true;await panel.listeners.toggle();await flush();
+ state.chat.busy=true;globalThis.confirm=()=>false;
+ await panel.button('Load draft').listeners.click();assert.equal(input.value,'keep');assert.deepEqual(applied,[]);
+ globalThis.confirm=()=>true;await panel.button('Load draft').listeners.click();assert.equal(input.value,'keep');assert.deepEqual(applied,[]);
+ accepted=true;await panel.button('Load draft').listeners.click();assert.equal(input.value,'other');
+ assert.equal(applied.length,1);assert.equal(applied[0].model,'fixture');assert.equal(applied[0].effort,'high');
+ assert.equal(state.chat.busy,true,'choosing the next pair does not finish the admitted turn');
+ panel.button('Restore draft').listeners.click();assert.equal(input.value,'keep');state.chat.busy=false;
+});
+test('typing while paired preset settings await acknowledgement retains the newer draft',async()=>{
+ const input=new Node('textarea');input.value='original';let acknowledge;let called=false;
+ const item={name:'settings',revision:'x',preset:{prompt:'preset',model:'fixture',effort:'high'}};
+ globalThis.fetch=async(_,options)=>response(JSON.parse(options.body).action==='list'?{items:[item]}:item);
+ const panel=presetPanel(input,()=>{called=true;return new Promise(resolve=>{acknowledge=resolve;});});panel.open=true;await panel.listeners.toggle();await flush();
+ globalThis.confirm=()=>true;const loading=panel.button('Load draft').listeners.click();await flush();
+ assert(called,'the settings acknowledgement is actually in flight');input.value='NEWER_UNSENT_DRAFT';acknowledge(true);await loading;
+ assert.equal(input.value,'NEWER_UNSENT_DRAFT');
 });
 test('a preset response from the previous conversation cannot replace the new conversation draft',async()=>{
  const input=new Node('textarea');input.value='new conversation draft';const applied=[];

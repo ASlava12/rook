@@ -17,11 +17,15 @@ pub struct Request {
     pub id: String,
     pub expected_revision: u64,
     pub model: String,
+    #[serde(default)]
+    pub effort: Option<rook_llm::Effort>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Receipt {
     pub id: String,
     pub model: String,
+    #[serde(default)]
+    pub effort: Option<rook_llm::Effort>,
     pub revision: u64,
     pub expected_revision: u64,
     /// This immutable acknowledgement does not claim a model request already ran.
@@ -32,6 +36,8 @@ pub struct View {
     pub revision: u64,
     pub selected: Option<String>,
     pub last_effective: Option<String>,
+    pub selected_effort: Option<rook_llm::Effort>,
+    pub last_effective_effort: Option<rook_llm::Effort>,
     pub pending: bool,
 }
 #[derive(Default, Serialize, Deserialize)]
@@ -42,6 +48,10 @@ struct State {
     selected: Option<String>,
     route: Option<String>,
     effective: Option<String>,
+    #[serde(default)]
+    selected_effort: Option<rook_llm::Effort>,
+    #[serde(default)]
+    effective_effort: Option<rook_llm::Effort>,
     receipts: Vec<Receipt>,
 }
 fn read(rook: &Rook, session: u128) -> Result<(Option<Vec<u8>>, State)> {
@@ -51,8 +61,8 @@ fn read(rook: &Rook, session: u128) -> Result<(Option<Vec<u8>>, State)> {
     let bytes = rook.store.kv_get_limited(&key(session), MAX_BYTES)?;
     let state = match &bytes {
         Some(bytes) => {
-            let state: State = serde_json::from_slice(bytes)?;
-            if state.version != 1
+            let mut state: State = serde_json::from_slice(bytes)?;
+            if !matches!(state.version, 1 | 2)
                 || state.receipts.len() > KEPT
                 || state.applied_revision > state.revision
                 || state.selected.as_ref().is_some_and(|name| !valid_name(name))
@@ -64,9 +74,11 @@ fn read(rook: &Rook, session: u128) -> Result<(Option<Vec<u8>>, State)> {
             {
                 return Err(bad("invalid saved model selection; inspect the session before changing it"));
             }
+            // JSON v1 receipts remain readable; their omitted effort means preserve.
+            state.version = 2;
             state
         }
-        None => State { version: 1, ..Default::default() },
+        None => State { version: 2, ..Default::default() },
     };
     Ok((bytes, state))
 }
@@ -79,6 +91,8 @@ impl State {
             revision: self.revision,
             selected: self.selected.clone(),
             last_effective: self.effective.clone(),
+            selected_effort: self.selected_effort,
+            last_effective_effort: self.effective_effort,
             pending: self.revision != self.applied_revision,
         }
     }
@@ -102,7 +116,10 @@ impl Rook {
         for _ in 0..8 {
             let (old, mut state) = read(self, session)?;
             if let Some(receipt) = state.receipts.iter().find(|r| r.id == request.id) {
-                if receipt.model != request.model || receipt.expected_revision != request.expected_revision {
+                if receipt.model != request.model
+                    || receipt.effort != request.effort
+                    || receipt.expected_revision != request.expected_revision
+                {
                     return Err(bad("model request ID already belongs to a different selection"));
                 }
                 return Ok(receipt.clone());
@@ -112,14 +129,16 @@ impl Rook {
             }
             crate::models::usable(&self.config, &request.model).map_err(CoreError::Other)?;
             let vault = crate::Vault::load().unwrap_or_else(|_| crate::Vault::empty());
-            let route = crate::models::catalog_scope(&self.config, &vault, &request.model)?;
+            let route = crate::models::selection_scope(&self.config, &vault, &request.model)?;
             state.revision =
                 state.revision.checked_add(1).ok_or_else(|| bad("model selection revision exhausted"))?;
             state.selected = Some(request.model.clone());
+            state.selected_effort = request.effort.or(state.selected_effort);
             state.route = Some(route);
             let receipt = Receipt {
                 id: request.id.clone(),
                 model: request.model.clone(),
+                effort: request.effort,
                 revision: state.revision,
                 expected_revision: request.expected_revision,
                 status: "queued".into(),
@@ -154,7 +173,7 @@ impl Rook {
             };
             let vault = crate::Vault::load().unwrap_or_else(|_| crate::Vault::empty());
             if state.route.as_deref()
-                != Some(crate::models::catalog_scope(&self.config, &vault, name)?.as_str())
+                != Some(crate::models::selection_scope(&self.config, &vault, name)?.as_str())
             {
                 return Err(bad(
                     "selected model route or credential source changed; explicitly select the model again",
@@ -163,6 +182,7 @@ impl Rook {
             let provider = crate::models::provider_for(&self.config, &vault, name)?;
             state.applied_revision = state.revision;
             state.effective = state.selected.clone();
+            state.effective_effort = state.selected_effort;
             let bytes = crate::persistence::encode_with_limit(&state, MAX_BYTES)?;
             if self.store.kv_update_session_checked(
                 session,
@@ -175,7 +195,10 @@ impl Rook {
                     }
                 },
             )? {
-                return Ok(provider);
+                return Ok(Box::new(crate::phase_routing::Selected::admitted(
+                    provider,
+                    state.effective_effort,
+                )));
             }
         }
         Err(bad("model selection changed during turn admission; retry this turn"))

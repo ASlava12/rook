@@ -384,3 +384,33 @@ async fn google_output_refusal_reduces_the_limit_without_losing_the_thinking_lev
         assert!(body["generationConfig"]["thinkingConfig"].get("thinkingBudget").is_none());
     }
 }
+
+#[tokio::test]
+async fn an_explicit_alias_control_is_removed_after_endpoint_refusal_and_reports_the_accepted_wire() {
+    let (url, seen) =
+        server(vec![(400, r#"{"error":"unsupported reasoning_effort"}"#), (200, OPENAI), (200, OPENAI)])
+            .await;
+    let provider = openai(url, "unfamiliar-operator-alias");
+    let settings = rook_llm::reasoning::Override {
+        control: Some(rook_llm::reasoning::Control::OpenaiEffort),
+        ..Default::default()
+    };
+    for _ in 0..2 {
+        let mut request = Request::new(vec![Message::user("hello")]);
+        request.effort = Some(Effort::Max);
+        settings.apply(&mut request.model_capabilities);
+        let mut stream = provider.stream(request).await.unwrap();
+        let mut applied = None;
+        while let Some(delta) = stream.next().await {
+            if let Delta::Effort(report) = delta.unwrap() {
+                applied = Some(report.applied);
+            }
+        }
+        assert_eq!(applied, Some(EffortUse::Omitted { reason: "endpoint refused the effort parameter" }));
+    }
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 3);
+    assert_eq!(seen[0]["reasoning_effort"], "max");
+    assert!(seen[1].get("reasoning_effort").is_none());
+    assert!(seen[2].get("reasoning_effort").is_none());
+}

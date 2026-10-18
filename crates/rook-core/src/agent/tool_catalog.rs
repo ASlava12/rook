@@ -9,6 +9,42 @@ use rook_tools::policy::Stance;
 use serde_json::json;
 
 impl<'a> AgentLoop<'a> {
+    pub(super) async fn refresh_mcp_catalog(
+        &mut self,
+        on_progress: &mut impl FnMut(super::Progress<'_>),
+    ) -> bool {
+        use std::time::Duration;
+        let mut timeout =
+            Duration::from_secs(self.rook.config.mcp_connections.refresh_timeout_secs.clamp(1, 300));
+        if let Some(by) = self.by {
+            timeout = timeout.min(by.saturating_duration_since(std::time::Instant::now()));
+        }
+        let started = tokio::time::Instant::now();
+        let mut tick =
+            tokio::time::interval_at(started + super::SAY_IT_WAITS_AFTER, super::SAY_IT_STILL_WAITS_EVERY);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let refresh = self.tools.refresh_mcp_catalog(self.rook.config.mcp_catalog, timeout);
+        tokio::pin!(refresh);
+        let mut announced = false;
+        let changed = loop {
+            tokio::select! {
+                changed = &mut refresh => break changed,
+                _ = tick.tick() => {
+                    announced = true;
+                    let said = format!("Refreshing MCP tool catalogs; {}s elapsed, phase limit {}s", started.elapsed().as_secs(), timeout.as_secs());
+                    on_progress(super::Progress::Working {call:"mcp_catalog",said:&said});
+                }
+            }
+        };
+        if announced {
+            on_progress(super::Progress::Working {
+                call: "mcp_catalog",
+                said: "Refresh phase finished; using available MCP catalog",
+            });
+        }
+        changed
+    }
+
     pub fn tool_specs(&self) -> Vec<ToolSpec> {
         if self.review_only {
             return self.tools.specs();
@@ -243,16 +279,16 @@ impl<'a> AgentLoop<'a> {
                         // ran every sub-task twice.
                         "tasks": {
                             "type": "array",
-                            "items": { "type": "string" },
-                            "description": "Parallel, self-contained assignments. Children do not see this conversation."
+                            "items": { "oneOf": [{"type":"string"},{"type":"object","required":["task"],"properties":{"task":{"type":"string"},"output_schema":{"type":["object","boolean"]}}}] },
+                            "description": "Self-contained assignments."
                         },
                         "context": {
                             "type": "string",
-                            "default": "none",
-                            "description": "Child context: none, recent exchanges, or literal text."
+                            "description": "none, recent, or literal context."
                         },
                         "isolation": {"type":"string", "enum":["shared","worktree"],
-                            "description":"Default shared. worktree requires a clean Git root; edits are retained separately for review."},
+                            "description":"shared (default), or a clean Git worktree retaining edits for review."},
+                        "output_schema": {"type":["object","boolean"],"description":"Default child JSON schema (max 8 KiB)."},
                         "max_steps": { "type": "integer" },
                         // One word rather than a model and an effort, which
                         // are never chosen apart: the question a caller can
@@ -264,14 +300,12 @@ impl<'a> AgentLoop<'a> {
                         "care": {
                             "type": "string",
                             "enum": ["quick", "careful"],
-                            "description": "`careful` gives it this turn's model and reasoning. \
-                                            Default: legwork."
+                            "description": "careful: parent's model/effort; default quick."
                         },
                         "wait": {
                             "type": "boolean",
                             "default": true,
-                            "description": "False answers at once and leaves them running, for \
-                                            `subagents` to read."
+                            "description": "False starts children; subagents collects."
                         }
                     }
             });
@@ -308,8 +342,8 @@ impl<'a> AgentLoop<'a> {
             }
             push(ToolSpec {
                 name: DELEGATE.into(),
-                description: "Delegate a sub-task and return its conclusion. The child has fresh context. Use for wide searches, long surveys or independent verification."
-                    .into(),
+                description:
+                    "Delegate independent work. Use fresh child context for searches or verification.".into(),
                 parameters: delegate_args,
             });
             // Only where there is more to ask for.
@@ -329,13 +363,13 @@ impl<'a> AgentLoop<'a> {
             }
             push(ToolSpec {
                 name: SUBAGENTS.into(),
-                description: "Inspect sub-agents and their results. No id answers for all.".into(),
+                description: "Inspect child tasks and results. Omit id for all.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
                         "id": { "type": "string" },
-                        "say": { "type": "string", "description": "A remark it sees at its next step." },
-                        "wait_secs": { "type": "integer", "description": "Answer when it lands, or after this." }
+                        "say": { "type": "string", "description": "Message for its next step." },
+                        "wait_secs": { "type": "integer", "description": "Wait up to this many seconds." }
                     }
                 }),
             });

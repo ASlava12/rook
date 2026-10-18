@@ -253,8 +253,18 @@ mod tests {
             let scheduler = observed.aggregates.iter().find(|a| a.metric == Metric::SchedulingLag).unwrap();
             assert!(scheduler.stats.max_ms >= 20, "{observed:?}");
             assert!(observed.coalesced_probes > 0, "only one probe may queue while the executor is blocked");
-            assert!(!sampler.state.pending.load(Ordering::Acquire));
+            // A live producer can enqueue another legitimate probe between
+            // snapshot and assertion. Stop it before checking queue drainage.
+            let state = sampler.state.clone();
             drop(sampler);
+            tokio::time::timeout(Duration::from_secs(30), async {
+                while state.pending.load(Ordering::Acquire) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the last queued probe must drain after its producer stops");
+            assert!(!state.pending.load(Ordering::Acquire));
         });
     }
     #[test]

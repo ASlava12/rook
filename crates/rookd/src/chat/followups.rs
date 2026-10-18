@@ -114,6 +114,9 @@ pub(crate) fn pause_with_stop_receipt(
 
 /// Caller holds the same admission lock as manual prompts and managed goals.
 pub(crate) async fn supervise(state: &Arc<AppState>, legacy_running: usize, cursor: &mut Option<u128>) {
+    if state.drain.active() {
+        return;
+    }
     let (sessions, cap, scan) = {
         let rook = state.rook.read().await;
         let scan = rook.config.work.followup_scan_sessions;

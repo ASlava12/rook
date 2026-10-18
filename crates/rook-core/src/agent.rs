@@ -565,6 +565,8 @@ pub struct AgentLoop<'a> {
     fresh_cycle_instruction: bool,
     pub options: rook_proto::TurnOptions,
     effective_options: Option<rook_proto::TurnOptions>,
+    // Delegation validates only the bounded, redacted JSON delivered to its parent.
+    delegated_result_contract: bool,
     recipe_skill: Option<String>,
     equipment: crate::recipes::Equipment,
     composite_cost_unknown: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -774,6 +776,7 @@ impl<'a> AgentLoop<'a> {
             fresh_cycle_instruction: false,
             options: Default::default(),
             effective_options: None,
+            delegated_result_contract: false,
             recipe_skill: None,
             equipment: Default::default(),
             composite_cost_unknown: Default::default(),
@@ -1006,6 +1009,14 @@ impl<'a> AgentLoop<'a> {
         prompt: &str,
         mut on_progress: F,
     ) -> Result<TurnOutcome> {
+        // Capture the admitted pair, never a newer queued selection. Frontend
+        // defaults cannot overwrite an effort committed with this root model.
+        if self.depth == 0
+            && !self.checking
+            && let Some(effort) = self.provider.turn_effort()
+        {
+            self.effort = effort;
+        }
         let _workspace = crate::worktrees::Lease::acquire(&self.rook.workspace, false)?;
         let prepared_prompt = self.prepare_recipe(prompt)?;
         self.fresh_cycle_instruction = !self.managed_iteration
@@ -1218,6 +1229,21 @@ impl<'a> AgentLoop<'a> {
             if self.managed_stopped()? {
                 outcome.stopped = "work_paused".into();
                 break;
+            }
+
+            if self.tools.mcp_catalog_changed() {
+                let changed = self.refresh_mcp_catalog(&mut on_progress).await;
+                if self.out_of_time() {
+                    let said = self.time_note();
+                    self.report(Reported::Open(said));
+                    outcome.stopped = "time".into();
+                    break;
+                }
+                if changed {
+                    (messages, source_manifest) = self.request_messages(prompt)?;
+                    anchor = None;
+                    worth_compacting = true;
+                }
             }
 
             if crate::results::prune(self.rook, self.session, &mut messages)? > 0 {

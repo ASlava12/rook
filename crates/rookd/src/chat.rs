@@ -166,6 +166,21 @@ async fn serve(
         let Message::Text(text) = message else { continue };
         let Ok(incoming) = serde_json::from_str::<ClientMessage>(&text) else { continue };
 
+        let permit = match &incoming {
+            ClientMessage::Setting { .. } => Some(state.drain.request()),
+            ClientMessage::Approval { .. }
+            | ClientMessage::Answers { .. }
+            | ClientMessage::Cancel
+            | ClientMessage::Stop { .. } => Some(state.drain.interaction()),
+            _ => None,
+        };
+        let _permit = match permit.transpose() {
+            Ok(permit) => permit,
+            Err(error) => {
+                report_window(&outbound, error.to_string()).await;
+                continue;
+            }
+        };
         match incoming {
             ClientMessage::Approval { id, decision } => {
                 if let Some(live) = attached(&state, &watching).await {
@@ -190,23 +205,45 @@ async fn serve(
                 // window that is watching a turn means changing that turn's.
                 let theirs = attached(&state, &watching).await.filter(|l| l.running());
                 let setting = theirs.as_ref().map(|l| l.settings.clone()).unwrap_or(settings.clone());
-                if name == "model"
+                if matches!(name.as_str(), "model" | "effort")
                     && let Some(watching) = &watching
                 {
                     let rook = engine.read().await;
                     let result = rook.model_selection(watching.session).and_then(|view| {
+                        let effort = if name == "effort" {
+                            Some(
+                                rook_llm::Effort::parse(&value)
+                                    .ok_or_else(|| rook_core::CoreError::Other("invalid effort".into()))?,
+                            )
+                        } else {
+                            None
+                        };
+                        let model = if name == "model" {
+                            value.clone()
+                        } else {
+                            view.selected.unwrap_or_else(|| {
+                                setting.model().unwrap_or_else(|| rook.config.agent.model.clone())
+                            })
+                        };
                         rook.select_model(
                             watching.session,
                             &rook_core::model_selection::Request {
+                                effort,
                                 id: rook_store::format_session_id(rook_store::new_session_id()),
                                 expected_revision: view.revision,
-                                model: value.clone(),
+                                model,
                             },
                         )
                     });
                     match result {
                         Ok(receipt) => {
-                            if let Err(message) = setting.set(&name, &receipt.model) {
+                            if let Err(message) = setting.set("model", &receipt.model) {
+                                report_window(&outbound, message).await;
+                                continue;
+                            }
+                            if let Some(effort) = receipt.effort
+                                && let Err(message) = setting.set("effort", effort.as_str())
+                            {
                                 report_window(&outbound, message).await;
                                 continue;
                             }
@@ -520,6 +557,10 @@ async fn serve(
                     rook_core::runtime_diagnostics::Operation::TurnAdmission,
                 );
                 let admission = state.work.0.lock().await;
+                if state.drain.active() {
+                    report_window(&outbound, "daemon is draining; no new prompt was admitted. Pending input replies remain available.".into()).await;
+                    continue;
+                }
                 if let Some(waiting) = waiting {
                     waiting.waited(rook_core::runtime_diagnostics::Metric::AdmissionWait);
                 }
@@ -1559,6 +1600,9 @@ impl Live {
     }
     pub(crate) fn activity(&self) -> Option<rook_proto::activity::Snapshot> {
         self.activity.as_ref().map(|activity| activity.snapshot(self.running()))
+    }
+    pub(crate) fn family_activity(&self, session: u128) -> Option<rook_proto::activity::Snapshot> {
+        self.activity.as_ref().and_then(|a| a.for_session(session, self.running()))
     }
     pub(crate) fn queue_notice(&self, receipt: rook_proto::queue::Notice, text: String) {
         if self.running() {

@@ -2746,7 +2746,7 @@ dependencies = [
 
 [[package]]
 name = "rook-acp"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2768,7 +2768,7 @@ dependencies = [
 
 [[package]]
 name = "rook-cli"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2805,7 +2805,7 @@ dependencies = [
 
 [[package]]
 name = "rook-contain"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
@@ -2816,7 +2816,7 @@ dependencies = [
 
 [[package]]
 name = "rook-core"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2859,7 +2859,7 @@ dependencies = [
 
 [[package]]
 name = "rook-llm"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2880,7 +2880,7 @@ dependencies = [
 
 [[package]]
 name = "rook-lsp"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "async-trait",
  "rook-contain",
@@ -2894,7 +2894,7 @@ dependencies = [
 
 [[package]]
 name = "rook-mcp"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -2911,7 +2911,7 @@ dependencies = [
 
 [[package]]
 name = "rook-proto"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2920,7 +2920,7 @@ dependencies = [
 
 [[package]]
 name = "rook-skills"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "rook-contain",
  "semver",
@@ -2935,7 +2935,7 @@ dependencies = [
 
 [[package]]
 name = "rook-store"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "blake3",
  "hex",
@@ -2952,10 +2952,11 @@ dependencies = [
 
 [[package]]
 name = "rook-tools"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "async-trait",
  "base64",
+ "futures-util",
  "globset",
  "ignore",
  "landlock",
@@ -2979,7 +2980,7 @@ dependencies = [
 
 [[package]]
 name = "rookd"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4544,7 +4545,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "xtask"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "clap",

@@ -65,10 +65,16 @@ pub(crate) struct Selected {
     selected: String,
     target: String,
     inner: Box<dyn Provider>,
+    turn_effort: Option<Effort>,
 }
 impl Selected {
+    pub(crate) fn admitted(inner: Box<dyn Provider>, effort: Option<Effort>) -> Self {
+        let selected = inner.configured_source().unwrap_or(inner.id()).to_owned();
+        let target = inner.phase_routing().map(|(_, target)| target.to_owned()).unwrap_or_default();
+        Self { selected, target, inner, turn_effort: effort }
+    }
     pub(crate) fn new(selected: &str, target: &str, inner: Box<dyn Provider>) -> Self {
-        Self { selected: selected.into(), target: target.into(), inner }
+        Self { selected: selected.into(), target: target.into(), inner, turn_effort: None }
     }
 }
 #[async_trait]
@@ -79,6 +85,9 @@ impl Provider for Selected {
 
     fn dispatch_identity(&self) -> Option<rook_llm::Dispatch> {
         self.inner.dispatch_identity()
+    }
+    fn turn_effort(&self) -> Option<Effort> {
+        self.turn_effort
     }
     fn configured_source(&self) -> Option<&str> {
         Some(&self.selected)

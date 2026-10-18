@@ -78,6 +78,13 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("experiment", "[JSON action]", "create, run, compare and inspect an experiment tree"),
     ("review", "[JSON action]", "capture/inspect a frozen review or add source-bound comments"),
     ("diagnostics", "[--logs] [new-file-path]", "export local diagnostics; logs are opt-in"),
+    (
+        "daemon",
+        "status|drain [seconds]|restart [seconds]|cancel ID",
+        "inspect or plan a daemon drain; pending inputs stay reachable",
+    ),
+    ("results", "", "read typed delegated result receipts and their saved sources"),
+    ("copy", "[--summary]", "copy the last saved answer; internal summaries are opt-in"),
     ("worktree", "CHILD [restore REVIEW_TOKEN]", "diagnose/restore a missing registered child checkout"),
     (
         "export-html",
@@ -101,6 +108,11 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("retry", "", "resend a saved daemon prompt with its original ID (daemon mode)"),
     ("discard", "", "forget a saved daemon prompt that may already have arrived (daemon mode)"),
     ("turns", "[before]", "recorded turn results and cumulative token usage"),
+    (
+        "background",
+        "[session-id] [--after CURSOR]",
+        "inspect family background work without changing sessions",
+    ),
     ("tree", "[session-id]", "browse conversation branches; switching leaves files unchanged"),
     ("summary-draft", "<target-session>", "show bounded excerpts from this branch for review"),
     ("summary-suggest", "<target-session>", "ask the model for a historical summary draft"),
@@ -867,6 +879,21 @@ async fn through_the_daemon(
                         eprintln!("start or resume a session first");
                     }
                 }
+                "background" => {
+                    if let Some(id) = session.as_deref().and_then(rook_store::parse_session_id) {
+                        let args = rest.to_owned();
+                        let result = tokio::task::spawn_blocking(move || {
+                            crate::source::Source::open(None)?.background_command(id, &args, None)
+                        })
+                        .await?;
+                        match result {
+                            Ok(text) => println!("{text}"),
+                            Err(error) => eprintln!("{error}"),
+                        }
+                    } else {
+                        eprintln!("start or resume a session first");
+                    }
+                }
                 "queue" | "turns" | "tree" => {
                     let selected = if name == "tree" && !rest.trim().is_empty() {
                         match rook_store::parse_session_id(rest.trim()) {
@@ -964,6 +991,52 @@ async fn through_the_daemon(
                     let result = tokio::task::spawn_blocking(move || -> Result<String> {
                         let source = crate::source::Source::open(Some(here))?;
                         Ok(rook_core::attention::describe(&source.attention(&query)?))
+                    })
+                    .await?;
+                    match result {
+                        Ok(text) => println!("{text}"),
+                        Err(error) => eprintln!("{error}"),
+                    }
+                }
+                "daemon" => {
+                    let here = workspace.to_path_buf();
+                    let args = rest.to_owned();
+                    let result = tokio::task::spawn_blocking(move || -> Result<String> {
+                        let view = crate::source::Source::open(Some(here))?.drain_command(&args)?;
+                        Ok(serde_json::to_string_pretty(&view)?)
+                    })
+                    .await?;
+                    match result {
+                        Ok(text) => println!("{text}"),
+                        Err(error) => eprintln!("{error}"),
+                    }
+                }
+                "results" => {
+                    let Some(owner) = session.as_deref().and_then(rook_store::parse_session_id) else {
+                        continue;
+                    };
+                    let here = workspace.to_path_buf();
+                    let result = tokio::task::spawn_blocking(move || -> Result<String> {
+                        Ok(serde_json::to_string_pretty(
+                            &crate::source::Source::open(Some(here))?.delegated_results(owner)?,
+                        )?)
+                    })
+                    .await?;
+                    match result {
+                        Ok(text) => println!("{text}"),
+                        Err(error) => eprintln!("{error}"),
+                    }
+                }
+                "copy" => {
+                    let Some(owner) = session.as_deref().and_then(rook_store::parse_session_id) else {
+                        continue;
+                    };
+                    let here = workspace.to_path_buf();
+                    let args = rest.to_owned();
+                    let result = tokio::task::spawn_blocking(move || -> Result<String> {
+                        let summary = crate::clipboard::arguments(&args)?;
+                        let answer = crate::source::Source::open(Some(here))?.last_answer(owner, summary)?;
+                        Ok(crate::clipboard::copy(&answer))
                     })
                     .await?;
                     match result {
@@ -1098,16 +1171,18 @@ async fn through_the_daemon(
                         continue;
                     };
                     let here = workspace.to_path_buf();
-                    let model = rest.trim().to_owned();
+                    let selection = rest.trim().to_owned();
                     let result = tokio::task::spawn_blocking(move || -> Result<String> {
                         let source = crate::source::Source::open(Some(here))?;
                         let view = source.model_selection(owner)?;
-                        if model.is_empty() {
+                        if selection.is_empty() {
                             return Ok(serde_json::to_string_pretty(&view)?);
                         }
+                        let (model, effort) = crate::commands::sessions::selection_arguments(&selection)?;
                         let receipt = source.select_model(
                             owner,
                             &rook_core::model_selection::Request {
+                                effort,
                                 id: rook_store::format_session_id(rook_store::new_session_id()),
                                 expected_revision: view.revision,
                                 model,
@@ -1397,6 +1472,21 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
     match name {
         "quit" | "exit" | "q" => return Ok(Said { text: String::new(), quit: true }),
         "help" | "?" => say!("{}", help_text()),
+        "daemon" => {
+            let daemon = crate::source::Daemon::running()
+                .ok_or_else(|| anyhow::anyhow!("daemon is not running; use rook daemon start"))?;
+            say!(
+                "{}",
+                serde_json::to_string_pretty(&crate::source::Source::Daemon(daemon).drain_command(rest)?)?
+            );
+        }
+        "results" => {
+            say!("{}", serde_json::to_string_pretty(&rook.delegated_results(*session)?)?);
+        }
+        "copy" => {
+            let summary = crate::clipboard::arguments(rest)?;
+            say!("{}", crate::clipboard::copy(&rook.last_answer(*session, summary)?));
+        }
         "export-preview" => {
             let request = rook_core::conversation_export::arguments(rest)?;
             say!("{}", rook.conversation_export(*session, &request)?.preview_json()?);
@@ -1420,6 +1510,18 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
                 },
             )?;
             say!("{}", crate::commands::queue::describe(&serde_json::to_value(entry)?)?);
+        }
+        "background" => {
+            let (id, after) = crate::commands::sessions::background_arguments(*session, rest)?;
+            say!(
+                "{}",
+                rook_core::background::describe(&rook_core::background::page(
+                    rook,
+                    id,
+                    &rook_core::branches::Query { after },
+                    Some(&shared.jobs)
+                )?)
+            );
         }
         "tree" => {
             let id = if rest.trim().is_empty() {
@@ -1601,28 +1703,48 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
         // Checked here rather than at the top of the next turn, and through the
         // same function that will build it — a name with a typo in it should
         // say so while somebody is still looking at what they typed.
-        "model" => match rook_core::models::usable(&rook.config, rest) {
-            Ok(()) => {
+        "model" => {
+            let (model, effort) = crate::commands::sessions::selection_arguments(rest)?;
+            match rook_core::models::usable(&rook.config, &model) {
+                Ok(()) => {
+                    let view = rook.model_selection(*session)?;
+                    let receipt = rook.select_model(
+                        *session,
+                        &rook_core::model_selection::Request {
+                            effort,
+                            id: rook_store::format_session_id(rook_store::new_session_id()),
+                            expected_revision: view.revision,
+                            model,
+                        },
+                    )?;
+                    *shared.model.borrow_mut() = Some(receipt.model.clone());
+                    if let Some(effort) = receipt.effort {
+                        shared.effort.set(effort);
+                    }
+                    say!(
+                        "{} saved as revision {}; applies at the next turn boundary",
+                        receipt.model,
+                        receipt.revision
+                    );
+                }
+                Err(why) => say!("{why}"),
+            }
+        }
+        "effort" => match rook_llm::Effort::parse(rest) {
+            Some(effort) => {
                 let view = rook.model_selection(*session)?;
-                let receipt = rook.select_model(
+                rook.select_model(
                     *session,
                     &rook_core::model_selection::Request {
                         id: rook_store::format_session_id(rook_store::new_session_id()),
                         expected_revision: view.revision,
-                        model: rest.into(),
+                        model: view
+                            .selected
+                            .or_else(|| shared.model.borrow().clone())
+                            .unwrap_or_else(|| rook.config.agent.model.clone()),
+                        effort: Some(effort),
                     },
                 )?;
-                *shared.model.borrow_mut() = Some(receipt.model.clone());
-                say!(
-                    "{} saved as revision {}; applies at the next turn boundary",
-                    receipt.model,
-                    receipt.revision
-                );
-            }
-            Err(why) => say!("{why}"),
-        },
-        "effort" => match rook_llm::Effort::parse(rest) {
-            Some(effort) => {
                 shared.effort.set(effort);
                 say!("{}", effort_mapping(rook, shared));
             }

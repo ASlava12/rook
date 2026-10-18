@@ -1,4 +1,16 @@
 {
+  "models.*.reasoning": {"kind":"section","help":"Explicit reasoning capability overrides; provenance is configuration, not an endpoint observation. Supported controls are restricted by api."},
+  "models.*.reasoning.supported": {"kind":"boolean","help":"Override reasoning support; false suppresses controls. Omit to inherit observed facts."},
+  "models.*.reasoning.control": {"kind":"string","choices":["openai-effort","responses-effort","anthropic-effort","google-level","google-budget"],"help":"Implemented wire contract for an unfamiliar model alias. Must match the configured API; no arbitrary body fields."},
+  "models.*.reasoning.effort_levels": {"kind":"array","help":"Up to five unique low/medium/high/xhigh/max levels; [] suppresses effort parameters. Omit to inherit metadata."},
+  "models.*.reasoning.budget_min": {"kind":"integer","help":"Minimum google-budget tokens, 1..131072; default 512. Must leave visible output room."},
+  "models.*.reasoning.budget_max": {"kind":"integer","help":"Maximum google-budget tokens, at least budget_min and at most 131072; default 32768."},
+  "agent.fallbacks": {"kind":"table","help":"Independent model fallback chains. Omitted purpose inherits global model priorities; an explicit empty list disables its fallback."},
+  "agent.fallbacks.main": {"kind":"array","help":"Up to 16 unique configured backup sources for ordinary turns, in order; the selected primary always comes first."},
+  "agent.fallbacks.compaction": {"kind":"array","help":"Independent configured backups for summary requests; [] forbids falling through to the ordinary global rotation."},
+  "agent.fallbacks.errand": {"kind":"array","help":"Independent configured backups for delegated errands; existing permission, retry, context and cost rules still apply."},
+  "agent.compaction_timeout_secs": {"kind":"integer","help":"Optional compaction phase ceiling in seconds (1..86400), including model admission and retries; also constrained by the remaining turn deadline. Omit to preserve existing timing. Ordinary replies retain silence-based timeouts."},
+  "agent.compaction_output_tokens": {"kind":"integer","help":"Experimental summarizer output allocation (128..131072); clamped by the summarizer context. Omit for the current 2048-token cap. Default changes require measured task-quality benefit."},
   "sandbox.network_policy": {"kind": "table", "help": "Opt-in domain egress for local foreground commands. Requires macOS Seatbelt; unsupported execution refuses without fallback."},
   "sandbox.network_policy.enabled": {"kind": "setting", "help": "Default false. When enabled, commands can connect only to a per-command HTTP/CONNECT broker. External tool paths without containment are refused."},
   "sandbox.network_policy.allow": {"kind": "array", "help": "At most 64 exact host:port or *.dns.suffix:port rules. Ports are mandatory; there are no implicit localhost or public-network exceptions."},
@@ -612,6 +624,7 @@
     "kind": "integer",
     "help": "Maximum configured and plugin MCP servers per session (1..=256; default 32), including disabled entries. Too many declarations fail before any server starts. Restart to apply a changed limit."
   },
+  "mcp_connections.refresh_timeout_secs": {"kind":"integer", "help":"Whole notification-driven MCP catalog refresh phase, 1..=300 seconds; default 30. Bounded by remaining turn time. Previous descriptors survive failures/timeouts."},
   "mcp_connections.parallel_connects": {
     "kind": "integer",
     "help": "Maximum concurrent MCP startup/catalog downloads (1..=32; default 4). Bounds startup work while keeping configured server order. Restart to apply."
@@ -675,6 +688,7 @@
     "kind": "integer",
     "help": "Maximum tools/list pages per catalog, 1–256; default 64. Transport recovery may retry a page. Cursor cycles and incomplete catalogs are errors."
   },
+  "mcp.*.refresh_tools": {"kind":"boolean", "help":"Opt into tools/list_changed refresh when the server negotiates tools.listChanged. Default false. Active calls retain their admitted descriptors and connection; new requests can use a refreshed catalog. Reconnect after changing this declaration."},
   "mcp.*.catalog_timeout_secs": {
     "kind": "integer",
     "help": "Total time for the complete tools/list catalog including retries and all pages, 1–300 seconds; default 30."

@@ -4,6 +4,7 @@ import { $, el, api, ago, md, state, nav, notify, askToNotify, jsonWithin } from
 import { historyPanel } from './history.js';
 import { savedToolCard } from './tool-card.js';
 import { branchPanel } from './branches.js';
+import { backgroundPanel } from './background.js';
 import { mcpPanel } from './mcp.js';
 import { queuePanel, takeRestored } from './queue.js';
 import { pendingSubmission, submissionError, submitSteering } from './submission.js';
@@ -715,31 +716,37 @@ async function refreshModelSelection(session) {
     if (request !== modelViewRequest || state.chat.session !== session || !state.chat.settings) return;
     if (view.selected) {
       state.chat.settings.model = view.selected;
-      state.chat.modelPickNotice = `Selected: ${view.selected} · revision ${view.revision}${view.pending ? ' · queued for next turn' : ''}${view.last_effective ? ` · last turn boundary: ${view.last_effective}` : ''}`;
+      if(view.selected_effort) state.chat.settings.effort = view.selected_effort;
+      state.chat.modelPickNotice = `Selected: ${view.selected}${view.selected_effort ? ` / ${view.selected_effort}` : ''} · revision ${view.revision}${view.pending ? ' · queued for next turn' : ''}${view.last_effective ? ` · last turn boundary: ${view.last_effective}${view.last_effective_effort ? ` / ${view.last_effective_effort}` : ''}` : ''}`;
       renderSettings();
     }
   } catch { /* Older daemons have no durable model-selection endpoint. */ }
 }
 let pendingModelPick = null;
-async function pickSessionModel(model, retry = false) {
+async function pickSessionModel(model, retry = false, effort = null) {
   const session = state.chat.session;
-  if (!session) { send({ type: 'setting', name: 'model', value: model }); return; }
+  if (!session) { send({ type: 'setting', name: 'model', value: model }); if(effort) send({type:'setting',name:'effort',value:effort}); return true; }
   try {
     if (!retry) {
       if (pendingModelPick) throw new Error('Retry or discard the previous model selection first.');
       const view = await api(`/api/sessions/${encodeURIComponent(session)}/model-selection`);
-      pendingModelPick = { session, request: { id: crypto.randomUUID(), expected_revision: view.revision, model } };
+      pendingModelPick = { session, request: { id: crypto.randomUUID(), expected_revision: view.revision, model, ...(effort ? {effort} : {}) } };
     }
     const pick = pendingModelPick;
     if (!pick || pick.session !== session) throw new Error('Return to the original session to retry its model selection.');
     const receipt = await api(`/api/sessions/${encodeURIComponent(session)}/model-selection`, pick.request);
+    if (pendingModelPick !== pick) return false;
     pendingModelPick = null;
+    if (session !== state.chat.session) return true;
     state.chat.settings.model = receipt.model;
-    state.chat.modelPickNotice = `${receipt.model} saved as revision ${receipt.revision}; applies at the next turn boundary.`;
+    if(receipt.effort) state.chat.settings.effort = receipt.effort;
+    state.chat.modelPickNotice = `${receipt.model}${receipt.effort ? ` / ${receipt.effort}` : ''} saved as revision ${receipt.revision}; applies at the next turn boundary.`;
+    renderSettings(); return true;
   } catch (error) {
+    if (session !== state.chat.session) return false;
     state.chat.modelPickNotice = `Model selection not confirmed: ${error.error || error.message || error}`;
   }
-  renderSettings();
+  renderSettings(); return false;
 }
 function renderSettings() {
   const bar = $('#settings');
@@ -747,7 +754,7 @@ function renderSettings() {
   if (!bar || !s) return;
   const pick = (name, values, selected) => el('label', {},
     `${name === 'effort' ? 'requested effort' : name} `,
-    el('select', { onchange: (e) => name === 'model' ? pickSessionModel(e.target.value) : send({ type: 'setting', name, value: e.target.value }) },
+    el('select', { onchange: (e) => name === 'model' ? pickSessionModel(e.target.value) : name === 'effort' && state.chat.session ? pickSessionModel(s.model, false, e.target.value) : send({ type: 'setting', name, value: e.target.value }) },
       values.map(v => el('option', { value: v, selected: v === selected }, v))));
   const spent = state.chat.spent;
   const controls = [
@@ -801,6 +808,12 @@ function rememberRenamedBranch(updated) {
 
 function renderPicker() {
   receiveQueueDraft();
+  const background = $('#background-controls');
+  if (background && background.dataset.session !== (state.chat.session || '')) {
+    background.dataset.session = state.chat.session || '';
+    background.querySelector('section')?.remove();
+    if (background.open) background.append(backgroundPanel(state.chat.session));
+  }
   const branches = $('#branch-controls');
   if (branches && branches.dataset.session !== (state.chat.session || '')) {
     branches.dataset.session = state.chat.session || '';
@@ -929,7 +942,41 @@ async function offer(input, row) {
 export async function renderChat() {
   try { state.chat.sessions = (await api('/api/sessions?tree=true')).items.slice(0, 30); } catch { state.chat.sessions = []; }
   const stream = el('div', { class: 'stream', id: 'stream' });
-  const input = el('textarea', { id: 'chat-input', rows: 3, 'aria-label': 'Prompt', placeholder: 'Ask the agent… (Enter sends, Shift+Enter adds a line, Esc stops)', autofocus: true }, state.chat.draft || '');
+  const copyAnswer = async (summary = false) => {
+    const session = state.chat.session;
+    if (!session) { say('stat', 'Open a saved session first.'); return; }
+    try {
+      const answer = await api(`/api/sessions/${encodeURIComponent(session)}/last-answer?summary=${summary}`);
+      if (session !== state.chat.session) return;
+      try {
+        if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
+        await navigator.clipboard.writeText(answer.text);
+      } catch {
+        const text = el('textarea', {rows:8, readOnly:true, 'aria-label':'Saved answer to copy manually'}, answer.text);
+        const fallback = el('div', {class:'card'}, el('p', {}, `Clipboard unavailable. Select this saved text (#${answer.seq}) to copy manually.`), text,
+          el('button', {onclick:()=>fallback.remove()}, 'Close'));
+        stream.append(fallback); text.focus(); text.select(); return;
+      }
+      say('stat', `Copied saved ${summary ? 'summary' : 'answer'} #${answer.seq}${answer.truncated ? ' (bounded excerpt)' : ''}.`);
+    } catch(error) { say('stat', error.error || error.message || String(error)); }
+  };
+
+  const drainStatus = el('pre', {role:'status'}, 'Load status to inspect daemon admission.');
+  let drainId = null;
+  const drainAction = async (action) => {
+    try {
+      const view = await api('/api/daemon/drain', action || undefined);
+      drainId = view.id; drainStatus.textContent = JSON.stringify(view, null, 2);
+    } catch(error) { drainStatus.textContent = error.error || error.message || String(error); }
+  };
+  const drain = el('details', {}, el('summary', {}, 'Drain before updating daemon'),
+    el('p', {}, 'Wait up to 300 seconds for current work. Pending questions and Stop remain available. Timeout never forces a restart.'),
+    el('div', {class:'row'},
+      el('button', {onclick:()=>drainAction()}, 'Refresh status'),
+      el('button', {onclick:()=>drainAction({action:'start', id:crypto.randomUUID(), timeout_secs:300, restart:false})}, 'Drain'),
+      el('button', {onclick:()=>drainAction({action:'start', id:crypto.randomUUID(), timeout_secs:300, restart:true})}, 'Drain and restart'),
+      el('button', {onclick:()=>{if(drainId)drainAction({action:'cancel', id:drainId});}}, 'Cancel observed drain')), drainStatus);
+  const input = el('textarea', { id: 'chat-input' , rows: 3, 'aria-label': 'Prompt', placeholder: 'Ask the agent… (Enter sends, Shift+Enter adds a line, Esc stops)', autofocus: true }, state.chat.draft || '');
   const sendButton = el('button', { id: 'send', type: 'submit' }, 'Send');
   const followupButton = el('button', { type: 'submit', value: 'follow_up', title: 'Start a separate turn after this turn or goal finishes' }, 'Queue follow-up');
   const retryButton = el('button', { id: 'retry-prompt', type: 'button', hidden: true,
@@ -1097,8 +1144,7 @@ export async function renderChat() {
   } }, input, sendButton, followupButton, retryButton, discardButton,
   retryStopButton, discardStopButton, stopButton, reconnectButton,
   presetPanel(input,preset=>{
-    if(preset.model) send({type:'setting',name:'model',value:preset.model});
-    if(preset.effort) send({type:'setting',name:'effort',value:preset.effort});
+    return preset.model || preset.effort ? pickSessionModel(preset.model || state.chat.settings.model, false, preset.effort) : true;
   }));
   // Naming a file meant knowing the path and typing it, which in a browser
   // means leaving the page to go and look. The ranking is the daemon's, so the
@@ -1136,6 +1182,11 @@ export async function renderChat() {
     if (session && !history.querySelector('section')) history.append(historyPanel(session, text => quoteIntoDraft(session, text), undefined, seq => branchFromEvent(session, seq)));
   });
   const mcp = el('details', { id: 'mcp-controls' }, el('summary', {}, 'MCP connections'));
+  const background = el('details', { id: 'background-controls' }, el('summary', {}, 'Background work · session family'));
+  background.addEventListener('toggle', () => {
+    background.querySelector('section')?.remove();
+    if (background.open) background.append(backgroundPanel(state.chat.session));
+  });
   const branches = el('details', { id: 'branch-controls' }, el('summary', {}, 'Conversation branches'));
   branches.addEventListener('toggle', () => {
     branches.querySelector('section')?.remove();
@@ -1154,7 +1205,8 @@ export async function renderChat() {
   $('#view').replaceChildren(el('div', { class: 'card' },
     el('div', { class: 'row', id: 'picker' }),
     el('div', { class: 'row', id: 'settings' }),
-    stream, el('div', {id:'extension-widget', style:'max-height:20rem;overflow:auto', hidden:true}), history, branches, mcp, queue, outputSettings, historicalAttachments, pendingFiles,
+    el('div', {class:'row'}, el('button', {onclick:()=>copyAnswer(false)}, 'Copy last answer'), el('button', {onclick:()=>copyAnswer(true)}, 'Copy internal summary'), el('button', {onclick:async()=>{if(!state.chat.session)return; try {const results=await api(`/api/sessions/${encodeURIComponent(state.chat.session)}/delegated-results`); stream.append(el('pre',{},JSON.stringify(results,null,2)));}catch(error){say('stat',error.error||error.message||String(error));}}}, 'Delegated results')),
+    stream, el('div', {id:'extension-widget', style:'max-height:20rem;overflow:auto', hidden:true}), history, branches, background, mcp, queue, drain, outputSettings, historicalAttachments, pendingFiles,
     el('p', { id: 'branch-draft-note', class: 'sub', role: 'status' }, state.chat.branchNotice || ''), form, naming));
   renderPicker();
   renderSettings();

@@ -231,7 +231,14 @@ impl Tool for RunCommand {
             let redactions = ctx.secrets.as_ref().map(|s| s.redactions()).unwrap_or_default();
             let spill =
                 ctx.spill_dir.as_deref().and_then(|dir| Spill::open(dir, ctx.max_spill_bytes, redactions));
-            let id = jobs.start_transport(&command, &cwd, isolation, spill, ctx.command_transport.clone())?;
+            let id = jobs.start_transport(
+                &command,
+                &cwd,
+                isolation,
+                spill,
+                ctx.command_transport.clone(),
+                ctx.session,
+            )?;
             return Ok(ToolOutcome::ok(format!("started {id}; `job` reads what it prints"))
                 .with("job", id)
                 .with("running", true));

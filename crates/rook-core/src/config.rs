@@ -267,6 +267,8 @@ pub struct ModelSource {
     pub context_window: Option<usize>,
     /// Optional compaction overrides for this configured source.
     pub compaction: crate::compaction_policy::Overrides,
+    /// Explicit reasoning facts/implemented wire control for this model only.
+    pub reasoning: Option<rook_llm::reasoning::Override>,
     /// How many agents may be asking this endpoint at once. One unless it says
     /// otherwise, and 0 lifts the limit.
     ///
@@ -456,7 +458,16 @@ fn edits_apart(a: &str, b: &str) -> usize {
 /// setting its own help text gives as the example.
 fn under_a_chosen_name(table: &str) -> Option<serde_json::Value> {
     match table {
-        "models" => serde_json::to_value(ModelSource::default()).ok(),
+        // An editing/name schema must expose optional nested controls without
+        // enabling them in the runtime ModelSource default or cache identity.
+        "models" => serde_json::to_value(ModelSource {
+            reasoning: Some(rook_llm::reasoning::Override {
+                effort_levels: Some(Vec::new()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .ok(),
         "endpoints" => serde_json::to_value(ApiEndpoint::default()).ok(),
         _ => None,
     }
@@ -516,6 +527,11 @@ fn could_be(said: &str) -> Vec<toml_edit::Value> {
     }
     if let Ok(number) = said.parse::<f64>() {
         all.push(number.into());
+    }
+    if let Ok(collection) = said.parse::<toml_edit::Value>()
+        && (collection.is_array() || collection.is_inline_table())
+    {
+        all.push(collection);
     }
     // Last, so a setting that can hold a number holds one: `"7"` loads for a
     // string field and nothing else, which is exactly when it is right.
@@ -644,8 +660,16 @@ pub struct AgentConfig {
     /// being asked for is plainly not judgement. The rest wait for numbers;
     /// `cargo xtask bench` is where they come from.
     pub compaction_model: String,
+    /// Optional independent fallback lists for main, compaction and errand requests.
+    pub fallbacks: crate::models::Fallbacks,
     /// Admission for combined narrative/text output of a summarisation request.
     pub max_compaction_summary_bytes: usize,
+    /// Optional auxiliary phase ceiling, including admission and all retries.
+    /// Ordinary answer streams keep their silence watchdog. None preserves current timing.
+    pub compaction_timeout_secs: Option<u64>,
+    /// Experimental summary output ceiling; omitted retains 2048 tokens.
+    /// The summarizer's actual context admission always clamps this allocation.
+    pub compaction_output_tokens: Option<u32>,
     /// What a delegated errand runs on, when the call does not ask for better.
     /// Empty is the turn's own model.
     ///
@@ -1020,7 +1044,10 @@ impl Default for AgentConfig {
             answer_timeout_secs: 600,
             decide_alone_after_secs: 1800,
             compaction_model: String::new(),
+            fallbacks: Default::default(),
             max_compaction_summary_bytes: 64 * 1024,
+            compaction_timeout_secs: None,
+            compaction_output_tokens: None,
             errand_model: String::new(),
             max_reasoning_tokens: 800,
             max_provider_state_bytes: 4 * 1024 * 1024,

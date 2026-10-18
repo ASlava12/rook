@@ -4,6 +4,7 @@ import { $, el, api, ago, state, nav } from './lib.js';
 import { continueIn, quoteIntoDraft, branchFromEvent } from './chat.js';
 import { historyPanel } from './history.js';
 import { branchPanel } from './branches.js';
+import { backgroundPanel } from './background.js';
 import { worktreePanel } from './worktrees.js';
 import { reviewPanel } from './reviews.js';
 import { shellUndoPanel } from './shell-undo.js';
@@ -165,6 +166,12 @@ export async function renderSessions() {
       if (branches.open) branches.append(branchPanel(session, continueIn, quoteIntoDraft, branchFromEvent, () => renderSessions()));
     });
     right.append(branches);
+    const background = el('details', {}, el('summary', {}, 'Background work · session family'));
+    background.addEventListener('toggle', () => {
+      background.querySelector('section')?.remove();
+      if (background.open) background.append(backgroundPanel(session));
+    });
+    right.append(background);
     right.append(historyPanel(session, text => quoteIntoDraft(session, text), rewindTo, seq => branchFromEvent(session, seq)));
     const reviews=el('details',{},el('summary',{},'Change reviews'));
     reviews.ontoggle=()=>{if(reviews.open && reviews.children.length===1) reviews.append(reviewPanel(session,quoteIntoDraft));};

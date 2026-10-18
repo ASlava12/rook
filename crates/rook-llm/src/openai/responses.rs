@@ -260,8 +260,15 @@ fn wire_request(model: &str, scope: &[u8; 32], request: &Request, stream: bool) 
     }
     let mut body = json!({"model":model, "input":input, "stream":stream, "store":false,
         "max_output_tokens":request.max_output_tokens});
-    if let Some(effort) = request.effort.and_then(|effort| super::reasoning_effort(model, effort)) {
+    if let Some(effort) =
+        crate::reasoning::effort(request).and_then(|effort| super::reasoning_effort(model, effort))
+    {
         body["reasoning"] = json!({"effort":effort, "summary":"auto"});
+    }
+    if let Some(("reasoning.effort", value)) = crate::reasoning::effort(request)
+        .and_then(|effort| request.model_capabilities.reasoning_override.as_ref()?.parameter(effort))
+    {
+        body["reasoning"] = json!({"effort":value, "summary":"auto"});
     }
     if super::reasons(model) {
         // Accepted by older Responses implementations too. Current OpenAI

@@ -443,3 +443,54 @@ async fn an_owned_completed_terminal_keeps_output_until_release_despite_newer_fi
     );
     assert!(jobs.release(&first));
 }
+
+#[tokio::test]
+async fn family_metadata_keeps_admission_owner_filters_before_capping_and_never_copies_payloads() {
+    let (dir, mut ctx) = ctx(4);
+    let jobs = ctx.jobs.clone().unwrap();
+    ctx.session = Some(42);
+    let first = RunCommand
+        .call(&ctx, &serde_json::json!({"command":"echo PRIVATE_COMMAND_OUTPUT", "background":true}))
+        .await
+        .unwrap();
+    assert!(first.meta.contains_key("job"), "ordinary tool admission started a job");
+    ctx.session = Some(99);
+    RunCommand.call(&ctx, &serde_json::json!({"command":"echo UNRELATED", "background":true})).await.unwrap();
+    jobs.start("echo LEGACY_UNASSIGNED", dir.path(), None).unwrap();
+    let owners = std::collections::BTreeSet::from([42]);
+    let overview = jobs.overview(&owners, 1);
+    assert_eq!(overview.jobs.len(), 1);
+    assert_eq!(overview.jobs[0].id, first.meta["job"]);
+    assert_eq!(overview.jobs[0].session, ulid::Ulid::from(42u128).to_string());
+    assert_eq!(overview.omitted, 0, "unrelated owners do not spend the page allowance");
+    assert_eq!(overview.unassigned, 1);
+    let wire = serde_json::to_string(&overview).unwrap();
+    assert!(!wire.contains("PRIVATE") && !wire.contains("UNRELATED") && !wire.contains("LEGACY"));
+    assert_eq!(jobs.overview(&owners, 0).omitted, 1, "an actually exceeded bound reports omission");
+    assert!(jobs.overview(&std::collections::BTreeSet::new(), 256).jobs.is_empty());
+}
+
+#[tokio::test]
+async fn private_registry_scope_cannot_be_reassigned_by_a_callers_session() {
+    struct Empty;
+    impl rook_tools::Secrets for Empty {
+        fn value(&self, _: &str) -> Option<String> {
+            None
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let jobs = Arc::new(Jobs::scoped(1, 4096, 42, Arc::new(Empty)));
+    let mut ctx = ToolContext::new(dir.path().into());
+    ctx.jobs = Some(jobs.clone());
+    ctx.session = Some(99);
+    let result = RunCommand
+        .call(&ctx, &serde_json::json!({"command":"echo scoped", "background":true}))
+        .await
+        .unwrap();
+    assert!(result.meta.contains_key("job"));
+    assert!(jobs.overview(&std::collections::BTreeSet::from([99]), 256).jobs.is_empty());
+    let owned = jobs.overview(&std::collections::BTreeSet::from([42]), 256);
+    assert_eq!(owned.jobs.len(), 1);
+    assert_eq!(owned.unassigned, 0);
+    assert_eq!(owned.jobs[0].session, ulid::Ulid::from(42u128).to_string());
+}

@@ -27,17 +27,22 @@ pub(crate) struct Running {
 }
 
 impl Running {
-    fn is_finished(&self) -> bool {
+    pub(crate) fn is_finished(&self) -> bool {
         self.task.is_finished()
     }
 }
 
 impl Tasks {
     pub(crate) async fn activity(&self, session: u128) -> Option<rook_proto::activity::Snapshot> {
-        self.0.lock().await.values().find_map(|running| {
-            let observation = running.observation.lock().unwrap_or_else(|e| e.into_inner());
-            observation.as_ref().filter(|o| o.session == session).map(|o| o.snapshot(!running.is_finished()))
-        })
+        self.0
+            .lock()
+            .await
+            .values()
+            .filter_map(|running| {
+                let observation = running.observation.lock().unwrap_or_else(|e| e.into_inner());
+                observation.as_ref().and_then(|o| o.for_session(session, !running.is_finished()))
+            })
+            .max_by_key(|activity| (activity.owner_live == Some(true), activity.observed_at))
     }
 }
 
@@ -45,6 +50,9 @@ impl Tasks {
 /// second writer while the socket that submitted the goal is attaching to it.
 pub async fn join_conversation(state: &Arc<AppState>, run: &Run) -> Result<Arc<crate::chat::Live>, String> {
     let _tasks = state.work.0.lock().await;
+    if !state.drain.allows_run(&run.id) {
+        return Err("daemon is draining; this goal was not running at admission closure".into());
+    }
     let session = rook_store::parse_session_id(&run.id).ok_or("invalid conversation")?;
     if let Some(live) = state.live.read().await.get(&session).filter(|l| l.running()).cloned() {
         return Ok(live);
@@ -233,6 +241,14 @@ async fn control(
     Path(id): Path<String>,
     Json(request): Json<ControlRequest>,
 ) -> Result<Json<serde_json::Value>, Failure> {
+    let _admission = state.work.0.lock().await;
+    let action = match &request {
+        ControlRequest::Legacy(action) => action,
+        ControlRequest::Identified(request) => &request.action,
+    };
+    if state.drain.active() && *action == rook_proto::work::Action::Resume {
+        return Err(failure("daemon is draining; resume is a new admission"));
+    }
     let rook = state.rook.read().await;
     let result = match request {
         ControlRequest::Legacy(action) => {
@@ -291,13 +307,18 @@ pub async fn supervise(state: Arc<AppState>) {
     loop {
         tick.tick().await;
         state.config_if_changed().await;
-        schedule_tick(&state).await;
-        crate::inbound::tick(&state).await;
+        if let Ok(_admission) = state.drain.request() {
+            schedule_tick(&state).await;
+            crate::inbound::tick(&state).await;
+        }
         // Session goals use the existing chat registry, streaming, approvals
         // and switching. A disconnected window is only a missing observer.
         let conversations = managed::list(&*state.rook.read().await);
         if let Ok(runs) = conversations {
-            for run in runs.into_iter().filter(|r| r.conversation.is_some() && r.status.runnable()) {
+            for run in runs
+                .into_iter()
+                .filter(|r| r.conversation.is_some() && r.status.runnable() && state.drain.allows_run(&r.id))
+            {
                 if let Err(error) = join_conversation(&state, &run).await {
                     block(&state, &run.id, &error).await;
                 }
@@ -332,6 +353,9 @@ pub async fn supervise(state: Arc<AppState>) {
         };
         runs.sort_by_key(|run| run.updated_at);
         for run in runs {
+            if !state.drain.allows_run(&run.id) {
+                continue;
+            }
             let live = if let Some(c) = &run.conversation {
                 let session = rook_store::parse_session_id(&c.session);
                 state.live.read().await.iter().any(|(id, live)| Some(*id) == session && live.running())

@@ -48,9 +48,9 @@ fn acknowledged_model_picks_survive_reopen_and_retry_a_cannot_replace_b() {
     let config = config();
     let rook = open(root.path(), config.clone());
     let session = rook.start_session("model picks").unwrap();
-    let a = Pick { id: "request-A".into(), expected_revision: 0, model: "A".into() };
+    let a = Pick { effort: None, id: "request-A".into(), expected_revision: 0, model: "A".into() };
     let a_receipt = rook.select_model(session, &a).unwrap();
-    let b = Pick { id: "request-B".into(), expected_revision: 1, model: "B".into() };
+    let b = Pick { effort: None, id: "request-B".into(), expected_revision: 1, model: "B".into() };
     let b_receipt = rook.select_model(session, &b).unwrap();
     assert!(rook.model_selection(session).unwrap().pending);
     assert_eq!(rook.select_model(session, &a).unwrap(), a_receipt);
@@ -68,7 +68,7 @@ fn acknowledged_model_picks_survive_reopen_and_retry_a_cannot_replace_b() {
     assert_eq!(after.model, "B");
     assert_eq!(after.event_count, before.event_count);
     assert!(!rook.model_selection(session).unwrap().pending);
-    let c = Pick { id: "request-C".into(), expected_revision: 2, model: "A".into() };
+    let c = Pick { effort: None, id: "request-C".into(), expected_revision: 2, model: "A".into() };
     rook.select_model(session, &c).unwrap();
     assert_eq!(running_b.configured_source(), Some("B"), "a live provider is immutable");
     drop(rook);
@@ -84,7 +84,7 @@ fn acknowledged_model_picks_survive_reopen_and_retry_a_cannot_replace_b() {
     assert_eq!(rook.model_selection(session).unwrap().revision, 3);
     rook.select_model(
         session,
-        &Pick { id: "confirm-new-route".into(), expected_revision: 3, model: "A".into() },
+        &Pick { effort: None, id: "confirm-new-route".into(), expected_revision: 3, model: "A".into() },
     )
     .unwrap();
     assert_eq!(rook.provider_for_turn(session, None).unwrap().configured_source(), Some("A"));

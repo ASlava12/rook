@@ -144,6 +144,7 @@ async fn a_delayed_display_reader_keeps_exact_child_operations_without_fragment_
             effort: None,
             recipe: None,
             executor: None,
+            result_schema: None,
         };
         crate::execution::RECEIPT_WRITE_MEASUREMENT.with(|measurement| measurement.set((0, 0, 0)));
         let (child, outcome) = crew

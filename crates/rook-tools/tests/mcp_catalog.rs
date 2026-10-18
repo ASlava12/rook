@@ -129,10 +129,16 @@ async fn overflow_stays_discoverable_callable_and_bounded_without_changing_schem
     ctx.max_output_bytes = 4096;
     let mut found = Vec::new();
     let mut offset = 0;
+    let mut source = Value::Null;
     loop {
-        let answer = tools.call(&ctx, "mcp_tools", &json!({"limit":1,"offset":offset})).await.unwrap();
+        let mut arguments = json!({"limit":1,"offset":offset});
+        if offset > 0 {
+            arguments["source"] = source.clone();
+        }
+        let answer = tools.call(&ctx, "mcp_tools", &arguments).await.unwrap();
         assert!(!answer.is_error, "{}", answer.content);
         let page: Value = serde_json::from_str(&answer.content).unwrap();
+        source = page["source"].clone();
         found.extend(
             page["tools"].as_array().unwrap().iter().map(|v| v["name"].as_str().unwrap().to_string()),
         );
@@ -143,14 +149,17 @@ async fn overflow_stays_discoverable_callable_and_bounded_without_changing_schem
     assert_eq!(found, ["alpha__first", "alpha__last", "beta__first"]);
     let mut schema = String::new();
     let mut offset = 0;
+    let mut source = Value::Null;
     loop {
-        let page = tools
-            .call(&ctx, "mcp_tools", &json!({"name":"alpha__last","offset":offset,"limit":701}))
-            .await
-            .unwrap();
+        let mut arguments = json!({"name":"alpha__last","offset":offset,"limit":701});
+        if offset > 0 {
+            arguments["source"] = source.clone();
+        }
+        let page = tools.call(&ctx, "mcp_tools", &arguments).await.unwrap();
         assert!(page.content.len() <= ctx.max_output_bytes, "{}", page.content.len());
         assert!(!page.is_error, "{}", page.content);
         let page: Value = serde_json::from_str(&page.content).unwrap();
+        source = page["source"].clone();
         assert_eq!(page["offset"], offset);
         schema.push_str(page["schema"].as_str().unwrap());
         let Some(next) = page["next_offset"].as_u64() else { break };

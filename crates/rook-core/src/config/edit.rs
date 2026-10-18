@@ -435,7 +435,7 @@ fn defaults() -> Result<Value, String> {
 }
 fn template(section: &str) -> Option<Value> {
     match section {
-        "models" => serde_json::to_value(super::ModelSource::default()).ok(),
+        "models" => super::under_a_chosen_name("models"),
         "endpoints" => serde_json::to_value(super::ApiEndpoint::default()).ok(),
         "mcp" => serde_json::to_value(rook_mcp::ServerConfig::default()).ok(),
         "lsp" => serde_json::to_value(rook_lsp::ServerConfig::default()).ok(),
@@ -507,6 +507,15 @@ fn effective(raw: &Value) -> Result<Value, String> {
                 merge(&mut base, entry);
                 *entry = base;
             }
+        }
+    }
+    // Display unset optional lists as openable empty collections. Raw TOML and
+    // Entry.explicit still distinguish inherited None from explicit [].
+    for purpose in ["main", "compaction", "errand"] {
+        if let Some(node) = value.pointer_mut(&format!("/agent/fallbacks/{purpose}"))
+            && node.is_null()
+        {
+            *node = json!([]);
         }
     }
     Ok(value)

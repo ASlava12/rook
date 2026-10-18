@@ -676,8 +676,13 @@ fn wire_request(model: &str, request: &Request, stream: bool) -> serde_json::Val
         // thinking blocks — a long pause with nothing to show for it.
         body["thinking"] = serde_json::json!({ "type": "adaptive", "display": "summarized" });
     }
-    if let Some(effort) = request.effort.and_then(|effort| effort_value(model, effort)) {
+    if let Some(effort) = crate::reasoning::effort(request).and_then(|effort| effort_value(model, effort)) {
         body["output_config"] = serde_json::json!({ "effort": effort });
+    }
+    if let Some(("output_config.effort", value)) = crate::reasoning::effort(request)
+        .and_then(|effort| request.model_capabilities.reasoning_override.as_ref()?.parameter(effort))
+    {
+        body["output_config"] = serde_json::json!({"effort":value});
     }
     if !request.tools.is_empty() {
         body["tools"] = request

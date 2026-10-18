@@ -116,6 +116,25 @@ pub async fn discover(
     mode: Mode,
     directory: &Path,
 ) -> rook_llm::Result<Listing> {
+    let mut listing = discover_observed(config, vault, name, mode, directory).await?;
+    if let Some(settings) = config.models.get(name.trim()).and_then(|source| source.reasoning.as_ref()) {
+        for model in &mut listing.models {
+            if model.id == crate::models::model_named(config, name) {
+                settings.apply(&mut model.capabilities);
+            }
+        }
+        listing.notices.push("reasoning capabilities include an explicit configured override; this is not an endpoint observation".into());
+    }
+    Ok(listing)
+}
+
+async fn discover_observed(
+    config: &Config,
+    vault: &Vault,
+    name: &str,
+    mode: Mode,
+    directory: &Path,
+) -> rook_llm::Result<Listing> {
     let settings = config.model_catalog.bounded();
     let scope = crate::models::catalog_scope(config, vault, name)?;
     let mut cached = if settings.cache_enabled {

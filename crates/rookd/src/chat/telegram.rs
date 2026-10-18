@@ -53,6 +53,11 @@ pub(crate) async fn submit(state: &Arc<AppState>, input: &Input) -> Result<Strin
             "prompt"
         }
     });
+    let _permit = match mode {
+        "prompt" | "steer" => Some(state.drain.request().map_err(|error| error.to_string())?),
+        "callback" | "stop" => Some(state.drain.interaction().map_err(|error| error.to_string())?),
+        _ => None,
+    };
     let target = input.target.clone().or_else(|| live.as_ref().map(|l| l.epoch.clone()));
     let captured =
         rook.telegram_dispatch(input.update, mode, target.as_deref()).map_err(|e| e.to_string())?;
@@ -126,6 +131,9 @@ pub(crate) async fn submit(state: &Arc<AppState>, input: &Input) -> Result<Strin
             Ok("Follow-up retained for the current turn".into())
         }
         "prompt" => {
+            if state.drain.active() {
+                return Err("Daemon is draining; this prompt was not admitted. Existing question callbacks and /stop remain available.".into());
+            }
             let claim = rook_core::chat_submission::claim(&rook, Some(session), &id, &input.text, &options)
                 .map_err(|e| e.to_string())?;
             if claim.status == rook_core::chat_submission::Status::Admitted {

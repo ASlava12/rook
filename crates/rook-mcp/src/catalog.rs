@@ -2,7 +2,149 @@
 //! cannot make the omitted tools discoverable through the agent's lazy catalog.
 use crate::{McpError, Result, Server, ServerConfig, ToolDescriptor};
 use serde_json::{Value, json};
-use std::{collections::BTreeSet, io::Write, time::Duration};
+use std::{
+    collections::BTreeSet,
+    io::Write,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU8, AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
+};
+
+#[derive(Default)]
+pub(crate) struct Clock {
+    revision: AtomicU64,
+    notifications: Mutex<(u64, u8)>,
+    negotiated: AtomicU8,
+}
+impl Clock {
+    pub(crate) fn changed(&self) {
+        let _ =
+            self.revision.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| Some(n.saturating_add(1)));
+    }
+    pub(crate) fn observe(&self, message: &crate::protocol::Incoming) {
+        if self.negotiated.load(Ordering::Acquire) != 1
+            && message.id.is_none()
+            && message.error.is_none()
+            && message.result.is_none()
+            && message.method.as_deref() == Some("notifications/tools/list_changed")
+        {
+            self.changed();
+        }
+    }
+    fn revision(&self) -> u64 {
+        self.revision.load(Ordering::Acquire)
+    }
+    pub(crate) fn negotiate(&self, supported: bool) {
+        self.negotiated.store(if supported { 2 } else { 1 }, Ordering::Release);
+    }
+    fn negotiated(&self) -> bool {
+        self.negotiated.load(Ordering::Acquire) == 2
+    }
+    pub(crate) fn stdio(&self) {
+        *self.notifications.lock().unwrap_or_else(|e| e.into_inner()) = (0, 1);
+    }
+    pub(crate) fn start_listener(&self, owner: u64) {
+        *self.notifications.lock().unwrap_or_else(|e| e.into_inner()) = (owner, 2);
+    }
+    pub(crate) fn listener_state(&self, owner: u64, mode: u8) {
+        let mut state = self.notifications.lock().unwrap_or_else(|e| e.into_inner());
+        if state.0 != owner {
+            return;
+        }
+        if state.1 == 3 && mode != 3 {
+            self.changed();
+        }
+        state.1 = mode;
+    }
+    fn notifications(&self) -> &'static str {
+        match self.notifications.lock().unwrap_or_else(|e| e.into_inner()).1 {
+            1 => "stdio",
+            2 => "HTTP notifications connecting",
+            3 => "HTTP notifications connected",
+            4 => "HTTP GET unsupported; response streams only",
+            5 => "HTTP notifications disconnected; reconnect server",
+            _ => "HTTP response streams",
+        }
+    }
+}
+
+struct Snapshot {
+    revision: u64,
+    generation: u64,
+    tools: Arc<Vec<ToolDescriptor>>,
+}
+#[derive(Default)]
+struct State {
+    snapshot: Option<Snapshot>,
+    failed_at: Option<Instant>,
+}
+#[derive(Default)]
+pub(crate) struct Cache {
+    state: Mutex<State>,
+    refresh: tokio::sync::Mutex<()>,
+}
+
+/// Payload-free status; reading it never probes an idle server.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct CatalogStatus {
+    pub configured: bool,
+    pub negotiated: bool,
+    pub enabled: bool,
+    pub generation: u64,
+    pub tools: usize,
+    pub notifications: String,
+    pub stale: bool,
+    pub retry_after_secs: Option<u64>,
+    pub error: Option<String>,
+}
+const COOLDOWN: Duration = Duration::from_secs(5);
+
+struct Refresh<'a> {
+    server: &'a Server,
+    complete: bool,
+    _lease: tokio::sync::MutexGuard<'a, ()>,
+}
+impl Drop for Refresh<'_> {
+    fn drop(&mut self) {
+        if self.complete {
+            return;
+        }
+        let mut state = self.server.catalog_cache.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.snapshot.as_ref().is_none_or(|s| s.revision != self.server.catalog_clock.revision()) {
+            state.failed_at = Some(Instant::now());
+        }
+        // Publish cooldown before releasing the coalescing lease, including
+        // cancellation. A queued reader cannot race into another failed list.
+    }
+}
+
+impl std::fmt::Display for CatalogStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if !self.configured {
+            return write!(f, "tool-list refresh off");
+        }
+        write!(
+            f,
+            "catalog generation {} · {}",
+            self.generation,
+            if self.stale { "stale" } else { "current" }
+        )?;
+        write!(f, " · {}", self.notifications)?;
+        if !self.negotiated {
+            write!(f, " · listChanged not negotiated")?;
+        }
+        if let Some(error) = &self.error {
+            write!(f, " · {error}")?;
+        }
+        if let Some(seconds) = self.retry_after_secs {
+            write!(f, " · retry after {seconds}s")?;
+        }
+        Ok(())
+    }
+}
 
 impl ServerConfig {
     /// Shared with offline configuration checks; never opens a connection.
@@ -36,14 +178,106 @@ impl Write for Budget {
 }
 
 impl Server {
+    fn refresh_enabled(&self) -> bool {
+        self.config.refresh_tools && self.catalog_clock.negotiated()
+    }
+
+    fn can_refresh_catalog(&self) -> bool {
+        self.catalog_clock.negotiated()
+            || !(self.has_resources() && self.info.capabilities.get("tools").is_none())
+    }
+
+    pub fn catalog_status(&self) -> CatalogStatus {
+        let state = self.catalog_cache.state.lock().unwrap_or_else(|e| e.into_inner());
+        let enabled = self.refresh_enabled();
+        let revision = self.catalog_clock.revision();
+        CatalogStatus {
+            configured: self.config.refresh_tools,
+            negotiated: self.catalog_clock.negotiated(),
+            enabled,
+            generation: state.snapshot.as_ref().map_or(0, |s| s.generation),
+            tools: state.snapshot.as_ref().map_or(0, |s| s.tools.len()),
+            notifications: self.catalog_clock.notifications().into(),
+            stale: self.config.refresh_tools
+                && self.can_refresh_catalog()
+                && state.snapshot.as_ref().is_none_or(|s| s.revision != revision || revision == u64::MAX),
+            retry_after_secs: state
+                .failed_at
+                .and_then(|at| COOLDOWN.checked_sub(at.elapsed()))
+                .map(|d| d.as_millis().div_ceil(1000) as u64),
+            error: state
+                .failed_at
+                .map(|_| "tool catalog refresh incomplete; previous snapshot retained".into()),
+        }
+    }
+
+    /// The last complete catalog, never a partly refreshed prefix.
+    pub fn cached_tools(&self) -> Option<(u64, Vec<ToolDescriptor>)> {
+        let state = self.catalog_cache.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.snapshot.as_ref().map(|s| (s.generation, s.tools.as_ref().clone()))
+    }
+
+    /// Coalesce notification refreshes while existing tool calls keep running.
+    /// Failures retain the previous snapshot and expose only a fixed diagnostic.
+    pub async fn refresh_tool_catalog(&self) {
+        if !self.catalog_status().stale {
+            return;
+        }
+        let timeout = Duration::from_secs(self.config.catalog_timeout_secs);
+        let _ = tokio::time::timeout(timeout, async {
+            let lease = self.catalog_cache.refresh.lock().await;
+            let status = self.catalog_status();
+            if !status.stale || status.retry_after_secs.is_some() {
+                return Ok(());
+            }
+            let mut refresh = Refresh { server: self, complete: false, _lease: lease };
+            let (revision, tools) = self.consistent_catalog().await?;
+            self.install_catalog(revision, tools);
+            refresh.complete = true;
+            Ok::<_, McpError>(())
+        })
+        .await;
+    }
+
+    fn install_catalog(&self, revision: u64, tools: Vec<ToolDescriptor>) {
+        let mut state = self.catalog_cache.state.lock().unwrap_or_else(|e| e.into_inner());
+        let generation = state.snapshot.as_ref().map_or(1, |s| s.generation.saturating_add(1));
+        state.snapshot = Some(Snapshot { revision, generation, tools: Arc::new(tools) });
+        state.failed_at = None;
+    }
+
     pub async fn list_tools(&self) -> Result<Vec<ToolDescriptor>> {
         let timeout = Duration::from_secs(self.config.catalog_timeout_secs);
-        tokio::time::timeout(timeout, self.catalog()).await.map_err(|_| McpError::Timeout {
+        tokio::time::timeout(timeout, async {
+            let _refresh = self.catalog_cache.refresh.lock().await;
+            let (revision, tools) = self.consistent_catalog().await?;
+            self.install_catalog(revision, tools.clone());
+            Ok(tools)
+        })
+        .await
+        .map_err(|_| McpError::Timeout {
             server: self.name.clone(),
             method: "tools/list catalog".into(),
             timeout,
             said: String::new(),
         })?
+    }
+
+    async fn consistent_catalog(&self) -> Result<(u64, Vec<ToolDescriptor>)> {
+        for _ in 0..3 {
+            let revision = self.catalog_clock.revision();
+            let tools = self.catalog().await?;
+            if !self.config.refresh_tools
+                || (revision == self.catalog_clock.revision() && revision != u64::MAX)
+            {
+                return Ok((revision, tools));
+            }
+        }
+        Err(McpError::Decode {
+            server: self.name.clone(),
+            method: "tools/list".into(),
+            message: "tool catalog kept changing during discovery; no partial catalog installed".into(),
+        })
     }
 
     async fn catalog(&self) -> Result<Vec<ToolDescriptor>> {
