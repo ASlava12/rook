@@ -166,6 +166,9 @@ pub struct Run {
     pub created_at: u64,
     pub updated_at: u64,
     pub next_attempt_at: Option<u64>,
+    /// An intentional checkpoint, distinct from provider retry backoff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<Waiting>,
     pub autonomous: bool,
     pub max_iterations: u32,
     pub max_tokens: u64,
@@ -181,6 +184,16 @@ pub struct Run {
     pub recent: Vec<Iteration>,
     pub reply: String,
     pub verification: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Waiting {
+    pub until: u64,
+    pub reason: String,
+    pub seconds: u64,
+    pub session: String,
+    pub turn: String,
+    pub call: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

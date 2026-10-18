@@ -84,6 +84,9 @@ pub struct AppState {
     /// said why. It belongs here now, and a window is a view of it — one can
     /// leave, another can join, and only `Cancel` ends it.
     pub live: tokio::sync::RwLock<std::collections::HashMap<u128, std::sync::Arc<crate::chat::Live>>>,
+    /// Coalesced registry revisions let an attached window follow a new owner
+    /// after a deferred stage, without retaining any producer payload here.
+    pub live_changes: tokio::sync::watch::Sender<u64>,
     /// When the turn that has been running longest started, or `None` when
     /// none is.
     ///
@@ -157,6 +160,8 @@ impl AppState {
             };
             live_turns.remove(&oldest);
         }
+        drop(live_turns);
+        self.live_changes.send_modify(|revision| *revision = revision.wrapping_add(1));
     }
 
     pub fn turns_running(&self) -> u32 {
@@ -447,6 +452,7 @@ async fn serve() -> Result<()> {
         started_at: std::time::SystemTime::now(),
         turns: std::sync::atomic::AtomicU32::new(0),
         live: Default::default(),
+        live_changes: tokio::sync::watch::channel(0).0,
         oldest_turn: std::sync::Mutex::new(None),
         stopping: tokio::sync::Notify::new(),
         started: std::time::Instant::now(),

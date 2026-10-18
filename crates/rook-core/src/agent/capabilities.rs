@@ -35,6 +35,7 @@ const OPTIONAL: &[&str] = &[
     "subrecipe_read",
     "inbound_read",
     TOOL,
+    crate::work::managed::deferred::TOOL,
 ];
 
 #[derive(Clone, Copy)]
@@ -159,6 +160,8 @@ impl AgentLoop<'_> {
             "memory is disabled in this session's configuration"
         } else if name == "plan" && !self.rook.config.agent.todo_tool {
             "the optional checklist tool is disabled"
+        } else if name == crate::work::managed::deferred::TOOL {
+            "only an admitted root managed stage can schedule its own continuation"
         } else if ["delegate", "subagents", "verify", "stance", "worktree"].contains(&name)
             && self.depth >= MAX_DEPTH
         {

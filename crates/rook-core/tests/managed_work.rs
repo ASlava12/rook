@@ -910,6 +910,501 @@ fn read() -> rook_llm::Result<Response> {
     Ok(response)
 }
 
+fn defer(args: serde_json::Value) -> rook_llm::Result<Response> {
+    let mut response = answer("").unwrap();
+    response.stop_reason = StopReason::ToolUse;
+    response.message.tool_calls.push(ToolCall {
+        id: "wait".into(),
+        name: "defer_work".into(),
+        arguments: args,
+    });
+    Ok(response)
+}
+
+#[tokio::test]
+async fn old_json_runs_without_wait_or_control_revision_can_admit_a_deferred_stage() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let rook = engine(workspace.path(), store.path());
+    let run = start(&rook);
+    let key = format!("work/managed/{}", run.id);
+    let mut legacy = serde_json::to_value(work::read(&rook, &run.id).unwrap()).unwrap();
+    legacy.as_object_mut().unwrap().remove("control_revision");
+    legacy["run"].as_object_mut().unwrap().remove("waiting");
+    rook.store.kv_set(&key, &serde_json::to_vec(&legacy).unwrap()).unwrap();
+    rook.store.flush().unwrap();
+    drop(rook);
+    let rook = engine(workspace.path(), store.path());
+    assert!(work::read(&rook, &run.id).unwrap().run.waiting.is_none());
+    let script = Script::new(vec![defer(serde_json::json!({"seconds":60,"reason":"я".repeat(256)}))]);
+    let after =
+        work::advance(&rook, &run.id, |session| Ok(AgentLoop::new(&rook, script.clone(), session)), |_| {})
+            .await
+            .unwrap();
+    assert_eq!(
+        after.waiting.unwrap().reason.len(),
+        512,
+        "the admitted Unicode reason must actually reach the byte cap"
+    );
+    assert_eq!(after.iterations, 1);
+}
+
+struct HeldWaitApproval {
+    entered: tokio::sync::Notify,
+}
+#[async_trait]
+impl rook_tools::policy::Approver for HeldWaitApproval {
+    async fn ask(
+        &self,
+        _: &str,
+        _: &rook_tools::policy::Risk,
+        _: Option<&str>,
+    ) -> rook_tools::policy::Approval {
+        self.entered.notify_one();
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn a_pending_wait_claims_external_effects_only_for_a_matching_pre_tool_hook() {
+    use rook_core::hooks::{Event, HookConfig};
+    for (event, matcher, effects) in [
+        (Event::SessionDelete, None, false),
+        (Event::PreTool, Some("read_file"), false),
+        (Event::PreTool, Some("defer_work"), true),
+    ] {
+        let workspace = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let mut rook = engine(workspace.path(), store.path());
+        rook.config.hooks.push(HookConfig {
+            event,
+            matches: matcher.map(str::to_owned),
+            command: "echo ready".into(),
+            ..Default::default()
+        });
+        let run = start(&rook);
+        work::update(&rook, &run.id, |saved| {
+            saved.run.autonomous = false;
+            Ok(())
+        })
+        .unwrap();
+        let approval = Arc::new(HeldWaitApproval { entered: tokio::sync::Notify::new() });
+        let script = Script::new(vec![defer(serde_json::json!({"seconds":60}))]);
+        let mut stage = Box::pin(work::advance(
+            &rook,
+            &run.id,
+            |session| {
+                let mut agent = AgentLoop::new(&rook, script.clone(), session);
+                agent.policy.set_stance(rook_tools::policy::Stance::Assist);
+                agent.approver = approval.clone();
+                Ok(agent)
+            },
+            |_| {},
+        ));
+        tokio::select! {
+            result = &mut stage => panic!("fixture must wait for an actual approval: {result:?}"),
+            entered = tokio::time::timeout(std::time::Duration::from_secs(60),approval.entered.notified()) => entered.unwrap(),
+        }
+        let saved = work::read(&rook, &run.id).unwrap();
+        assert!(saved.run.waiting.is_none());
+        let session = rook_store::parse_session_id(&saved.run.session.unwrap()).unwrap();
+        let receipts = rook.execution(session).unwrap();
+        let pending = receipts.iter().find_map(|receipt| receipt.pending.as_ref()).unwrap();
+        assert_eq!(pending.tool, "defer_work");
+        assert_eq!(pending.may_have_effects, effects);
+        drop(stage);
+        assert_eq!(
+            rook.execution(session).unwrap().iter().any(|receipt| !receipt.unknown.is_empty()),
+            effects,
+            "only the possibly executed hook requires an external-effect inspection"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deferred_stage_releases_ownership_and_reopens_the_same_transcript_without_repeating_writes() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let rook = engine(workspace.path(), store.path());
+    let run = start(&rook);
+    let mut first = defer(serde_json::json!({"seconds":86400,"reason":"external readiness"})).unwrap();
+    first.message.tool_calls.insert(
+        0,
+        ToolCall {
+            id: "before-wait".into(),
+            name: "write_file".into(),
+            arguments: serde_json::json!({"path":"once.txt","content":"one physical write"}),
+        },
+    );
+    first.message.tool_calls.push(ToolCall {
+        id: "after-wait".into(),
+        name: "write_file".into(),
+        arguments: serde_json::json!({"path":"must-not-run.txt","content":"unadmitted tail"}),
+    });
+    let script = Script::new(vec![Ok(first)]);
+    let waiting =
+        work::advance(&rook, &run.id, |session| Ok(AgentLoop::new(&rook, script.clone(), session)), |_| {})
+            .await
+            .unwrap();
+    let until = waiting.waiting.as_ref().unwrap().until;
+    assert!(until >= work::now() + 43200, "the fixture must actually be waiting far in the future");
+    assert_eq!(waiting.waiting.as_ref().unwrap().seconds, 86400);
+    assert_eq!(waiting.next_attempt_at, Some(until));
+    assert_eq!(waiting.iterations, 1);
+    assert_eq!(waiting.tokens, 15, "the wait accounts its physical request once");
+    assert!(!waiting.restart_guard.unfinished_stage);
+    assert_eq!(waiting.restart_guard.consecutive_interruptions, 0);
+    assert_eq!(script.seen.lock().unwrap().len(), 1, "yield cannot ask for a final answer or verification");
+    assert_eq!(std::fs::read_to_string(workspace.path().join("once.txt")).unwrap(), "one physical write");
+    assert!(!workspace.path().join("must-not-run.txt").exists());
+    let saved = work::read(&rook, &run.id).unwrap();
+    assert!(saved.active.as_ref().unwrap().answer.is_none());
+    let session = saved.active.unwrap().session;
+    let session_id = rook_store::parse_session_id(&session).unwrap();
+    let execution = rook.execution(session_id).unwrap();
+    assert!(execution.iter().all(|receipt| receipt.pending.is_none() && receipt.unknown.is_empty()));
+    drop(rook);
+
+    let rook = engine(workspace.path(), store.path());
+    let not_due =
+        work::advance(&rook, &run.id, |_| panic!("a waiting stage cannot construct a provider"), |_| {})
+            .await
+            .unwrap();
+    assert_eq!(not_due.waiting.as_ref().unwrap().until, until);
+    assert_eq!(not_due.tokens, 15);
+    // Advance the saved clock boundary; the native probe covers real elapsed
+    // time and physical daemon restart rather than relying on this fixture.
+    work::update(&rook, &run.id, |saved| {
+        saved.run.waiting.as_mut().unwrap().until = work::now().saturating_sub(1);
+        saved.run.next_attempt_at = Some(work::now().saturating_sub(1));
+        Ok(())
+    })
+    .unwrap();
+    let resumed = Script::new(vec![read(), defer(serde_json::json!({"seconds":60}))]);
+    std::fs::write(workspace.path().join("evidence.txt"), "new observation").unwrap();
+    let after = work::advance(
+        &rook,
+        &run.id,
+        |session| {
+            assert_eq!(session, session_id);
+            Ok(AgentLoop::new(&rook, resumed.clone(), session))
+        },
+        |_| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(after.iterations, 2);
+    assert_eq!(after.tokens, 45);
+    assert_eq!(work::read(&rook, &run.id).unwrap().active.unwrap().session, session);
+    assert_eq!(resumed.seen.lock().unwrap().len(), 2);
+    let events = rook.store.events(session_id, 0, 512).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.record.kind == rook_store::EventKind::ToolCall
+                && event.record.label == "write_file")
+            .count(),
+        1
+    );
+    assert!(
+        events.iter().any(|event| event.record.kind == rook_store::EventKind::ToolResult
+            && event.record.label == "defer_work")
+    );
+    assert!(!workspace.path().join("must-not-run.txt").exists());
+}
+
+#[tokio::test]
+async fn invalid_wait_arguments_do_not_schedule_or_request_approval_and_a_later_valid_wait_can_yield() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let rook = engine(workspace.path(), store.path());
+    let run = start(&rook);
+    let oversized = "x".repeat(513);
+    assert!(oversized.len() > 512);
+    let cases = vec![
+        serde_json::json!({"seconds":0}),
+        serde_json::json!({"seconds":86401}),
+        serde_json::json!({"seconds":1.5}),
+        serde_json::json!({"seconds":"60"}),
+        serde_json::json!({"seconds":60,"reason":oversized}),
+        serde_json::json!({"seconds":60,"reason":"line\nbreak"}),
+        serde_json::json!({"seconds":60,"unknown":true}),
+        serde_json::json!({"seconds":60,"reason":"valid checkpoint"}),
+    ];
+    let mut response = answer("").unwrap();
+    response.stop_reason = StopReason::ToolUse;
+    for (index, args) in cases.into_iter().enumerate() {
+        response.message.tool_calls.push(ToolCall {
+            id: format!("wait-{index}"),
+            name: "defer_work".into(),
+            arguments: args,
+        });
+    }
+    let script = Script::new(vec![Ok(response)]);
+    let result =
+        work::advance(&rook, &run.id, |session| Ok(AgentLoop::new(&rook, script.clone(), session)), |_| {})
+            .await
+            .unwrap();
+    assert_eq!(result.waiting.unwrap().reason, "valid checkpoint");
+    assert_eq!(result.iterations, 1, "rejected requests cannot consume wait checkpoints");
+    assert_eq!(script.seen.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn pause_cancel_and_identified_resume_do_not_let_an_old_control_recreate_or_erase_a_later_wait() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let rook = engine(workspace.path(), store.path());
+    let run = start(&rook);
+    let first = Script::new(vec![defer(serde_json::json!({"seconds":60}))]);
+    work::advance(&rook, &run.id, |session| Ok(AgentLoop::new(&rook, first.clone(), session)), |_| {})
+        .await
+        .unwrap();
+    work::control(&rook, &run.id, Action::Pause).unwrap();
+    work::advance(&rook, &run.id, |_| panic!("pause cannot wake"), |_| {}).await.unwrap();
+    let resume = || control("resume-before-deadline", &run.generation, Action::Resume);
+    let resumed = work::control_identified(&rook, &run.id, resume()).unwrap();
+    assert!(resumed.run.waiting.is_none());
+    assert!(resumed.run.next_attempt_at.is_none());
+    let second = Script::new(vec![defer(serde_json::json!({"seconds":120,"reason":"second wait"}))]);
+    let second_wait =
+        work::advance(&rook, &run.id, |session| Ok(AgentLoop::new(&rook, second.clone(), session)), |_| {})
+            .await
+            .unwrap();
+    let original_until = second_wait.waiting.unwrap().until;
+    let retry = work::control_identified(&rook, &run.id, resume()).unwrap();
+    assert!(retry.already_applied);
+    assert_eq!(retry.run.waiting.unwrap().until, original_until);
+    work::control(&rook, &run.id, Action::Cancel).unwrap();
+    let cancelled = work::advance(&rook, &run.id, |_| panic!("cancel cannot wake"), |_| {}).await.unwrap();
+    assert_eq!(cancelled.status, Status::Cancelled);
+    assert!(cancelled.waiting.is_none());
+    assert!(cancelled.next_attempt_at.is_none());
+}
+
+#[tokio::test]
+async fn a_wait_cannot_exceed_the_goal_lifetime_or_spend_the_last_iteration_on_a_promised_continuation() {
+    for last_iteration in [false, true] {
+        let workspace = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let rook = engine(workspace.path(), store.path());
+        let run = start(&rook);
+        work::update(&rook, &run.id, |saved| {
+            if last_iteration {
+                saved.run.max_iterations = 1;
+            } else {
+                saved.run.max_seconds = 86400;
+            }
+            Ok(())
+        })
+        .unwrap();
+        let script = Script::new(vec![defer(serde_json::json!({"seconds":86400}))]);
+        let result = work::advance(
+            &rook,
+            &run.id,
+            |session| Ok(AgentLoop::new(&rook, script.clone(), session)),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert!(result.waiting.is_none());
+        let session = rook_store::parse_session_id(result.session.as_ref().unwrap()).unwrap();
+        let entries = rook.transcript(session, 0, 128, 4096).unwrap();
+        assert!(entries.iter().any(|entry| entry.body.contains(if last_iteration {
+            "no iteration allowance"
+        } else {
+            "remaining goal lifetime"
+        })));
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_interrupted_turn_end_hook_keeps_the_wait_but_requires_review_of_its_unknown_effects() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let mut rook = engine(workspace.path(), store.path());
+    rook.config.hooks.push(rook_core::hooks::HookConfig {
+        event: rook_core::hooks::Event::TurnEnd,
+        command: "sleep 60".into(),
+        timeout_secs: 60,
+        ..Default::default()
+    });
+    let run = start(&rook);
+    let signal = Arc::new(tokio::sync::Notify::new());
+    let notified = signal.notified();
+    let script = Script::new(vec![defer(serde_json::json!({"seconds":60}))]);
+    let mut stage = Box::pin(work::advance(
+        &rook,
+        &run.id,
+        |session| Ok(AgentLoop::new(&rook, script.clone(), session)),
+        |progress| {
+            if matches!(
+                progress,
+                rook_core::agent::Progress::ToolDone { name: "defer_work", failed: false, .. }
+            ) {
+                signal.notify_one();
+            }
+        },
+    ));
+    tokio::select! {
+        _ = notified => {},
+        result = &mut stage => panic!("turn-end fixture must hold the stage after its checkpoint: {result:?}"),
+        _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => panic!("checkpoint was never committed"),
+    }
+    let saved = work::read(&rook, &run.id).unwrap();
+    assert!(saved.run.waiting.is_some());
+    assert!(!saved.run.restart_guard.unfinished_stage);
+    assert!(
+        saved.active.as_ref().unwrap().answer.is_none(),
+        "the future must stop before stage close records its outcome"
+    );
+    drop(stage);
+    drop(rook);
+    let rook = engine(workspace.path(), store.path());
+    work::advance(&rook, &run.id, |_| panic!("a not-due recovered wait cannot start"), |_| {}).await.unwrap();
+    work::update(&rook, &run.id, |saved| {
+        let at = work::now().saturating_sub(1);
+        saved.run.next_attempt_at = Some(at);
+        saved.run.waiting.as_mut().unwrap().until = at;
+        Ok(())
+    })
+    .unwrap();
+    let script = Script::new(vec![defer(serde_json::json!({"seconds":60,"reason":"after recovery"}))]);
+    let after =
+        work::advance(&rook, &run.id, |session| Ok(AgentLoop::new(&rook, script.clone(), session)), |_| {})
+            .await
+            .unwrap();
+    assert_eq!(after.status, Status::Blocked);
+    assert_eq!(after.iterations, 1);
+    assert_eq!(after.restart_guard.consecutive_interruptions, 0);
+    assert!(!after.restart_guard.unfinished_stage);
+    assert!(script.seen.lock().unwrap().is_empty(), "unknown hooks cannot be replayed or bypassed");
+}
+
+#[tokio::test]
+async fn loss_immediately_after_the_atomic_tool_checkpoint_does_not_lose_the_wait_or_count_as_a_crash() {
+    use futures_util::FutureExt;
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let rook = engine(workspace.path(), store.path());
+    let run = start(&rook);
+    let script = Script::new(vec![defer(serde_json::json!({"seconds":60}))]);
+    let stage = work::advance(
+        &rook,
+        &run.id,
+        |session| Ok(AgentLoop::new(&rook, script.clone(), session)),
+        |progress| {
+            if matches!(
+                progress,
+                rook_core::agent::Progress::ToolDone { name: "defer_work", failed: false, .. }
+            ) {
+                panic!("fixture loses its owner immediately after the atomic checkpoint");
+            }
+        },
+    );
+    assert!(std::panic::AssertUnwindSafe(stage).catch_unwind().await.is_err());
+    let saved = work::read(&rook, &run.id).unwrap();
+    assert!(saved.run.waiting.is_some());
+    assert!(saved.active.unwrap().answer.is_none());
+    assert_eq!(saved.run.iterations, 1);
+    assert!(!saved.run.restart_guard.unfinished_stage);
+    drop(rook);
+    let rook = engine(workspace.path(), store.path());
+    work::advance(&rook, &run.id, |_| panic!("wait is not due"), |_| {}).await.unwrap();
+    work::update(&rook, &run.id, |saved| {
+        let at = work::now().saturating_sub(1);
+        saved.run.next_attempt_at = Some(at);
+        saved.run.waiting.as_mut().unwrap().until = at;
+        Ok(())
+    })
+    .unwrap();
+    let script = Script::new(vec![defer(serde_json::json!({"seconds":60,"reason":"continued after loss"}))]);
+    let after =
+        work::advance(&rook, &run.id, |session| Ok(AgentLoop::new(&rook, script.clone(), session)), |_| {})
+            .await
+            .unwrap();
+    assert_eq!(after.waiting.unwrap().reason, "continued after loss");
+    assert_eq!(after.iterations, 2);
+    assert_eq!(after.restart_guard.consecutive_interruptions, 0);
+    assert_eq!(script.seen.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_late_model_response_cannot_recreate_a_wait_after_pause_and_resume_changed_its_stage() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let rook = engine(workspace.path(), store.path());
+    let run = start(&rook);
+    let provider = held(vec![defer(serde_json::json!({"seconds":60}))]);
+    let mut stage = Box::pin(work::advance(
+        &rook,
+        &run.id,
+        |session| Ok(AgentLoop::new(&rook, provider.clone(), session)),
+        |_| {},
+    ));
+    tokio::select! {
+        result = &mut stage => panic!("request must be held before control changes: {result:?}"),
+        entered = tokio::time::timeout(std::time::Duration::from_secs(60), provider.entered.notified()) => entered.unwrap(),
+    }
+    work::control(&rook, &run.id, Action::Pause).unwrap();
+    work::control(&rook, &run.id, Action::Resume).unwrap();
+    provider.release.notify_one();
+    let after = stage.await.unwrap();
+    assert!(after.waiting.is_none(), "an earlier physical request cannot replace explicit resume");
+    let session = rook_store::parse_session_id(after.session.as_ref().unwrap()).unwrap();
+    assert!(
+        rook.transcript(session, 0, 128, 4096)
+            .unwrap()
+            .iter()
+            .any(|entry| entry.body.contains("old wait was not committed"))
+    );
+    work::control(&rook, &run.id, Action::Resume).unwrap();
+    let current = Script::new(vec![defer(serde_json::json!({"seconds":60,"reason":"fresh stage"}))]);
+    let resumed =
+        work::advance(&rook, &run.id, |session| Ok(AgentLoop::new(&rook, current.clone(), session)), |_| {})
+            .await
+            .unwrap();
+    assert_eq!(resumed.waiting.unwrap().reason, "fresh stage");
+}
+
+#[tokio::test]
+async fn a_wait_is_not_a_final_answer_and_does_not_validate_repair_or_write_its_output_contract() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let rook = engine(workspace.path(), store.path());
+    let run = start(&rook);
+    let script = Script::new(vec![defer(serde_json::json!({"seconds":60}))]);
+    let after = work::advance(&rook, &run.id, |session| {
+        let mut agent = AgentLoop::new(&rook, script.clone(), session);
+        agent.options.output_schema = Some(serde_json::json!({"type":"object","required":["ok"],"properties":{"ok":{"type":"boolean"}},"additionalProperties":false}));
+        agent.options.output = Some("final.json".into());
+        Ok(agent)
+    }, |_| {}).await.unwrap();
+    assert_eq!(
+        after.status,
+        Status::Queued,
+        "a deferred boundary cannot become an output/provider failure: {after:?}"
+    );
+    assert_eq!(after.consecutive_failures, 0);
+    assert_eq!(after.next_attempt_at, Some(after.waiting.unwrap().until));
+    let session = rook_store::parse_session_id(after.session.as_ref().unwrap()).unwrap();
+    assert_eq!(rook.completed_turn(session).unwrap().unwrap().stopped, "work_deferred");
+    assert!(
+        !rook
+            .store
+            .events(session, 0, 128)
+            .unwrap()
+            .iter()
+            .any(|event| event.record.kind == rook_store::EventKind::Error && event.record.label == "output")
+    );
+    assert!(
+        !workspace.path().join("final.json").exists(),
+        "only an actual final answer may produce the requested artifact"
+    );
+    assert_eq!(script.seen.lock().unwrap().len(), 1);
+}
+
 #[tokio::test]
 async fn tool_cycle_receipts_survive_worker_iterations_and_reset_for_accepted_steering_and_new_generations() {
     let workspace = tempfile::tempdir().unwrap();

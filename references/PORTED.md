@@ -9,6 +9,7 @@ Add a row when you implement something after reading a reference. Add it to
 
 | what | from | read at | where it landed |
 |---|---|---|---|
+| Durable deferred continuation of a managed stage | Pi sleeping checkpoint and due-pass scheduling; independently adapted to Rook execution receipts and stage ownership | `f75b324`, `ec1be23`, `00bf719`, frozen `482c1381a00d` | Atomic result/execution/wait transaction, same-session scheduling and CLI/API/shared chat visibility; [behavior and checks](../docs/deferred-work.md). Final integrated/platform gates pending. |
 | Session-specific tool availability and absence reasons | OpenClaw capability inspection, independently adapted to the installed request catalog | `f427a05291`, `6913563f69d9` snapshot | `agent/capabilities.rs`, exact MCP direct/deferred names and source-bound pages; [contracts](../docs/reference-followup-20261018.md) |
 | Committed-compaction and explicit-deletion observers | Hermes lifecycle hook commit seams and callback isolation | `35948f22a`, `ed9fb3cf5`, `a31975222`, `ee3ce9a4d`, `627ce0355` | `hooks.rs`, compaction commit, atomic deletion claim, CLI/daemon/browser deletion; [contracts](../docs/reference-followup-20261018.md) |
 | Bounded skill discovery and resource enumeration | OpenCode bounded discovery; Rook retains its flat/versioned layouts | `49e9786b`, `da9d436c36e0` snapshot | `rook-skills/src/index.rs`, prioritized admission and explicit limit errors |

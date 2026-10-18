@@ -2274,6 +2274,7 @@ mod tests {
             turns: std::sync::atomic::AtomicU32::new(0),
             oldest_turn: std::sync::Mutex::new(None),
             live: Default::default(),
+            live_changes: tokio::sync::watch::channel(0).0,
             stopping: tokio::sync::Notify::new(),
         });
         Fixture { _home: home, _workspace: workspace, router: router(state.clone()), state, session }

@@ -2,6 +2,8 @@
 //! so a user's correction can be saved while the model or a tool is busy.
 use super::receipts::WRITING;
 
+pub(crate) mod deferred;
+
 use rook_proto::work::{
     Action, ControlOutcome, EditInstruction, IdentifiedControl, Run, RunIdentity, Start, Status, Steer,
     Steering, WithdrawInstruction,
@@ -88,6 +90,8 @@ pub struct Saved {
     pub active: Option<Active>,
     pub failed_since: Option<u64>,
     pub idle: u32,
+    #[serde(default)]
+    pub(crate) control_revision: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub controls: Vec<ControlReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -297,6 +301,7 @@ fn start_inner(
         created_at: at,
         updated_at: at,
         next_attempt_at: None,
+        waiting: None,
         autonomous: request.autonomous,
         max_iterations: request.max_iterations.unwrap_or(config.max_iterations),
         max_tokens: request.max_tokens.unwrap_or(config.max_tokens),
@@ -320,6 +325,7 @@ fn start_inner(
         active: None,
         failed_since: None,
         idle: 0,
+        control_revision: 0,
         controls: Vec::new(),
         inbound: inbound.as_ref().map(|a| a.source.clone()),
     })?;
@@ -557,12 +563,18 @@ fn apply_control(rook: &Rook, saved: &mut Saved, action: Action) -> Result<()> {
     if saved.run.status.terminal() {
         return Err(bad("this run has ended"));
     }
+    saved.control_revision = saved
+        .control_revision
+        .checked_add(1)
+        .ok_or_else(|| bad("control revision exhausted; preserve this run and start a new goal"))?;
     match action {
         Action::Pause => {
             saved.run.status = Status::Paused;
             saved.run.reason = "paused by user; an active operation finishes before stopping".into();
         }
         Action::Cancel => {
+            saved.run.waiting = None;
+            saved.run.next_attempt_at = None;
             saved.run.status = Status::Cancelled;
             saved.run.reason = "cancelled by user; an active operation finishes before stopping".into();
             retire_cancelled(rook, saved)?;
@@ -576,6 +588,7 @@ fn apply_control(rook: &Rook, saved: &mut Saved, action: Action) -> Result<()> {
             saved.run.status = Status::Queued;
             saved.run.reason = "resumed by user".into();
             saved.run.next_attempt_at = None;
+            saved.run.waiting = None;
             saved.run.consecutive_failures = 0;
             saved.failed_since = None;
             saved.idle = 0;
@@ -673,7 +686,8 @@ pub fn accept(
 }
 
 pub fn should_stop(rook: &Rook, identity: &RunIdentity) -> Result<bool> {
-    Ok(read_identity(rook, identity)?.is_none_or(|saved| !saved.run.status.runnable()))
+    Ok(read_identity(rook, identity)?
+        .is_none_or(|saved| !saved.run.status.runnable() || saved.run.waiting.is_some()))
 }
 
 fn clipped(text: &str, max: usize) -> String {
@@ -820,9 +834,15 @@ pub async fn advance<'a>(
             saved.run.status = Status::Limited;
             saved.run.reason = reason.into();
             saved.run.next_attempt_at = None;
+            saved.run.waiting = None;
             saved.run.updated_at = now();
             save(rook, &saved)?;
             return Ok(saved.run);
+        }
+        // A committed wait already closed its operation and stage marker in
+        // one transaction. Its due admission resumes the retained transcript.
+        if saved.run.waiting.take().is_some() {
+            saved.run.next_attempt_at = None;
         }
         let guard = &mut saved.run.restart_guard;
         guard.limit = guard.limit.clamp(1, 100);
@@ -943,7 +963,7 @@ async fn advance_stage<'a>(
             .iter()
             .any(|e| e.session == active.session && e.start_seq >= active.start_seq)
         && let Some(answer) = rook.completed_turn(session)?
-        && !matches!(answer.stopped.as_str(), "completion_unchecked" | "work_paused")
+        && !matches!(answer.stopped.as_str(), "completion_unchecked" | "work_paused" | "work_deferred")
     {
         update(rook, id, |s| {
             s.active.as_mut().ok_or_else(|| bad("active work session disappeared"))?.answer = Some(answer);
@@ -959,6 +979,7 @@ async fn advance_stage<'a>(
         }
     };
     agent.managed_work = Some(saved.run.identity());
+    agent.managed_control_revision = Some(saved.control_revision);
     agent.managed_iteration = true;
     if saved.inbound.is_some() {
         let requested = if saved.run.autonomous {
@@ -1014,6 +1035,13 @@ async fn advance_stage<'a>(
             }
             Err(error) => {
                 account(rook, id, session)?;
+                let current = read(rook, id)?;
+                if current.run.waiting.is_some() {
+                    // Closing can fail after the wait transaction succeeded.
+                    // Its receipt remains authoritative; provider backoff must
+                    // not replace the committed deadline or lose its context.
+                    return Ok(current.run);
+                }
                 failed(rook, id, &error.to_string())?;
                 return Ok(read(rook, id)?.run);
             }
@@ -1034,6 +1062,15 @@ async fn advance_stage<'a>(
                 }
             } else {
                 s.active = None;
+            }
+            Ok(s.run.clone())
+        });
+    }
+    if outcome.stopped == "work_deferred" {
+        return update(rook, id, |s| {
+            s.run.reply = clipped(&outcome.reply, 16384);
+            if let Some(active) = &mut s.active {
+                active.answer = None;
             }
             Ok(s.run.clone())
         });

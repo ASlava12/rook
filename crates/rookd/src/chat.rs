@@ -147,8 +147,22 @@ async fn serve(
     let mut watching: Option<Watching> = None;
     let mut display_session = None;
     let mut extension_changes = engine.read().await.extension_ui_changes();
+    let mut live_changes = state.live_changes.subscribe();
     loop {
         let incoming = tokio::select! {
+            changed = live_changes.changed() => {
+                if changed.is_err() { break; }
+                if let Some(session) = watching.as_ref().map(|view| view.session).or(display_session) {
+                    let current = state.live.read().await.get(&session).cloned();
+                    if let Some(live) = current
+                        && !watching.as_ref().and_then(|view| view.live.upgrade())
+                            .is_some_and(|previous| Arc::ptr_eq(&previous, &live))
+                    {
+                        watching = Some(carry_view(&live, session, outbound.clone(), watching, live_snapshots, false));
+                    }
+                }
+                continue;
+            }
             changed = extension_changes.changed() => {
                 if changed.is_err() { break; }
                 // Cancellation publishes its report while the task is still
@@ -816,6 +830,7 @@ async fn serve(
                     }
                     match result {
                         Ok(run) => {
+                            display_session = Some(id);
                             let joined = crate::work::join_conversation(&state, &run).await;
                             if goal_claim_key.is_some()
                                 && let Some(request) = submission_id.as_deref()
@@ -823,7 +838,7 @@ async fn serve(
                                 acknowledge_goal_prompt(&outbound, id, request).await;
                             }
                             match joined {
-                                Ok(live) => {
+                                Ok(Some(live)) => {
                                     if promotion.is_some() {
                                         let receipt = if let Some(target) = submission_target.as_deref() {
                                             scoped_correction(
@@ -870,6 +885,49 @@ async fn serve(
                                             !starting,
                                         ));
                                     }
+                                }
+                                Ok(None) => {
+                                    if watching.as_ref().is_some_and(|view| view.session != id)
+                                        && let Some(previous) = watching.take()
+                                    {
+                                        previous.carrying.abort();
+                                    }
+                                    let _ = outbound.send(goal_event(Some(&run))).await;
+                                    let text = if let Some(waiting) = &run.waiting {
+                                        format!(
+                                            "Checkpoint saved; waiting until unix {}. {}",
+                                            waiting.until, waiting.reason
+                                        )
+                                    } else {
+                                        "Goal queued; continuation starts when executor capacity is available.".into()
+                                    };
+                                    let _ = outbound
+                                        .send(ChatEvent::Agent {
+                                            admission: None,
+                                            extension_ui: None,
+                                            receipt: None,
+                                            text,
+                                        })
+                                        .await;
+                                    let _ = outbound
+                                        .send(ChatEvent::Done {
+                                            reply: None,
+                                            steps: 0,
+                                            input_tokens: 0,
+                                            output_tokens: 0,
+                                            delegated: Vec::new(),
+                                            compactions: 0,
+                                            decisions: Vec::new(),
+                                            open_questions: Vec::new(),
+                                            files_changed: Vec::new(),
+                                            stopped: if run.waiting.is_some() {
+                                                "work_deferred"
+                                            } else {
+                                                "work_queued"
+                                            }
+                                            .into(),
+                                        })
+                                        .await;
                                 }
                                 Err(error) => report_window(&outbound, error).await,
                             }
@@ -1913,6 +1971,10 @@ async fn goal_turn(
             continue;
         }
         if let Some(at) = run.next_attempt_at.filter(|at| *at > managed::now()) {
+            if run.waiting.is_some() {
+                ended_goal(&rook, outbound, session, run, connection, shared).await;
+                return;
+            }
             if announced_retry != Some(at) {
                 let _ = outbound.send(ChatEvent::Agent {
                     admission: None,
@@ -1961,6 +2023,10 @@ async fn goal_turn(
         )
         .await;
         match result {
+            Ok(run) if run.status.runnable() && run.waiting.is_some() => {
+                ended_goal(&rook, outbound, session, run, connection, shared).await;
+                return;
+            }
             Ok(run) if !run.status.runnable() => {
                 if run.status.terminal() {
                     let _ = outbound.send(goal_event(Some(&run)));
@@ -2073,12 +2139,25 @@ async fn ended_goal(
             }
         }
     }
-    let last = rook.completed_turn(session).ok().flatten();
+    let last = rook
+        .completed_turn(session)
+        .ok()
+        .flatten()
+        .filter(|outcome| run.waiting.is_none() || outcome.stopped == "work_deferred");
     let stopped = match run.status {
         Status::Completed => "end_turn",
         Status::Paused | Status::Cancelled => "work_paused",
+        _ if run.waiting.is_some() && run.status.runnable() => "work_deferred",
         _ => "blocked",
     };
+    if let Some(waiting) = &run.waiting
+        && run.status.runnable()
+    {
+        let _ = outbound.send(ChatEvent::Agent {
+            admission: None, extension_ui: None, receipt: None,
+            text: format!("Saved checkpoint; waiting until unix {}. {} The daemon resumes this transcript when due; pause or cancel prevents automatic continuation, /continue resumes early.", waiting.until, waiting.reason),
+        });
+    }
     let _ = outbound.send(ChatEvent::Done {
         reply: Some(if run.reply.is_empty() { run.reason.clone() } else { run.reply }),
         steps: last.as_ref().map_or(0, |o| o.steps),

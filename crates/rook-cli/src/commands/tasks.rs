@@ -194,7 +194,9 @@ fn describe(value: &serde_json::Value) -> String {
             "{} · {:?} · {} iterations · {} tokens\n{}\n{}\nworkspace: {}",
             run.id, run.status, run.iterations, run.tokens, run.goal, run.reason, run.workspace
         );
-        if let Some(at) = run.next_attempt_at {
+        if let Some(waiting) = &run.waiting {
+            text.push_str(&format!("\nsaved wait: unix {} · {}", waiting.until, waiting.reason));
+        } else if let Some(at) = run.next_attempt_at {
             text.push_str(&format!("\nnext retry: unix {at}"));
         }
         if run.restart_guard.consecutive_interruptions > 0 {

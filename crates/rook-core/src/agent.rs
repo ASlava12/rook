@@ -31,6 +31,7 @@ mod checks;
 pub(crate) use checks::verdict_in as evidence_verdict;
 mod compaction;
 mod composite;
+mod defer;
 mod delegation;
 mod delegation_progress;
 mod effects;
@@ -244,6 +245,8 @@ pub fn why_it_stopped(stopped: &str) -> Option<String> {
         "completion_unchecked" => {
             "could not determine whether the model finished; `/continue` resumes the task".into()
         }
+        "work_deferred" => "the managed checkpoint is saved; continuation is scheduled and remains subject to the goal budget and user controls".into(),
+        "work_queued" => "the goal is queued until executor capacity is available".into(),
         "recovery" => "an interrupted operation has an unknown result; inspect `/recovery` and record what you checked before changes resume".into(),
         "blocked" => "the model reported a refusal or blocker; the task remains incomplete".into(),
         other => format!("the turn ended as {other:?} rather than finishing"),
@@ -323,6 +326,7 @@ const CHANGES_THINGS: &[&str] = &[
     VERIFY,
     crate::worktrees::TOOL,
     crate::review::TOOL,
+    crate::work::managed::deferred::TOOL,
 ];
 
 /// What a turn reports as it goes.
@@ -650,6 +654,7 @@ pub struct AgentLoop<'a> {
     pub interjections: std::sync::Arc<Interjections>,
     /// A durable run supplies corrections at the same safe boundaries as chat.
     pub managed_work: Option<rook_proto::work::RunIdentity>,
+    pub(crate) managed_control_revision: Option<u64>,
     pub depth: u32,
     pub max_steps: u32,
     /// What is left of the turn's allowance, in tokens, its sub-agents
@@ -814,6 +819,7 @@ impl<'a> AgentLoop<'a> {
             approver: std::sync::Arc::new(Unattended),
             interjections: Default::default(),
             managed_work: None,
+            managed_control_revision: None,
             depth: 0,
             max_steps: rook.config.agent.max_steps,
             max_turn_tokens: rook.config.agent.max_turn_tokens,
@@ -1078,7 +1084,7 @@ impl<'a> AgentLoop<'a> {
             }
         };
         let unpriced = self.composite_cost_unknown.load(std::sync::atomic::Ordering::Acquire);
-        let finalised = if unpriced {
+        let finalised = if unpriced || outcome.stopped == "work_deferred" {
             Ok(())
         } else {
             self.apply_output(&contract, &mut outcome, &mut on_progress).await
@@ -1974,6 +1980,10 @@ impl<'a> AgentLoop<'a> {
                     result_seq,
                 );
                 on_progress(Progress::ToolDone { name: &call.name, failed, result_seq });
+                if call.name == crate::work::managed::deferred::TOOL && !failed {
+                    outcome.stopped = "work_deferred".into();
+                    break 'turn;
+                }
             }
 
             // Told three times that it is asking the same thing again, and
@@ -2014,7 +2024,10 @@ impl<'a> AgentLoop<'a> {
         // The two ceilings name themselves on the way out; the other two are
         // told apart here. All four leave through the same door below, which is
         // what asks the model for what it found rather than ending on a limit.
-        if !matches!(outcome.stopped.as_str(), "budget" | "time" | "work_paused" | "subrecipe_cost_unknown") {
+        if !matches!(
+            outcome.stopped.as_str(),
+            "budget" | "time" | "work_paused" | "work_deferred" | "subrecipe_cost_unknown"
+        ) {
             outcome.stopped = if stuck { "looping" } else { "max_steps" }.into();
         }
         // The limit is the model's, not the children's: what they were still
@@ -2029,7 +2042,7 @@ impl<'a> AgentLoop<'a> {
         // answer, first let me check" — which is an announcement and not an
         // answer, and it is what the person would otherwise be handed.
         if !self.composite_cost_unknown.load(std::sync::atomic::Ordering::Acquire)
-            && outcome.stopped != "work_paused"
+            && !matches!(outcome.stopped.as_str(), "work_paused" | "work_deferred")
             && (stuck || outcome.reply.trim().is_empty())
             && !outcome.tools_called.is_empty()
         {

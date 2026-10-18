@@ -759,6 +759,45 @@ impl Journal {
         self.complete_with_companion(result, jobs, new_job, phase, None)
     }
 
+    /// A deferred stage has no external tool effect: its result, closed
+    /// operation and managed checkpoint must become durable together.
+    pub(crate) fn complete_checkpoint(&self, result: &str, checkpoint: &str, bytes: &[u8]) -> Result<u64> {
+        let _active = ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = load(&self.store, self.session)?
+            .ok_or_else(|| CoreError::Other("execution receipt disappeared".into()))?;
+        if state.turn != self.turn
+            || state.status != "running"
+            || state
+                .pending
+                .as_ref()
+                .is_none_or(|operation| operation.tool != crate::work::managed::deferred::TOOL)
+        {
+            return Err(CoreError::Other("execution ownership changed; wait was not committed".into()));
+        }
+        if !state.unknown.is_empty() {
+            return Err(CoreError::Other(
+                "an operation has an unknown result; inspect /recovery before deferring this goal".into(),
+            ));
+        }
+        state.pending = None;
+        state.completed_operations = state.completed_operations.saturating_add(1);
+        state.updated_at = rook_store::now_unix();
+        let event = NewEvent::new(EventKind::ToolResult, Kind::Message, result.as_bytes())
+            .label(crate::work::managed::deferred::TOOL);
+        let [seq] = self.store.append_events_with_receipt(
+            self.session,
+            [event],
+            &key(self.session),
+            &[(checkpoint, bytes)],
+            |[seq]| {
+                state.last_result_seq = Some(seq);
+                crate::persistence::encode(&state)
+                    .map_err(|error| rook_store::StoreError::Encoding(error.to_string()))
+            },
+        )?;
+        Ok(seq)
+    }
+
     pub(crate) fn complete_with_companion(
         &self,
         result: &str,

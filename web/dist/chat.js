@@ -410,6 +410,10 @@ export function connect() {
             ? 'stopped at the step limit — raise [agent] max_steps or narrow the task'
             : e.stopped === 'subrecipe_cost_unknown'
               ? 'stopped: a delegated task has unverified model usage or cost; inspect its saved session before continuing'
+              : e.stopped === 'work_deferred'
+                ? 'Checkpoint saved; waiting for automatic continuation. Pause or cancel prevents it; /continue resumes early.'
+              : e.stopped === 'work_queued'
+                ? 'Goal queued; waiting for an available executor.'
               : `the turn ended as "${e.stopped}" rather than finishing`);
         }
         // What it wrote, before what it cost: a turn that says it did the work

@@ -118,6 +118,10 @@ pub struct Hooks {
     hooks: Vec<(HookConfig, Option<Rule>, usize)>,
 }
 
+fn matches_hook(config: &HookConfig, rule: Option<&Rule>, event: Event, subject: &str) -> bool {
+    config.event == event && rule.is_none_or(|rule| rule.matches(subject))
+}
+
 impl Hooks {
     /// Unusable match patterns are reported rather than dropped: a hook that
     /// silently never fires is worse than one that fails loudly.
@@ -162,6 +166,10 @@ impl Hooks {
         self.hooks.iter().any(|(config, _, _)| config.event == event)
     }
 
+    pub(crate) fn has_matching(&self, event: Event, subject: &str) -> bool {
+        self.hooks.iter().any(|(config, rule, _)| matches_hook(config, rule.as_ref(), event, subject))
+    }
+
     pub(crate) async fn run_with_ui(
         &self,
         event: Event,
@@ -173,12 +181,7 @@ impl Hooks {
     ) -> Outcome {
         let mut outcome = Outcome::default();
         for (config, rule, ordinal) in &self.hooks {
-            if config.event != event {
-                continue;
-            }
-            if let Some(rule) = rule
-                && !rule.matches(subject)
-            {
+            if !matches_hook(config, rule.as_ref(), event, subject) {
                 continue;
             }
 

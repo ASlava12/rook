@@ -48,22 +48,32 @@ impl Tasks {
 
 /// Starting and recovery use the same lock: a scheduler tick must not launch a
 /// second writer while the socket that submitted the goal is attaching to it.
-pub async fn join_conversation(state: &Arc<AppState>, run: &Run) -> Result<Arc<crate::chat::Live>, String> {
-    let _tasks = state.work.0.lock().await;
+pub async fn join_conversation(
+    state: &Arc<AppState>,
+    run: &Run,
+) -> Result<Option<Arc<crate::chat::Live>>, String> {
+    let tasks = state.work.0.lock().await;
     if !state.drain.allows_run(&run.id) {
         return Err("daemon is draining; this goal was not running at admission closure".into());
     }
     let session = rook_store::parse_session_id(&run.id).ok_or("invalid conversation")?;
     if let Some(live) = state.live.read().await.get(&session).filter(|l| l.running()).cloned() {
-        return Ok(live);
+        return Ok(Some(live));
     }
     let current = managed::read(&*state.rook.read().await, &run.id).map_err(|e| e.to_string())?.run;
     if !current.status.runnable() {
         return Err(current.reason);
     }
+    let legacy = tasks.values().filter(|run| !run.is_finished()).count();
+    let live = state.live.read().await.values().filter(|live| live.running()).count();
+    if current.next_attempt_at.is_some_and(|at| at > managed::now())
+        || legacy.saturating_add(live) >= state.rook.read().await.config.work.max_parallel_runs
+    {
+        return Ok(None);
+    }
     let live = crate::chat::resume_goal(state, &current).await?;
     state.remember(session, live.clone()).await;
-    Ok(live)
+    Ok(Some(live))
 }
 
 type Failure = (StatusCode, Json<rook_proto::ApiError>);
@@ -315,10 +325,12 @@ pub async fn supervise(state: Arc<AppState>) {
         // and switching. A disconnected window is only a missing observer.
         let conversations = managed::list(&*state.rook.read().await);
         if let Ok(runs) = conversations {
-            for run in runs
-                .into_iter()
-                .filter(|r| r.conversation.is_some() && r.status.runnable() && state.drain.allows_run(&r.id))
-            {
+            for run in runs.into_iter().filter(|r| {
+                r.conversation.is_some()
+                    && r.status.runnable()
+                    && r.next_attempt_at.is_none_or(|at| at <= managed::now())
+                    && state.drain.allows_run(&r.id)
+            }) {
                 if let Err(error) = join_conversation(&state, &run).await {
                     block(&state, &run.id, &error).await;
                 }
@@ -376,7 +388,11 @@ pub async fn supervise(state: Arc<AppState>) {
             if run.conversation.is_some() {
                 continue;
             }
-            if tasks.len() >= cap {
+            if tasks
+                .len()
+                .saturating_add(state.live.read().await.values().filter(|live| live.running()).count())
+                >= cap
+            {
                 continue;
             }
             if tasks.contains_key(&run.id)

@@ -73,6 +73,16 @@ impl<'a> AgentLoop<'a> {
                 "query":{"type":"string","maxLength":129}
             }}),
         });
+        if self.managed_iteration && self.depth == 0 && !checking {
+            push(ToolSpec {
+                name: crate::work::managed::deferred::TOOL.into(),
+                description: "Save this managed stage and continue its transcript later. Ends the turn; collect running children first. Existing goal budgets and user controls remain in force.".into(),
+                parameters: json!({"type":"object","properties":{
+                    "seconds":{"type":"integer","minimum":1,"maximum":86400},
+                    "reason":{"type":"string","maxLength":512}
+                },"required":["seconds"],"additionalProperties":false}),
+            });
+        }
         if !checking && self.asker.as_ref().is_some_and(|asker| asker.supports_private_input()) {
             push(ToolSpec {
                 name:super::REQUEST_SECRET.into(),

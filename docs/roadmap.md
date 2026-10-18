@@ -1821,14 +1821,29 @@ recorded so the design question survives the session that raised it.
 
 ## Next
 
-**Post-0.17 reference follow-up, 2026-10-18.** Five capabilities are implemented
-and verified locally: session-specific tool availability,
+**After 0.18.0 reference cycle, 2026-10-18.** Four reference pointers advance
+after reviewing 18 incoming commits. The next accepted capability is durable
+deferred continuation of managed work: a model-requested wait releases its
+executor, survives restart and resumes the same transcript within the admitted
+budgets and generation-bound controls. Engine, scheduler and CLI/API/TUI/browser
+behavior form one delivery. They are implemented with targeted, policy/concurrency
+audit and native checks; the complete local gate passes. Exact-revision platform
+CI is required before tagging 0.19.0. The
+[frozen review and acceptance contract](research/reference-review-20261018-after018.md)
+records source evidence, existing equivalents and separately scoped directions.
+The [deferred-work guide](deferred-work.md) describes the wired behavior and native
+capacity/restart/conversation checks.
+
+**Post-0.17 reference follow-up, 2026-10-18.** Five capabilities are published in
+[0.18.0](https://github.com/ASlava12/rook/releases/tag/v0.18.0): session-specific tool availability,
 post-compaction observers, explicit session-deletion observers, bounded skill
 discovery/resources and persistent interrupted-stage recovery limits. Seven
 reference pointers advance; three already match their fetched tips. See the
 [frozen source review](research/reference-review-20261018-followup.md) and
-[delivery contract](reference-followup-20261018.md). They form the 0.18.0 delivery
-batch; exact-commit platform CI and published-archive checks gate publication.
+[delivery contract](reference-followup-20261018.md). All eight required platform
+CI jobs and all six release jobs passed on the exact source revision. Public
+archive checksums, all bundled skills and the published host native probe passed;
+owned build/tmp caches were removed after verification.
 
 **Reference delivery cycle, 2026-10-18 (0.17.0).** The seven R17 runtime items,
 live MCP catalog refresh, Gemini malformed-output recovery and a session-family

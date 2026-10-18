@@ -135,12 +135,19 @@ impl<'a> AgentLoop<'a> {
             let seq = self.rook.log(self.session, EventKind::ToolResult, &call.name, &text)?;
             return Ok(Recorded { text, failed: true, seq: Some(seq), job: None });
         }
-        let effects = !self.hooks.is_empty()
-            || self
-                .tools
-                .get(&call.name)
-                .map(|tool| tool.risk(&call.arguments) != rook_tools::policy::Risk::ReadOnly)
-                .unwrap_or_else(|| CHANGES_THINGS.contains(&call.name.as_str()));
+        let effects = if call.name == crate::work::managed::deferred::TOOL {
+            // The wait itself is one atomic metadata transaction. Only a hook
+            // that can actually run before it introduces an external effect;
+            // observer and closing hooks have separate ownership receipts.
+            self.hooks.has_matching(hooks::Event::PreTool, &call.name)
+        } else {
+            !self.hooks.is_empty()
+                || self
+                    .tools
+                    .get(&call.name)
+                    .map(|tool| tool.risk(&call.arguments) != rook_tools::policy::Risk::ReadOnly)
+                    .unwrap_or_else(|| CHANGES_THINGS.contains(&call.name.as_str()))
+        };
         if effects && let Some(reason) = self.rook.recovery_block(self.session)? {
             self.rook.log(
                 self.session,
@@ -170,6 +177,9 @@ impl<'a> AgentLoop<'a> {
             background,
             self.tool_ctx.jobs.as_deref(),
         )?;
+        if call.name == crate::work::managed::deferred::TOOL {
+            return self.defer_work(call, outcome, nursery.busy(), &journal).await;
+        }
         self.tool_execution_uncertain.store(false, std::sync::atomic::Ordering::Release);
         *self.launched_job.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.tool_cycle_outcome.lock().unwrap_or_else(|e| e.into_inner()) = None;
