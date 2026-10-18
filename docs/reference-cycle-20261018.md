@@ -166,3 +166,22 @@ integration run above is for the implementation commit; this narrow equivalent
 atomic correction has targeted checks rather than another unrelated PTY rerun.
 The full exact-revision platform gates and publication remain the linked GitHub
 records. The local default toolchain is not changed by this verification.
+
+
+## CI cache completion budget
+
+On final runtime commit `4e9a46a`, Linux, macOS, FreeBSD, MSRV and all cross-checks
+passed. Windows also completed `cargo xtask ci` successfully (`ci: ok`, 2581.9s)
+and parsed `install.ps1`. Its job reached the 45-minute job deadline afterward,
+while the cache action compressed the build cache; no failed test was reported.
+The workflow now gives Windows 60 minutes for setup, checks and post-job cache
+work, with an explicit unchanged 45-minute ceiling on `cargo xtask ci` itself.
+Other platform job limits remain 45 minutes. This correction changes CI metadata,
+not runtime/test sources. The subsequent workflow verifies successful completion.
+
+The non-gating `ollama/qwen2.5-coder:3b` smoke on `4e9a46a` passed six scenarios
+and failed two: it chose `read_file` instead of the explicitly requested command,
+and emitted a pseudo tool call as assistant text instead of recalling a memory.
+Both transcripts were read. They show model choices rather than a newly observed
+execution failure; no text-to-tool execution or automatic replay was added to
+turn them into passes. This is not evidence of a model-quality improvement.
