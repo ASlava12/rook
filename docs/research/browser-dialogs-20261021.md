@@ -104,3 +104,11 @@ native regression failed before this fix and passed afterward with all 12
 selected tool-cycle regressions. A focused fixture checks that changed hidden
 middle bytes count as different results, while new filenames alone do not;
 it passed, as did the renewed workspace/all-target clippy check.
+
+On `9b07098`, the complete local workspace test preflight passed, including all
+281 ordinary-agent tests. All eight required platform jobs passed in
+[run 39600126761](https://github.com/ASlava12/rook/actions/runs/39600126761).
+The optional model smoke remains separate evidence. Later scheduler guidance
+and retry-observation changes are described with their own validation scope in
+[managed retry guidance](../managed-retry-guidance.md); final candidate platform
+and artifact checks are still required for the combined release.

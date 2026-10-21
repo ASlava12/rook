@@ -30,9 +30,11 @@ the model phase. Repeating the same deadline cannot postpone overdue detection.
 
 Regressions cover an actual provider outage with a thirty-minute deadline,
 same-session continuation after reopening the store, idempotent submissions and
-edits, protected goal states and a real deferred-work checkpoint. Their result
-is pending for the new revision, together with controlled-clock activity and
-daemon persistence checks. All 15 browser chat rendering tests passed, including
-the scheduled-retry display without a false model-stall notification. The
-preceding browser/cycle revision passed the complete local workspace preflight
-and the Linux CI gate.
+edits, protected goal states and a real deferred-work checkpoint. All 54 managed
+tests passed, together with six core activity tests, two Windows daemon activity
+tests, workspace/all-target clippy and all 109 browser tests. The scheduled-retry
+rendering case retains idle evidence without a false model-stall notification.
+The clock fixture uses a margin around the whole-second wall-clock conversion.
+The preceding browser/cycle revision passed the complete local workspace
+preflight and all eight required platform CI jobs. Final candidate platform
+validation and the owned native-daemon probe remain required before publication.

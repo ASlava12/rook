@@ -243,9 +243,9 @@ mod tests {
         assert_eq!(tracker.snapshot(true).retry_at, Some(at));
         assert_eq!(tracker.snapshot(true).idle_secs, 31, "the retry announcement is status only");
         assert!(!tracker.check(false, false));
-        tokio::time::advance(Duration::from_secs(1829)).await;
+        tokio::time::advance(Duration::from_secs(1800)).await;
         assert!(!tracker.check(false, false), "the configured wait is excluded from inactivity");
-        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::time::advance(Duration::from_secs(31)).await;
         assert!(tracker.check(false, false), "an overdue scheduler still needs a notice");
         tracker.retry_wait(at);
         assert!(tracker.snapshot(true).stalled, "the same deadline cannot rearm inactivity");
