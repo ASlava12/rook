@@ -13,6 +13,8 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(all(test, any(unix, windows)))]
+mod command_tests;
 mod concurrent;
 
 use sha2::Digest;
@@ -678,12 +680,22 @@ pub(crate) fn listed_sha256(asset: &serde_json::Value) -> Option<String> {
 /// both pipes drained and both ends of what they said kept. A failed install
 /// explains itself in its last lines, after however much progress it printed,
 /// so the tail is what the error carries.
+struct InstallCommandCleanup(rook_contain::Group);
+impl Drop for InstallCommandCleanup {
+    fn drop(&mut self) {
+        self.0.end();
+    }
+}
+
 async fn run_to_completion(command: &str, cwd: &Path, env: &[(String, String)]) -> Result<(), String> {
     const KEPT: usize = 64 << 10;
     let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     // Uncontained on purpose: an installer writes outside the workspace and
     // reaches the network by definition, and it runs after the person said to.
     let mut child = rook_tools::exec::spawn_shell(command, cwd, &env, None).map_err(|e| e.to_string())?;
+    // kill_on_drop ends only the shell. Keep descendants owned across awaits,
+    // including cancellation when every caller abandons a shared install.
+    let _cleanup = InstallCommandCleanup(rook_contain::Group::holding(child.id()));
     let (mut out, mut err) = (child.stdout.take(), child.stderr.take());
     let printed = std::sync::Mutex::new(rook_tools::jobs::Printed::default());
     let reading = async {
