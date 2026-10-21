@@ -20,7 +20,7 @@ if args.output.exists() or not args.output.parent.is_dir(): parser.error('Choose
 binary=args.bin_dir.resolve()/('rookd.exe' if os.name=='nt' else 'rookd')
 assert binary.is_file()
 scripts=Path(__file__).resolve().parent
-labels=['NATIVE_TERMINAL_TOOL','NATIVE_TERMINAL_TEXT']
+labels=['NATIVE_TERMINAL_TOOL','NATIVE_TERMINAL_TEXT','NATIVE_TERMINAL_FINAL']
 counts=dict.fromkeys(labels,0)
 errors=[]
 class Model(http.server.BaseHTTPRequestHandler):
@@ -45,14 +45,16 @@ class Model(http.server.BaseHTTPRequestHandler):
             counts[label]+=1;assert counts[label]<=3
             if request.get('stream'):
                 first=counts[label]==1
-                delta={'content':'Partial terminal fixture.' if first else 'Controlled answer.'}
-                if first and label.endswith('TOOL'):
+                final=label.endswith('FINAL')
+                delta={'content':'' if final and first else 'Partial terminal fixture.' if first or final else 'Controlled answer.'}
+                if first and (label.endswith('TOOL') or final):
                     delta['tool_calls']=[{'index':0,'id':'unconfirmed','type':'function','function':{
-                        'name':'write_file','arguments':'{"path":"must-not-exist.txt","content":"controlled effect"}'}}]
+                        'name':'write_file','arguments':json.dumps({'path':'confirmed-effect.txt' if final else 'must-not-exist.txt','content':'controlled effect'})}}]
                 choice={'index':0,'delta':delta}
-                if not first: choice['finish_reason']='stop'
+                confirmed=(final and first) or (not final and not first)
+                if confirmed: choice['finish_reason']='tool_calls' if final and first else 'stop'
                 self.send({'model':'terminal','choices':[choice],'usage':{
-                    'prompt_tokens':11 if first else 1,'completion_tokens':7 if first else 1}},True,not first)
+                    'prompt_tokens':11 if first else 1,'completion_tokens':7 if first else 1}},True,confirmed)
             else:
                 self.send({'model':'terminal','choices':[{'message':{'role':'assistant','content':'{"action":"finish"}'},
                             'finish_reason':'stop'}],'usage':{'prompt_tokens':1,'completion_tokens':1}})
@@ -66,12 +68,13 @@ temporary=tempfile.TemporaryDirectory(prefix='rook-terminal-native-')
 root=Path(temporary.name)
 try:
     home=root/'home';home.mkdir();workspace=root/'workspace';workspace.mkdir();empty=root/'empty';empty.mkdir()
+    (workspace/'final.txt').write_text('original artifact',encoding='utf-8')
     (home/'config.toml').write_text(f'''[agent]
 model='terminal'
 install_servers=false
 plan_first=false
 one_script=false
-max_steps=3
+max_steps=1
 [sandbox]
 stance='free'
 [server]
@@ -130,7 +133,7 @@ extensions=[]
         return (sum(e['tokens_in'] for e in entries)==11 and sum(e['tokens_out'] for e in entries)==7
                 and len(routes)==1 and routes[0]['complete'] is False and routes[0]['usage_reported'] is True
                 and attempts[-1]['state']=='incomplete' and attempts[-1]['completion_confirmed'] is False)
-    tool,text=labels
+    tool,text,final=labels
     checks={'tool_has_no_effects':not (workspace/'must-not-exist.txt').exists() and statuses[tool]['tool_done']==0
             and not any(e['label']=='write_file' for e in transcripts[tool]),
             'tool_stops_failed':failed(tool),'tool_one_request':counts[tool]==1,
@@ -138,6 +141,19 @@ extensions=[]
             'text_stops_failed':failed(text),'text_one_request':counts[text]==1,
             'partial_text_retained':any(e['body']=='Partial terminal fixture.' for e in transcripts[text]),
             'text_accounting_incomplete':accounting(text)}
+    entries=transcripts[final]
+    auxiliary=[json.loads(e['body']) for e in entries if e['label']=='rook:model-aux:v1']
+    attempts=[json.loads(e['body']) for e in entries if e['label']=='rook:model-attempt:v1']
+    checks.update({
+        'final_prior_effect_retained':(workspace/'confirmed-effect.txt').is_file() and statuses[final]['tool_done']==1,
+        'final_output_preserved':(workspace/'final.txt').read_text(encoding='utf-8')=='original artifact',
+        'final_stops_failed':failed(final),
+        'final_requests_and_accounting':counts[final]==2 and sum(e['tokens_in'] for e in entries)==12
+            and sum(e['tokens_out'] for e in entries)==8 and len(auxiliary)==1
+            and auxiliary[0]['purpose']=='final_answer' and auxiliary[0]['receipt']['complete'] is False
+            and attempts[-1]['state']=='incomplete'
+            and attempts[-1]['completion_confirmed'] is False,
+    })
     with binary.open('rb') as executable:digest=hashlib.file_digest(executable,'sha256').hexdigest()
     report={'checks':checks,'binary':str(binary),'binary_sha256':digest,'requests':counts,'statuses':statuses,
             'scope':'Owned daemon ordinary chats with scripted EOF, real fixture file and stored accounting; not live-model quality.'}

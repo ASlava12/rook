@@ -15,6 +15,7 @@ enum Mode {
     WrongBody,
     PromptedTool,
     ReasoningTool,
+    UnconfirmedFinal,
 }
 
 async fn endpoint(mode: Mode) -> (String, Arc<AtomicUsize>) {
@@ -71,7 +72,10 @@ async fn endpoint(mode: Mode) -> (String, Arc<AtomicUsize>) {
             let streaming = body["stream"].as_bool().unwrap_or(false);
             let (mime, data) = if index == 0 {
                 let mut choice = serde_json::json!({"index":0,"delta":{"content":"Partial assistant text."}});
-                if matches!(mode, Mode::UnconfirmedTool | Mode::ConfirmedTool) {
+                if matches!(mode, Mode::UnconfirmedFinal) {
+                    choice["delta"]["content"] = serde_json::json!("");
+                }
+                if matches!(mode, Mode::UnconfirmedTool | Mode::ConfirmedTool | Mode::UnconfirmedFinal) {
                     choice["delta"]["tool_calls"] = serde_json::json!([{
                     "index":0,"id":"unconfirmed-call","type":"function","function":{
                         "name":"write_file","arguments":"{\"path\":\"must-not-exist.txt\",\"content\":\"controlled effect\"}"}}]);
@@ -85,13 +89,19 @@ async fn endpoint(mode: Mode) -> (String, Arc<AtomicUsize>) {
                         choice["delta"]["reasoning_content"] = serde_json::json!(call);
                     }
                 }
-                if matches!(mode, Mode::ConfirmedTool | Mode::UnconfirmedClassifier | Mode::UnconfirmedRepair)
-                {
-                    choice["finish_reason"] = serde_json::json!(if matches!(mode, Mode::ConfirmedTool) {
-                        "tool_calls"
-                    } else {
-                        "stop"
-                    });
+                if matches!(
+                    mode,
+                    Mode::ConfirmedTool
+                        | Mode::UnconfirmedFinal
+                        | Mode::UnconfirmedClassifier
+                        | Mode::UnconfirmedRepair
+                ) {
+                    choice["finish_reason"] =
+                        serde_json::json!(if matches!(mode, Mode::ConfirmedTool | Mode::UnconfirmedFinal) {
+                            "tool_calls"
+                        } else {
+                            "stop"
+                        });
                 }
                 let chunk = serde_json::json!({"model":"fixture","choices":[choice],"usage":{"prompt_tokens":11,"completion_tokens":7}});
                 // Clean HTTP EOF, complete JSON arguments, but no terminal SSE
@@ -103,8 +113,14 @@ async fn endpoint(mode: Mode) -> (String, Arc<AtomicUsize>) {
                     ("text/event-stream", format!("data: {chunk}\n\n"))
                 }
             } else if streaming {
-                let chunk = serde_json::json!({"model":"fixture","choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}});
-                ("text/event-stream", format!("data: {chunk}\n\ndata: [DONE]\n\n"))
+                let mut chunk = serde_json::json!({"model":"fixture","choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}});
+                let suffix = if matches!(mode, Mode::UnconfirmedFinal) {
+                    chunk["choices"][0].as_object_mut().unwrap().remove("finish_reason");
+                    ""
+                } else {
+                    "data: [DONE]\n\n"
+                };
+                ("text/event-stream", format!("data: {chunk}\n\n{suffix}"))
             } else {
                 let repair = body["messages"][0]["content"]
                     .as_str()
@@ -278,6 +294,81 @@ async fn unconfirmed_text_is_retained_but_cannot_complete_the_task() {
     let events = rook.store.events(session, 0, 100).unwrap();
     assert!(events.iter().any(|event| event.record.kind == rook_store::EventKind::AssistantMessage
         && rook.store.get(&event.record.body).unwrap() == b"Partial assistant text."));
+}
+
+#[tokio::test]
+async fn unconfirmed_compaction_text_cannot_become_a_trusted_summary() {
+    for (mode, confirmed) in [(Mode::UnconfirmedText, false), (Mode::UnconfirmedClassifier, true)] {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let rook = engine(home.path(), workspace.path());
+        let session = rook.start_session("unconfirmed compaction").unwrap();
+        for index in 0..16 {
+            rook.log(
+                session,
+                rook_store::EventKind::UserMessage,
+                "",
+                &format!("Saved source {index}: unfinished trusted goal. ").repeat(160),
+            )
+            .unwrap();
+        }
+        let (url, requests) = endpoint(mode).await;
+        let provider = rook_llm::openai::OpenAiCompatible::new(
+            "fixture",
+            "fixture",
+            rook_llm::openai::Config::new(url, None, 32768),
+        )
+        .unwrap();
+        AgentLoop::new(&rook, Arc::new(provider), session).compact_now().await;
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        let history = rook.transcript(session, 0, 100, 4096).unwrap();
+        let compact: serde_json::Value = serde_json::from_str(
+            &history.iter().find(|e| e.kind == "compaction").expect("real compaction must be reached").body,
+        )
+        .unwrap();
+        assert_eq!(compact["summarized"], confirmed, "only a confirmed response may be a summary");
+        if confirmed {
+            assert_eq!(compact["summary"], "Partial assistant text.");
+        } else {
+            assert!(compact["summary"].as_str().unwrap().contains("without confirmed completion"));
+        }
+        let metadata = rook.store.get_session(session).unwrap().unwrap();
+        assert_eq!((metadata.tokens_in, metadata.tokens_out), (11, 7));
+    }
+}
+
+#[tokio::test]
+async fn an_unconfirmed_limit_triggered_final_answer_cannot_replace_an_output_file() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("final.txt"), b"original artifact").unwrap();
+    let mut rook = engine(home.path(), workspace.path());
+    rook.config.agent.max_steps = 1;
+    let session = rook.start_session("unconfirmed forced final answer").unwrap();
+    let (url, requests) = endpoint(Mode::UnconfirmedFinal).await;
+    let provider = rook_llm::openai::OpenAiCompatible::new(
+        "fixture",
+        "fixture",
+        rook_llm::openai::Config::new(url, None, 32768),
+    )
+    .unwrap();
+    let mut agent = AgentLoop::new(&rook, Arc::new(provider), session);
+    agent.options.output = Some("final.txt".into());
+    let result = agent.run("Write the fixture then report.").await;
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        2,
+        "confirmed tool response and incomplete final answer must both arrive"
+    );
+    assert!(workspace.path().join("must-not-exist.txt").exists(), "the earlier confirmed write is retained");
+    assert_eq!(
+        std::fs::read(workspace.path().join("final.txt")).unwrap(),
+        b"original artifact",
+        "an unconfirmed final answer replaced the explicit output"
+    );
+    assert!(result.is_err());
+    let metadata = rook.store.get_session(session).unwrap().unwrap();
+    assert_eq!((metadata.tokens_in, metadata.tokens_out), (12, 8));
 }
 
 #[tokio::test]

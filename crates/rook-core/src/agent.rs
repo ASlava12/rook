@@ -2133,6 +2133,11 @@ impl<'a> AgentLoop<'a> {
                 started,
             )
             .record(self.rook, self.session, carrier)?;
+            if !completed.completion_confirmed {
+                let note = "The final-answer stream ended without confirmed completion. Its partial text and reported usage were retained; no output artifact was written from that response.";
+                self.rook.log(self.session, EventKind::Note, "model incomplete", note)?;
+                return Err(CoreError::Other(note.into()));
+            }
             if !response.message.content.is_empty() {
                 outcome.reply = completed.response.message.content;
             }
