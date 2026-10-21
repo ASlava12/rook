@@ -2,7 +2,8 @@
 
 Baseline: `53d91a8`, following release `v0.19.0`. Release source:
 `664972c8c4d15c2aad9a7b58fb16e5e8350936eb`, annotated tag `v0.20.0`.
-Publication and final asset verification are in progress.
+Published [v0.20.0](https://github.com/ASlava12/rook/releases/tag/v0.20.0)
+at `2026-10-21 11:48:46 UTC`; final public-asset verification passed.
 
 ## Evidence and accepted work
 
@@ -116,7 +117,28 @@ prove that its binary source remains the immutable tag.
 
 Actionlint, extracted Bash/PowerShell syntax and the tag/package-version guards
 passed locally. The exact Windows linkage guard rejected the known dependent
-archive. A rebuild of the unchanged `v0.20.0` source is pending. Publication,
-published-archive verification and the restart probe on corrected Windows
-binaries remain pending. Earlier shape/host checks are not substituted for
-the CRT-linkage requirement or those final checks.
+archive. The corrected [rebuild 39591199255](https://github.com/ASlava12/rook/actions/runs/39591199255)
+passed all five build jobs and their linkage guards. Its manual publish job was
+skipped. Every artifact identifies source `664972c` and recipe `012456b`; the
+tag remains unchanged. All archive checksums, names, architectures, source/
+recipe/run metadata, versions and 50 bundled skills passed verification against
+a detached worktree of the tag. Linux ELF files have neither an interpreter
+nor shared-library dependencies; Windows PE imports have no dynamic CRT.
+
+A draft release received exactly five corrected archives and `SHA256SUMS`.
+Those GitHub-hosted files were downloaded and verified again. The final Windows
+artifact passed all 16 owned HTTP/CLI/WebSocket checks: due scheduling and
+capacity, same-session continuation, physical daemon restart, no repeated file
+effects or effects from skipped calls, paired wire history, pause/cancel, CLI-visible
+waits, conversation ownership handoff and explicit human-blocker resume.
+
+After publication, all six assets were downloaded from public URLs without
+authentication. The five archive SHA256s match the tested draft assets; their
+structure, provenance, linkage, skills and host binary versions passed again.
+The release is public, stable and marked latest. Native execution evidence is
+for Windows; the other packages have archive/linkage and source-platform CI
+evidence rather than a claim of native execution on every published target.
+
+Earlier shape/host checks are not substituted for the corrected CRT-linkage
+and final downloaded-asset checks. The initial dependent Windows archive was
+never published as a release asset.
