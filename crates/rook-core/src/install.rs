@@ -13,9 +13,12 @@
 
 use std::path::{Path, PathBuf};
 
+mod concurrent;
+
 use sha2::Digest;
 
 /// Where a server comes from, and how it is checked.
+#[derive(Clone, PartialEq, Eq)]
 pub enum Source {
     /// A GitHub release listing a digest per asset. The asset is one gzipped
     /// binary or a zip; both are checked here, byte for byte, as they arrive.
@@ -32,6 +35,7 @@ pub enum Source {
     Go { module: &'static str },
 }
 
+#[derive(Clone, PartialEq, Eq)]
 pub struct Recipe {
     pub command: &'static str,
     pub source: Source,
@@ -217,7 +221,7 @@ pub struct Asset {
 
 /// A server fetched, checked, unpacked and put in place — and what was and was
 /// not checked on the way, in words.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Installed {
     pub command: String,
     pub tag: String,
@@ -302,10 +306,13 @@ fn current_in(into: &Path, command: &str) -> PathBuf {
     into.join(command).join("current")
 }
 
+#[derive(Clone)]
 pub struct Installer {
     client: reqwest::Client,
     api: String,
     into: PathBuf,
+    proxy: rook_llm::Proxy,
+    proxy_environment: [u8; 32],
 }
 
 impl Installer {
@@ -328,8 +335,9 @@ impl Installer {
         // Redirects are followed by hand, and only to hosts a release download
         // is known to go through: an approval named an address, and a redirect
         // elsewhere is how that becomes a request nobody agreed to.
+        let proxy_environment = concurrent::proxy_environment(proxy);
         let client = release_client(&api, proxy)?;
-        Ok(Self { client, api, into })
+        Ok(Self { client, api, into, proxy: proxy.clone(), proxy_environment })
     }
 
     /// The latest release's asset matching `pick`, with the digest the
@@ -399,6 +407,29 @@ impl Installer {
                 recipe.command
             ));
         }
+        let key = concurrent::Key::new(self, recipe, env)?;
+        loop {
+            let (flight, joined) = concurrent::admit(&key, self, recipe, env)?;
+            let result = flight.work.clone().await;
+            if joined {
+                // Aliases for one cache share the work, but callers keep the
+                // path spelling they supplied to their own installer.
+                return result.map(|mut installed| {
+                    installed.path = recipe.binary_in(&current_in(&self.into, recipe.command));
+                    installed
+                });
+            }
+            // An older operation with different approved routing or source
+            // settings only owns the destination: its result is not ours.
+            // Wait for it to finish, then admit our own physical operation.
+        }
+    }
+
+    async fn install_once(
+        &self,
+        recipe: &Recipe,
+        env: &rook_skills::Environment,
+    ) -> Result<Installed, String> {
         let current = current_in(&self.into, recipe.command);
         let make = |dir: &Path| {
             std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))
