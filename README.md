@@ -698,6 +698,9 @@ was not reviewed. `typescript-language-server`, `pyright` and `gopls` install th
 same way by their own means — npm under a prefix of ours with install scripts
 off, the Go toolchain building from source — and each says what its publisher's
 check covered. clangd ships a zip with the tree its binary needs, kept whole.
+Release tags used as cache directories must be single portable names: up to 255
+ASCII letters, digits, `.`, `_`, `+` or `-`, excluding `.`/`..`, trailing dots and
+Windows device names. Other names are refused before downloading or writing files.
 The agent notices too: a language with files here and no server is offered once
 per session, and the stance decides what follows — a person chooses at `assist`,
 `autonomous` fetches into the state directory, `free` uses the machine's own

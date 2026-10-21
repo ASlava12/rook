@@ -353,6 +353,11 @@ impl Installer {
         let release: serde_json::Value =
             serde_json::from_slice(&body).map_err(|e| format!("{url} did not answer with a release: {e}"))?;
         let tag = release["tag_name"].as_str().unwrap_or("").to_string();
+        // Release metadata names a version, not a path. Check both platforms'
+        // separators here, before fetching or creating anything on disk.
+        if !directory_tag(&tag) {
+            return Err("release tag is not a single portable directory name — refused".into());
+        }
         let found = release["assets"]
             .as_array()
             .into_iter()
@@ -484,6 +489,24 @@ impl Installer {
     async fn download(&self, release: &Asset) -> Result<Vec<u8>, String> {
         fetch_asset(&self.client, release).await
     }
+}
+
+fn directory_tag(tag: &str) -> bool {
+    if tag.is_empty()
+        || tag.len() > 255
+        || matches!(tag, "." | "..")
+        || tag.ends_with('.')
+        || !tag.bytes().all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b))
+    {
+        return false;
+    }
+    let stem = tag.split('.').next().unwrap_or_default();
+    ![
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ]
+    .iter()
+    .any(|reserved| stem.eq_ignore_ascii_case(reserved))
 }
 
 /// An asset's bytes, followed through the redirects a release download takes
@@ -830,6 +853,36 @@ pub(crate) fn host_of(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn release_directories_reject_paths_and_device_names_on_every_host() {
+        for tag in [
+            "",
+            ".",
+            "..",
+            "../../escaped",
+            r"..\..\escaped",
+            "/tmp/escaped",
+            r"C:\escaped",
+            r"C:escaped",
+            "v1/child",
+            "v1:stream",
+            "CON",
+            "nul.txt",
+            "COM1",
+            "lpt9.log",
+            "v1.",
+            "v1 ",
+            "v1\n",
+            "v1\0",
+        ] {
+            assert!(!directory_tag(tag), "unsafe directory tag: {tag:?}");
+        }
+        assert!(!directory_tag(&"x".repeat(256)));
+        for tag in ["2026-01-01", "21.1.0", "v1.2.3-rc.1+build_2", "CONSOLE", "COM10"] {
+            assert!(directory_tag(tag), "ordinary release tag: {tag:?}");
+        }
+    }
 
     #[test]
     fn each_source_says_how_it_installs_and_what_that_checks() {
