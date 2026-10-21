@@ -26,6 +26,16 @@ async fn github_holding(
     digest: String,
     hold: Option<Arc<tokio::sync::Notify>>,
 ) -> String {
+    github_tagged(asset_name, bytes, digest, hold, "2026-01-01").await
+}
+
+async fn github_tagged(
+    asset_name: &'static str,
+    bytes: Arc<Vec<u8>>,
+    digest: String,
+    hold: Option<Arc<tokio::sync::Notify>>,
+    tag: &'static str,
+) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let base = format!("http://{addr}");
@@ -49,7 +59,7 @@ async fn github_holding(
                     if !digest.is_empty() {
                         entry["digest"] = serde_json::json!(format!("sha256:{digest}"));
                     }
-                    let json = serde_json::json!({ "tag_name": "2026-01-01", "assets": [entry] });
+                    let json = serde_json::json!({ "tag_name": tag, "assets": [entry] });
                     ("200 OK", "application/json", json.to_string().into_bytes())
                 } else if path.starts_with("/download/") {
                     if let Some(hold) = &hold {
@@ -84,6 +94,27 @@ fn sha256_of(bytes: &[u8]) -> String {
 
 fn here() -> rook_skills::Environment {
     rook_skills::Environment::bare("linux", "x86_64", "0.1.0")
+}
+
+#[tokio::test]
+async fn a_release_tag_cannot_escape_the_owned_install_directory() {
+    let gz = Arc::new(gzipped(b"owned traversal fixture, never executed\n"));
+    let api = github_tagged(
+        "rust-analyzer-x86_64-unknown-linux-gnu.gz",
+        gz.clone(),
+        sha256_of(&gz),
+        None,
+        "../../escaped",
+    )
+    .await;
+    let owned = tempfile::tempdir().unwrap();
+    let into = owned.path().join("cache");
+    let result =
+        Installer::at(api, into.clone(), &Default::default()).unwrap().install(&RUST_ANALYZER, &here()).await;
+    let escaped = owned.path().join("escaped").exists();
+    assert!(result.is_err(), "unsafe release tag must be refused; wrote outside cache: {escaped}");
+    assert!(!escaped, "metadata must not name a path outside the install directory");
+    assert!(!into.exists(), "refusal precedes placing any files");
 }
 
 #[tokio::test]
