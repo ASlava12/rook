@@ -3318,6 +3318,8 @@ fn durable_recovery(in_conversation: bool, scheduled: bool) {
             let ready = ready.clone();
             let stopped = stopped.clone();
             std::thread::spawn(move || {
+                // Winsock inherits the listener's nonblocking mode on accept.
+                socket.set_nonblocking(false).unwrap();
                 socket.set_read_timeout(Some(std::time::Duration::from_secs(60))).unwrap();
                 let mut bytes = Vec::new();
                 let mut chunk = [0; 16384];
@@ -3571,6 +3573,8 @@ fn models_enforces_configured_catalog_limits_and_exposes_capabilities_without_th
                 std::thread::sleep(Duration::from_millis(10));
                 continue;
             };
+            // Poll accept, then wait for the actual request using its timeout.
+            socket.set_nonblocking(false).unwrap();
             socket.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
             socket.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
             let mut bytes = Vec::new();
@@ -3597,7 +3601,11 @@ fn models_enforces_configured_catalog_limits_and_exposes_capabilities_without_th
         let out = rook.run(&["models", "--source", "local", "--json"]);
         if limit == 1 {
             assert!(!out.status.success());
-            assert!(String::from_utf8_lossy(&out.stderr).contains("exceeds 1 models"));
+            assert!(
+                String::from_utf8_lossy(&out.stderr).contains("exceeds 1 models"),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         } else {
             assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
             let models: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
