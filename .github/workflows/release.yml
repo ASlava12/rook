@@ -189,7 +189,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: publish
+    name: draft release
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -215,16 +215,18 @@ jobs:
           rm dist/*.sha256
           mv SHA256SUMS dist/
           ls -la dist
-      - name: release
+      - name: draft release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           notes="docs/releases/${GITHUB_REF_NAME#v}.md"
+          # Download and verify the GitHub-hosted assets before publishing.
+          # Packaging success alone does not establish a runnable release.
           if [ -f "$notes" ]; then
             gh release create "$GITHUB_REF_NAME" dist/* \
-              --title "$GITHUB_REF_NAME" --notes-file "$notes" --verify-tag
+              --title "$GITHUB_REF_NAME" --notes-file "$notes" --verify-tag --draft
           else
             gh release create "$GITHUB_REF_NAME" dist/* \
-              --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
+              --title "$GITHUB_REF_NAME" --generate-notes --verify-tag --draft
           fi
