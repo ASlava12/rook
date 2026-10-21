@@ -39,9 +39,26 @@ invalid argument rejection, output contracts and loss immediately after commit.
 Context fixtures cover forged calls from ordinary/checker/child/restricted/
 read-only contexts. Changed-control checks cover both checkpoint tools.
 
-The complete local `cargo xtask ci` is running for the candidate. The owned
-HTTP/CLI/daemon probe now includes a human blocker, physical daemon restart and
-explicit same-session continuation; its candidate-binary run is pending.
-Exact-revision platform CI, tag/publication and archive/host verification are
-pending. No release has been claimed complete, and no live-model quality claim
-is made from scripted provider checks.
+The first local `cargo xtask ci` passed formatting, workspace/all-target clippy
+and frontend builds, but the full test link exhausted the Z drive (LNK1180).
+A new full gate uses a separate C-drive target with incremental compilation
+disabled and three build jobs; it is running, not recorded as a pass yet.
+
+The owned HTTP/CLI/daemon probe passed on candidate binaries, including a human
+blocker, physical daemon restart, explicit same-session continuation and a
+protocol-correct skipped batch tail. Its first Windows attempt exposed `EPERM`
+when the Python observer reader overlapped Node's atomic snapshot replacement.
+The probe now coalesces snapshots and bounds retries of that specific Windows
+sharing contention; a stopped observer reports its saved bounded event trace
+and stderr immediately. The complete probe passed after that fixture correction.
+
+On source `a57afe3013ef59b48fa070f548187c99a3654eea`, CI run `39569636543`
+passed Linux, macOS, Windows and FreeBSD tests, MSRV and three cross-checks.
+The deliberately nonblocking Ollama/Qwen 3B smoke passed five of eight scenarios;
+command obedience, unchanged file content and cross-session memory scenarios
+failed. Those failures are retained as model-quality evidence, not converted
+to passing checks or a quality-improvement claim.
+
+Exact-revision CI for the final probe/docs revision, release package builds,
+tag/publication and archive/host verification remain pending. No release has
+been claimed complete.

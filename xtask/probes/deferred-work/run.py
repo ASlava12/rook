@@ -311,7 +311,13 @@ context_window=32768
     occupied = submit('NATIVE_CAPACITY_B', other_workspace)
     assert held.wait(30), 'capacity fixture did not acquire the released chat slot'
     observer, observation_path = observe(chat_session, 'early-resume-chat', 'continue')
-    until(lambda: observation(observation_path).get('queued') == 1, 'chat resume did not queue behind the other owner')
+    def queued_observation():
+        snapshot = observation(observation_path)
+        if observer.poll() is not None:
+            _, diagnostic = observer.communicate()
+            raise AssertionError(('chat observer stopped before queue admission', snapshot, diagnostic))
+        return snapshot.get('queued') == 1
+    until(queued_observation, 'chat resume did not queue behind the other owner')
     assert counts['NATIVE_CONVERSATION_E'] == 2 and view(conversation)['status'] == 'queued'
     assert not view(conversation).get('waiting'), 'explicit resume must clear the old wait'
     release.set()
