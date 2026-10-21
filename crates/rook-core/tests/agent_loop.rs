@@ -9546,6 +9546,39 @@ async fn tool_cycles_do_not_treat_shell_undo_receipt_ids_as_command_progress() {
 }
 
 #[tokio::test]
+async fn tool_cycles_do_not_treat_undo_ids_as_progress_when_command_output_is_truncated() {
+    let mut config = Config::default();
+    config.shell_undo.enabled = true;
+    config.sandbox.max_output_bytes = 256;
+    let f = fixture_with(config);
+    let session = f.rook.start_session("truncated output is not undo receipt progress").unwrap();
+    let command = format!("echo {}", "stable".repeat(128));
+    let mut script: Vec<_> =
+        (0..5).map(|_| call("run_command", serde_json::json!({"command":command}))).collect();
+    script.push(reply("no files changed"));
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    agent.allow_everything_not_denied();
+    let out = agent.run("inspect once").await.unwrap();
+    let results: Vec<_> = f
+        .rook
+        .transcript(session, 0, 1000, 4000)
+        .unwrap()
+        .into_iter()
+        .filter(|entry| entry.kind == "tool-result" && entry.label == "run_command")
+        .map(|entry| entry.body.chars().take(1024).collect::<String>())
+        .collect();
+    assert_eq!(out.stopped, "looping", "{out:?}; command results: {results:?}");
+    assert_eq!(out.tools_called.len(), 2);
+    assert!(
+        results
+            .iter()
+            .take(2)
+            .all(|result| result.contains("elided") && result.contains("shell undo receipt:"))
+    );
+    assert_ne!(results[0], results[1]);
+}
+
+#[tokio::test]
 async fn tool_cycles_warn_then_stop_command_result_churn_and_unknown_tool_churn() {
     for unknown in [false, true] {
         let f = fixture();

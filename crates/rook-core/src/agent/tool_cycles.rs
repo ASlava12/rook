@@ -71,6 +71,40 @@ fn fingerprint(value: &impl Serialize) -> Result<Fingerprint> {
     Ok(hash.0.finalize().into())
 }
 
+// A new spill filename is not progress. Compare its complete captured bytes,
+// including the middle omitted from the model's display, within the same
+// per-file proof bound as other cycle inputs. Never expose this hash as tool
+// metadata or read a capture outside this engine's private output directory.
+fn captured_command_result(
+    ctx: &rook_tools::ToolContext,
+    outcome: &rook_tools::ToolOutcome,
+) -> Option<Fingerprint> {
+    use std::io::Read;
+    if !outcome.truncated || !outcome.meta.get("output_complete")?.as_bool()? {
+        return None;
+    }
+    let path = std::path::Path::new(outcome.meta.get("output_file")?.as_str()?);
+    if !std::fs::symlink_metadata(path).ok()?.file_type().is_file() {
+        return None;
+    }
+    let path = path.canonicalize().ok()?;
+    if path.parent()? != ctx.spill_dir.as_ref()?.canonicalize().ok()? {
+        return None;
+    }
+    let file = std::fs::File::open(path).ok()?;
+    let limit = ctx.max_spill_bytes.min(8 * 1024 * 1024);
+    if file.metadata().ok()?.len() > limit {
+        return None;
+    }
+    let mut reader = file.take(limit + 1);
+    let output = rook_store::ObjectId::of_reader(&mut reader).ok()?;
+    if reader.limit() == 0 {
+        return None;
+    }
+    let exit = outcome.meta.get("exit_code")?.as_i64()?;
+    fingerprint(&("captured command", exit, output.as_bytes(), outcome.is_error, &outcome.images)).ok()
+}
+
 impl Guard {
     fn reset(&mut self) {
         self.history.clear();
@@ -459,6 +493,10 @@ impl AgentLoop<'_> {
                 // Fresh job ids alone do not demonstrate new work. Actual
                 // liveness exempts reading those jobs, not spawning duplicates.
                 fingerprint(&("background command admitted", outcome.is_error))?
+            } else if name == "run_command"
+                && let Some(result) = captured_command_result(&self.tool_ctx, outcome)
+            {
+                result
             } else {
                 let content = (name == "run_command" && !outcome.truncated)
                     .then(|| {
@@ -504,6 +542,37 @@ impl AgentLoop<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn complete_capture_comparison_ignores_names_but_not_hidden_output_and_requires_owned_bounded_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let mut ctx = rook_tools::ToolContext::new(root.path().to_path_buf());
+        ctx.spill_dir = Some(root.path().to_path_buf());
+        ctx.max_spill_bytes = 1024;
+        let first = root.path().join("first.log");
+        let second = root.path().join("second.log");
+        std::fs::write(&first, b"head\nfirst hidden middle\ntail").unwrap();
+        std::fs::copy(&first, &second).unwrap();
+        let mut outcome = rook_tools::ToolOutcome::ok("head\n[elided]\ntail")
+            .with("exit_code", 0)
+            .with("output_complete", true)
+            .with("output_file", first.to_str().unwrap());
+        outcome.truncated = true;
+        let original = captured_command_result(&ctx, &outcome).unwrap();
+        outcome.meta.insert("output_file".into(), serde_json::json!(second));
+        assert_eq!(captured_command_result(&ctx, &outcome), Some(original));
+        std::fs::write(&second, b"head\nother hidden middle\ntail").unwrap();
+        assert_ne!(captured_command_result(&ctx, &outcome).unwrap(), original);
+        outcome.meta.insert("output_complete".into(), serde_json::json!(false));
+        assert!(captured_command_result(&ctx, &outcome).is_none());
+        outcome.meta.insert("output_complete".into(), serde_json::json!(true));
+        ctx.max_spill_bytes = 4;
+        assert!(captured_command_result(&ctx, &outcome).is_none());
+        ctx.max_spill_bytes = 1024;
+        let other = tempfile::tempdir().unwrap();
+        ctx.spill_dir = Some(other.path().to_path_buf());
+        assert!(captured_command_result(&ctx, &outcome).is_none());
+    }
 
     fn seen(call: u8, family: u8, result: u8) -> Seen {
         Seen {

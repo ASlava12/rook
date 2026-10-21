@@ -38,7 +38,8 @@ the admitted context. Uncertain effects still require explicit close.
   repeated `click`/`dialog` mutations retain the two-result refusal boundary.
 - Unix protocol fixtures cover stale/foreign context refusal, exact backend
   arguments, capability absence and cancellation without replay. Their checks
-  are pending on a Unix runner.
+  passed in the Linux, macOS and FreeBSD gates on `a805dec`; final-revision
+  platform checks remain pending.
 - Windows browser dispatch/denial and observation-cycle regressions passed.
   Formatting and `cargo clippy -p rook-core --all-targets -- -D warnings` passed.
   All 10 selected ordinary-agent tool-cycle regressions and the previous native
@@ -83,3 +84,23 @@ masked values; a replacement crossing the boundary invalidates it. A failed
 environment completion invalidates the boundary so the full error remains part
 of cycle evidence. The focused boundary/redaction regression passed on Windows.
 The six native command integration tests also passed.
+
+On `16faf55`, the complete Windows ordinary-agent integration target passed all
+280 tests in 400.58 seconds, and workspace/all-target clippy passed. A separate
+diagnostic run of the long claim-verification test passed in 3.71 seconds; the
+full target's passing result is the evidence for that suite. A requested native
+Chromium cleanup test selected zero tests on Windows because its module is
+Unix-only; this is not counted as successful native cleanup verification.
+
+A subsequent regression exposed the same false-progress mechanism for truncated
+output: each command also receives a fresh spill filename. When the complete
+capture is available, cycle comparison now hashes its actual bytes and exit
+status instead of its filename or appended receipt. Reading requires a regular
+file in the engine's private output directory and is bounded to 8 MiB (or the
+smaller configured spill cap). Incomplete, missing, oversized or foreign
+captures retain the existing fallback rather than asserting full-output
+equality. The hash is private cycle evidence, never tool metadata. The new
+native regression failed before this fix and passed afterward with all 12
+selected tool-cycle regressions. A focused fixture checks that changed hidden
+middle bytes count as different results, while new filenames alone do not;
+it passed, as did the renewed workspace/all-target clippy check.
