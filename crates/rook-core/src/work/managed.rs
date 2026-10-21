@@ -399,15 +399,30 @@ pub fn steer(rook: &Rook, id: &str, request: Steer) -> Result<Steering> {
     steer_noticed(rook, id, request).map(|(receipt, _)| receipt)
 }
 
+fn guidance_changed(saved: &mut Saved) {
+    saved.idle = 0;
+    // One new explicit correction admits an immediate retry. Preserve failure
+    // accounting and the active transcript; duplicates must not defeat backoff.
+    // Deferred operations and paused/blocked goals still need their own control.
+    if saved.run.status == Status::RetryWait && saved.run.waiting.is_none() {
+        saved.run.status = Status::Queued;
+        saved.run.next_attempt_at = None;
+        saved.run.reason = "new user guidance queued; retry ready".into();
+    }
+}
+
 pub fn steer_noticed(rook: &Rook, id: &str, request: Steer) -> Result<(Steering, rook_proto::queue::Notice)> {
     update(rook, id, |saved| {
+        let previous = saved.run.instructions.len();
         let receipt = super::receipts::submit(
             rook,
             &mut saved.run.instructions,
             request,
             !saved.run.status.terminal(),
         )?;
-        saved.idle = 0;
+        if saved.run.instructions.len() != previous {
+            guidance_changed(saved);
+        }
         let session = rook_store::parse_session_id(&saved.run.id).ok_or_else(|| bad("invalid run id"))?;
         let notice = crate::message_queue::view::notice(session, Some(&saved.run), &receipt);
         Ok((receipt, notice))
@@ -427,6 +442,8 @@ pub fn edit_instruction_noticed(
     request: EditInstruction,
 ) -> Result<(Steering, rook_proto::queue::Notice)> {
     update(rook, run, |saved| {
+        let previous =
+            saved.run.instructions.iter().find(|message| message.id == id).map(|message| message.revision);
         let receipt = super::receipts::edit(
             rook,
             &mut saved.run.instructions,
@@ -434,6 +451,9 @@ pub fn edit_instruction_noticed(
             request,
             !saved.run.status.terminal(),
         )?;
+        if previous != Some(receipt.revision) {
+            guidance_changed(saved);
+        }
         let session = rook_store::parse_session_id(&saved.run.id).ok_or_else(|| bad("invalid run id"))?;
         let notice = crate::message_queue::view::notice(session, Some(&saved.run), &receipt);
         Ok((receipt, notice))

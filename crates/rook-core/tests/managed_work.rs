@@ -1673,7 +1673,8 @@ async fn a_provider_outage_resumes_the_saved_session_and_a_correction_reaches_ve
     let workspace = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
     std::fs::write(workspace.path().join("evidence.txt"), "done").unwrap();
-    let rook = engine(workspace.path(), store.path());
+    let mut rook = engine(workspace.path(), store.path());
+    rook.config.work.retry_initial_secs = 1800;
     let run = start(&rook);
     let provider =
         Script::new(vec![read(), Err(rook_llm::LlmError::Other("provider temporarily unavailable".into()))]);
@@ -1684,13 +1685,13 @@ async fn a_provider_outage_resumes_the_saved_session_and_a_correction_reaches_ve
     assert_eq!(first.status, Status::RetryWait);
     assert_eq!(first.iterations, 0, "outages are not idle turns");
     assert!(first.tokens > 0, "work before the failure is billed");
+    assert!(first.next_attempt_at.unwrap() > work::now() + 1700);
     let session = first.session.clone();
     work::steer(&rook, &run.id, correction("answer-language", "Include the file name")).unwrap();
-    work::update(&rook, &run.id, |s| {
-        s.run.next_attempt_at = Some(0);
-        Ok(())
-    })
-    .unwrap();
+    let ready = work::read(&rook, &run.id).unwrap().run;
+    assert_eq!(ready.status, Status::Queued, "fresh guidance must wake an ordinary retry wait");
+    assert!(ready.next_attempt_at.is_none());
+    assert_eq!(ready.consecutive_failures, first.consecutive_failures);
     drop(rook);
     let rook = engine(workspace.path(), store.path());
     let provider = Script::new(vec![
@@ -1710,6 +1711,98 @@ async fn a_provider_outage_resumes_the_saved_session_and_a_correction_reaches_ve
     assert!(seen[0].contains("Include the file name"));
     assert!(seen.iter().any(|prompt| prompt.contains("the agent has just finished a turn")
         && prompt.contains("Include the file name")));
+}
+
+#[test]
+fn only_fresh_guidance_or_a_new_edit_wakes_an_ordinary_retry_wait() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let rook = engine(workspace.path(), store.path());
+    let run = start(&rook);
+    work::steer(&rook, &run.id, correction("old", "already submitted")).unwrap();
+    let deadline = work::now() + 1800;
+    let park = || {
+        work::update(&rook, &run.id, |saved| {
+            saved.run.status = Status::RetryWait;
+            saved.run.next_attempt_at = Some(deadline);
+            saved.run.consecutive_failures = 9;
+            saved.idle = 4;
+            Ok(())
+        })
+        .unwrap();
+    };
+    park();
+    work::steer(&rook, &run.id, correction("old", "already submitted")).unwrap();
+    assert_eq!(work::read(&rook, &run.id).unwrap().run.next_attempt_at, Some(deadline));
+    assert_eq!(work::read(&rook, &run.id).unwrap().idle, 4);
+    work::steer(&rook, &run.id, correction("new", "new explicit guidance")).unwrap();
+    let ready = work::read(&rook, &run.id).unwrap().run;
+    assert_eq!(ready.status, Status::Queued);
+    assert!(ready.next_attempt_at.is_none());
+    assert_eq!(ready.consecutive_failures, 9, "a message is not a successful provider request");
+    assert_eq!(work::read(&rook, &run.id).unwrap().idle, 0);
+    park();
+    work::steer(&rook, &run.id, correction("new", "new explicit guidance")).unwrap();
+    assert_eq!(work::read(&rook, &run.id).unwrap().run.next_attempt_at, Some(deadline));
+    let edit = || EditInstruction { revision: 0, text: "corrected guidance".into() };
+    work::edit_instruction(&rook, &run.id, "new", edit()).unwrap();
+    assert!(work::read(&rook, &run.id).unwrap().run.next_attempt_at.is_none());
+    park();
+    work::edit_instruction(&rook, &run.id, "new", edit()).unwrap();
+    let repeated = work::read(&rook, &run.id).unwrap().run;
+    assert_eq!(repeated.status, Status::RetryWait);
+    assert_eq!(repeated.next_attempt_at, Some(deadline));
+    assert_eq!(work::read(&rook, &run.id).unwrap().idle, 4);
+}
+
+#[test]
+fn fresh_guidance_does_not_resume_a_paused_blocked_or_cancelled_goal() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let rook = engine(workspace.path(), store.path());
+    for status in [Status::Paused, Status::Blocked, Status::Cancelled, Status::Limited] {
+        let run = start(&rook);
+        work::update(&rook, &run.id, |saved| {
+            saved.run.status = status;
+            saved.run.reason = "requires explicit control".into();
+            Ok(())
+        })
+        .unwrap();
+        let result = work::steer(&rook, &run.id, correction("new", "a queued correction"));
+        assert_eq!(result.is_err(), status.terminal());
+        let after = work::read(&rook, &run.id).unwrap().run;
+        assert_eq!(after.status, status);
+        assert_eq!(after.reason, "requires explicit control");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_guidance_and_edits_preserve_an_explicit_deferred_work_deadline() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let rook = engine(workspace.path(), store.path());
+    let run = start(&rook);
+    let provider = Script::new(vec![defer(serde_json::json!({
+        "seconds":1800,"reason":"external readiness"
+    }))]);
+    let waiting =
+        work::advance(&rook, &run.id, |session| Ok(AgentLoop::new(&rook, provider.clone(), session)), |_| {})
+            .await
+            .unwrap();
+    assert!(waiting.next_attempt_at.unwrap() > work::now() + 1700);
+    work::steer(&rook, &run.id, correction("later", "guidance for the next admitted stage")).unwrap();
+    work::edit_instruction(
+        &rook,
+        &run.id,
+        "later",
+        EditInstruction { revision: 0, text: "corrected guidance for the next stage".into() },
+    )
+    .unwrap();
+    let after = work::read(&rook, &run.id).unwrap().run;
+    assert_eq!(after.status, waiting.status);
+    assert_eq!(after.next_attempt_at, waiting.next_attempt_at);
+    assert_eq!(after.waiting.unwrap().until, waiting.waiting.unwrap().until);
+    assert_eq!(provider.seen.lock().unwrap().len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
