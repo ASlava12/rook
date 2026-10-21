@@ -246,6 +246,7 @@ pub fn why_it_stopped(stopped: &str) -> Option<String> {
             "could not determine whether the model finished; `/continue` resumes the task".into()
         }
         "work_deferred" => "the managed checkpoint is saved; continuation is scheduled and remains subject to the goal budget and user controls".into(),
+        "work_blocked" => "the managed checkpoint is saved and blocked until the user explicitly resumes it".into(),
         "work_queued" => "the goal is queued until executor capacity is available".into(),
         "recovery" => "an interrupted operation has an unknown result; inspect `/recovery` and record what you checked before changes resume".into(),
         "blocked" => "the model reported a refusal or blocker; the task remains incomplete".into(),
@@ -327,6 +328,7 @@ const CHANGES_THINGS: &[&str] = &[
     crate::worktrees::TOOL,
     crate::review::TOOL,
     crate::work::managed::deferred::TOOL,
+    crate::work::managed::blocked::TOOL,
 ];
 
 /// What a turn reports as it goes.
@@ -1084,7 +1086,7 @@ impl<'a> AgentLoop<'a> {
             }
         };
         let unpriced = self.composite_cost_unknown.load(std::sync::atomic::Ordering::Acquire);
-        let finalised = if unpriced || outcome.stopped == "work_deferred" {
+        let finalised = if unpriced || matches!(outcome.stopped.as_str(), "work_deferred" | "work_blocked") {
             Ok(())
         } else {
             self.apply_output(&contract, &mut outcome, &mut on_progress).await
@@ -1947,6 +1949,9 @@ impl<'a> AgentLoop<'a> {
                 let result_seq = recorded.as_ref().map(|event| event.seq);
                 let loaded_body =
                     call.name == LOAD_SKILL && call.arguments.get("resource").is_none() && !failed;
+                if call.name == crate::work::managed::blocked::TOOL && !failed {
+                    outcome.reply = result.clone();
+                }
                 let shown = if loaded_body {
                     result
                 } else {
@@ -1982,6 +1987,10 @@ impl<'a> AgentLoop<'a> {
                 on_progress(Progress::ToolDone { name: &call.name, failed, result_seq });
                 if call.name == crate::work::managed::deferred::TOOL && !failed {
                     outcome.stopped = "work_deferred".into();
+                    break 'turn;
+                }
+                if call.name == crate::work::managed::blocked::TOOL && !failed {
+                    outcome.stopped = "work_blocked".into();
                     break 'turn;
                 }
             }
@@ -2026,7 +2035,7 @@ impl<'a> AgentLoop<'a> {
         // what asks the model for what it found rather than ending on a limit.
         if !matches!(
             outcome.stopped.as_str(),
-            "budget" | "time" | "work_paused" | "work_deferred" | "subrecipe_cost_unknown"
+            "budget" | "time" | "work_paused" | "work_deferred" | "work_blocked" | "subrecipe_cost_unknown"
         ) {
             outcome.stopped = if stuck { "looping" } else { "max_steps" }.into();
         }
@@ -2042,7 +2051,7 @@ impl<'a> AgentLoop<'a> {
         // answer, first let me check" — which is an announcement and not an
         // answer, and it is what the person would otherwise be handed.
         if !self.composite_cost_unknown.load(std::sync::atomic::Ordering::Acquire)
-            && !matches!(outcome.stopped.as_str(), "work_paused" | "work_deferred")
+            && !matches!(outcome.stopped.as_str(), "work_paused" | "work_deferred" | "work_blocked")
             && (stuck || outcome.reply.trim().is_empty())
             && !outcome.tools_called.is_empty()
         {

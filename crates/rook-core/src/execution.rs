@@ -761,16 +761,20 @@ impl Journal {
 
     /// A deferred stage has no external tool effect: its result, closed
     /// operation and managed checkpoint must become durable together.
-    pub(crate) fn complete_checkpoint(&self, result: &str, checkpoint: &str, bytes: &[u8]) -> Result<u64> {
+    pub(crate) fn complete_checkpoint(
+        &self,
+        tool: &str,
+        result: &str,
+        checkpoint: &str,
+        bytes: &[u8],
+    ) -> Result<u64> {
         let _active = ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
         let mut state = load(&self.store, self.session)?
             .ok_or_else(|| CoreError::Other("execution receipt disappeared".into()))?;
-        if state.turn != self.turn
+        if ![crate::work::managed::deferred::TOOL, crate::work::managed::blocked::TOOL].contains(&tool)
+            || state.turn != self.turn
             || state.status != "running"
-            || state
-                .pending
-                .as_ref()
-                .is_none_or(|operation| operation.tool != crate::work::managed::deferred::TOOL)
+            || state.pending.as_ref().is_none_or(|operation| operation.tool != tool)
         {
             return Err(CoreError::Other("execution ownership changed; wait was not committed".into()));
         }
@@ -782,8 +786,7 @@ impl Journal {
         state.pending = None;
         state.completed_operations = state.completed_operations.saturating_add(1);
         state.updated_at = rook_store::now_unix();
-        let event = NewEvent::new(EventKind::ToolResult, Kind::Message, result.as_bytes())
-            .label(crate::work::managed::deferred::TOOL);
+        let event = NewEvent::new(EventKind::ToolResult, Kind::Message, result.as_bytes()).label(tool);
         let [seq] = self.store.append_events_with_receipt(
             self.session,
             [event],

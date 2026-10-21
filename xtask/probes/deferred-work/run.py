@@ -52,7 +52,7 @@ class Model(http.server.BaseHTTPRequestHandler):
             # Workspace listings contain earlier fixtures' file names. Route
             # only by the admitted managed goal, not incidental source text.
             marker = next(name for name in ['NATIVE_DEFER_A', 'NATIVE_CAPACITY_B',
-                                           'NATIVE_RESTART_C', 'NATIVE_PAUSED_D', 'NATIVE_CONVERSATION_E']
+                                           'NATIVE_RESTART_C', 'NATIVE_PAUSED_D', 'NATIVE_CONVERSATION_E', 'NATIVE_HUMAN_F']
                           if any(message['role'] == 'user' and name + '\n\nThis is iteration' in str(message.get('content', ''))
                                  for message in request['messages']))
             assert 'Classify whether' not in text, 'a deferred boundary cannot request completion classification'
@@ -73,7 +73,13 @@ class Model(http.server.BaseHTTPRequestHandler):
             resumed = any(message['role'] == 'tool' and 'Work checkpoint saved' in str(message.get('content', ''))
                           for message in request['messages'])
             calls = []
-            if marker == 'NATIVE_CAPACITY_B':
+            if marker == 'NATIVE_HUMAN_F':
+                initial = counts[marker] == 1
+                if initial:
+                    calls.append(self.call('before', 'write_file', {'path': marker + '.txt', 'content': 'one write'}))
+                calls.append(self.call('human', 'block_work', {'reason': 'Manual login required.' if initial else 'Manual verification still required.'}))
+                calls.append(self.call('tail', 'write_file', {'path': marker + '-forbidden.txt', 'content': 'tail'}))
+            elif marker == 'NATIVE_CAPACITY_B':
                 held.set()
                 assert release.wait(90), 'owned capacity gate expired'
                 delay, reason = 60, 'capacity released'
@@ -83,9 +89,10 @@ class Model(http.server.BaseHTTPRequestHandler):
                 delay = {'NATIVE_DEFER_A': 20, 'NATIVE_RESTART_C': 8, 'NATIVE_PAUSED_D': 2, 'NATIVE_CONVERSATION_E': 3}[marker]
                 reason = 'initial wait'
                 calls.append(self.call('before', 'write_file', {'path': marker + '.txt', 'content': 'one write'}))
-            calls.append(self.call('wait', 'defer_work', {'seconds': delay, 'reason': reason}))
-            if not resumed and marker != 'NATIVE_CAPACITY_B':
-                calls.append(self.call('tail', 'write_file', {'path': marker + '-forbidden.txt', 'content': 'tail'}))
+            if marker != 'NATIVE_HUMAN_F':
+                calls.append(self.call('wait', 'defer_work', {'seconds': delay, 'reason': reason}))
+                if not resumed and marker != 'NATIVE_CAPACITY_B':
+                    calls.append(self.call('tail', 'write_file', {'path': marker + '-forbidden.txt', 'content': 'tail'}))
             if request.get('stream'):
                 delta = {'role': 'assistant', 'tool_calls': [dict(index=index, **call) for index, call in enumerate(calls)]}
                 first = {'id': 'native-defer', 'model': 'A', 'choices': [{'index': 0, 'delta': delta, 'finish_reason': None}]}
@@ -256,6 +263,25 @@ context_window=32768
     assert counts['NATIVE_PAUSED_D'] == 1 and view(paused)['status'] == 'paused'
     cancel(paused)
 
+    human = submit('NATIVE_HUMAN_F')
+    before = until(lambda: view(human) if view(human)['status'] == 'blocked' else None, 'human blocker was not saved')
+    assert before['reason'] == before['reply'] == 'Manual login required.' and before['iterations'] == 1, before
+    assert before.get('next_attempt_at') is None and not before.get('waiting'), before
+    until(lambda: api('/api/health')['turns_running'] == 0, 'human blocker retained its executor')
+    daemon.kill(); daemon.wait(timeout=10); daemon = None
+    start()
+    after = view(human)
+    assert after['status'] == 'blocked' and after['session'] == before['session'], after
+    assert counts['NATIVE_HUMAN_F'] == 1, 'daemon restart must not run a human blocker'
+    api('/api/work/' + human['id'] + '/control', 'resume')
+    after = until(lambda: view(human) if view(human)['iterations'] == 2 else None, 'explicit resume did not continue the human checkpoint')
+    assert after['status'] == 'blocked' and after['reason'] == 'Manual verification still required.', after
+    assert after['session'] == before['session'] and counts['NATIVE_HUMAN_F'] == 2, after
+    assert (workspace / 'NATIVE_HUMAN_F.txt').read_text() == 'one write'
+    assert not (workspace / 'NATIVE_HUMAN_F-forbidden.txt').exists()
+    until(lambda: api('/api/health')['turns_running'] == 0, 'resumed human blocker retained its executor')
+    cancel(human)
+
     # Create an ordinary empty chat while this owned store is unlocked,
     # then promote it through the same persisted conversation-goal API.
     until(lambda: api('/api/health')['turns_running'] == 0, 'paused owner did not retire')
@@ -302,6 +328,7 @@ context_window=32768
                       'cancel_clears_wait': True, 'cli_saved_wait_visible': True,
                       'conversation_releases_chat_owner': True, 'conversation_due_wake_same_session': True,
                       'chat_observer_follows_automatic_wake': True, 'early_chat_resume_queues_at_capacity': True,
+                      'human_blocker_survives_restart': True, 'human_blocker_requires_explicit_resume': True,
                       'requests': counts}))
     daemon.terminate(); daemon.wait(timeout=20); daemon = None
 finally:

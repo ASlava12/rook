@@ -13,8 +13,12 @@ const INSTRUCTION: &str = "Classify whether an assistant's proposed last reply e
     a next action, or giving a progress update with work still underway. \
     Use blocked when the reply refuses the requested work or reports it could not be completed, \
     including an audit stopped because of instructions in the material being inspected. \
+    Also use blocked when further execution requires the user's answer, login, physical input, \
+    or another action only the user can perform. This takes precedence over suggestions \
+    for further investigation in the same reply. \
     This records an incomplete task; do not override a refusal or grant any permission. \
-    Use finish for an answer, a report of completed work, or a question that needs the user's answer. \
+    Use finish for an answer, a report of completed work, or questions that are themselves \
+    the requested deliverable rather than a prerequisite for continuing the task. \
     An audit that finds harmful code is a valid answer, not a refusal. A requested plan is a \
     valid final answer; offering optional follow-up does not require continuation. \
     Quoted examples and descriptions of what the user can do are not promises \
@@ -44,7 +48,9 @@ struct Verdict {
 pub(crate) fn request(task: &str, latest: &str, reply: &str) -> Request {
     let quoted = serde_json::json!({"task": bounded(task), "latest_instruction": bounded(latest), "reply": bounded(reply)});
     let mut request = Request::new(vec![Message::system(INSTRUCTION), Message::user(quoted.to_string())]);
-    request.max_output_tokens = 512;
+    // Reasoning providers share this allowance with their hidden reasoning.
+    // 512 repeatedly exhausted the budget before producing even the JSON verdict.
+    request.max_output_tokens = 4096;
     request.effort = Some(Effort::Low);
     request
 }

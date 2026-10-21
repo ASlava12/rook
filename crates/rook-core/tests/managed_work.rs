@@ -862,10 +862,26 @@ fn older_receipts_acquire_edit_metadata_without_changing_submission_identity() {
 struct Script {
     replies: Mutex<Vec<rook_llm::Result<Response>>>,
     seen: Mutex<Vec<String>>,
+    completion_replies: Mutex<Option<Vec<rook_llm::Result<Response>>>>,
+    completion_requests: Mutex<Vec<Request>>,
 }
 impl Script {
     fn new(replies: Vec<rook_llm::Result<Response>>) -> Arc<Self> {
-        Arc::new(Self { replies: Mutex::new(replies), seen: Mutex::new(Vec::new()) })
+        Arc::new(Self {
+            replies: Mutex::new(replies),
+            seen: Mutex::new(Vec::new()),
+            completion_replies: Mutex::new(None),
+            completion_requests: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn with_completion(
+        replies: Vec<rook_llm::Result<Response>>,
+        checks: Vec<rook_llm::Result<Response>>,
+    ) -> Arc<Self> {
+        let script = Self::new(replies);
+        *script.completion_replies.lock().unwrap() = Some(checks);
+        script
     }
 }
 #[async_trait]
@@ -878,6 +894,11 @@ impl Provider for Script {
     }
     async fn complete(&self, request: Request) -> rook_llm::Result<Response> {
         if request.messages.iter().any(|m| m.content.starts_with("Classify whether")) {
+            self.completion_requests.lock().unwrap().push(request);
+            if let Some(replies) = self.completion_replies.lock().unwrap().as_mut() {
+                assert!(!replies.is_empty(), "unexpected completion request");
+                return replies.remove(0);
+            }
             return answer(r#"{"action":"finish"}"#);
         }
         self.seen
@@ -919,6 +940,152 @@ fn defer(args: serde_json::Value) -> rook_llm::Result<Response> {
         arguments: args,
     });
     Ok(response)
+}
+
+fn block(args: serde_json::Value) -> rook_llm::Result<Response> {
+    let mut response = answer("").unwrap();
+    response.stop_reason = StopReason::ToolUse;
+    response.message.tool_calls.push(ToolCall {
+        id: "human-prerequisite".into(),
+        name: "block_work".into(),
+        arguments: args,
+    });
+    Ok(response)
+}
+
+#[tokio::test]
+async fn an_explicit_human_blocker_survives_restart_without_a_classifier_or_automatic_work() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let rook = engine(workspace.path(), store.path());
+    let run = start(&rook);
+    let reason = "Please log into the game and test the physical mouse wheel, then explicitly resume.";
+    let mut response = block(serde_json::json!({"reason":reason})).unwrap();
+    response.message.tool_calls.push(ToolCall {
+        id: "must-not-run".into(),
+        name: "write_file".into(),
+        arguments: serde_json::json!({"path":"unwanted.txt","content":"not authorized after blocking"}),
+    });
+    let script = Script::with_completion(vec![Ok(response)], vec![]);
+    let first =
+        work::advance(&rook, &run.id, |session| Ok(AgentLoop::new(&rook, script.clone(), session)), |_| {})
+            .await
+            .unwrap();
+    assert_eq!(first.status, Status::Blocked);
+    assert_eq!(first.iterations, 1);
+    assert_eq!(first.reason, reason);
+    assert_eq!(first.reply, reason);
+    assert!(first.next_attempt_at.is_none());
+    assert!(first.waiting.is_none());
+    assert!(!workspace.path().join("unwanted.txt").exists());
+    assert_eq!(script.seen.lock().unwrap().len(), 1);
+    assert!(script.completion_requests.lock().unwrap().is_empty());
+    let session = rook_store::parse_session_id(first.session.as_ref().unwrap()).unwrap();
+    let outcome = rook.completed_turn(session).unwrap().unwrap();
+    assert_eq!(outcome.stopped, "work_blocked");
+    assert_eq!(outcome.reply, reason);
+    assert_eq!(outcome.tools_called, ["block_work"]);
+    assert!(rook.execution(session).unwrap().iter().all(|receipt| receipt.unknown.is_empty()));
+    drop(rook);
+    let rook = engine(workspace.path(), store.path());
+    let parked = work::advance(&rook, &run.id, |_| panic!("human wait cannot automatically run"), |_| {})
+        .await
+        .unwrap();
+    assert_eq!(parked.status, Status::Blocked);
+    assert_eq!(parked.reply, reason);
+    work::control(&rook, &run.id, Action::Resume).unwrap();
+    let resumed = Script::with_completion(
+        vec![block(serde_json::json!({"reason":"A second prerequisite needs review."}))],
+        vec![],
+    );
+    let next =
+        work::advance(&rook, &run.id, |session| Ok(AgentLoop::new(&rook, resumed.clone(), session)), |_| {})
+            .await
+            .unwrap();
+    assert_eq!(next.status, Status::Blocked);
+    assert_eq!(next.iterations, 2);
+    assert_eq!(next.session, first.session, "explicit resume retains the original transcript");
+    assert!(resumed.seen.lock().unwrap()[0].contains(reason), "the committed blocker is in resumed context");
+}
+
+#[tokio::test]
+async fn invalid_human_blockers_do_not_park_the_task_or_skip_later_valid_work() {
+    for args in [
+        serde_json::json!({}),
+        serde_json::json!({"reason":" "}),
+        serde_json::json!({"reason":"x".repeat(2049)}),
+        serde_json::json!({"reason":"a\nb"}),
+        serde_json::json!({"reason":"valid","seconds":1}),
+    ] {
+        let workspace = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let rook = engine(workspace.path(), store.path());
+        let run = start(&rook);
+        let script = Script::with_completion(
+            vec![block(args), block(serde_json::json!({"reason":"Needs a physical input."}))],
+            vec![],
+        );
+        let result = work::advance(
+            &rook,
+            &run.id,
+            |session| Ok(AgentLoop::new(&rook, script.clone(), session)),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.status, Status::Blocked);
+        assert_eq!(result.iterations, 1);
+        assert_eq!(result.reason, "Needs a physical input.");
+        assert_eq!(script.seen.lock().unwrap().len(), 2);
+    }
+}
+
+#[tokio::test]
+async fn a_human_blocker_is_durable_even_if_the_stage_dies_before_recording_its_outcome() {
+    use futures_util::FutureExt;
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let rook = engine(workspace.path(), store.path());
+    let run = start(&rook);
+    let script =
+        Script::with_completion(vec![block(serde_json::json!({"reason":"Needs a manual login."}))], vec![]);
+    let stage = work::advance(
+        &rook,
+        &run.id,
+        |session| Ok(AgentLoop::new(&rook, script.clone(), session)),
+        |progress| {
+            if matches!(
+                progress,
+                rook_core::agent::Progress::ToolDone { name: "block_work", failed: false, .. }
+            ) {
+                panic!("fixture loses ownership immediately after the blocker transaction");
+            }
+        },
+    );
+    assert!(std::panic::AssertUnwindSafe(stage).catch_unwind().await.is_err());
+    let saved = work::read(&rook, &run.id).unwrap();
+    assert_eq!(saved.run.status, Status::Blocked);
+    assert!(!saved.run.restart_guard.unfinished_stage);
+    assert!(saved.active.unwrap().answer.is_none());
+    drop(rook);
+    let rook = engine(workspace.path(), store.path());
+    let parked =
+        work::advance(&rook, &run.id, |_| panic!("a saved human blocker cannot automatically run"), |_| {})
+            .await
+            .unwrap();
+    assert_eq!(parked.reply, "Needs a manual login.");
+    work::control(&rook, &run.id, Action::Resume).unwrap();
+    let resumed = Script::with_completion(
+        vec![block(serde_json::json!({"reason":"Manual check still pending."}))],
+        vec![],
+    );
+    let next =
+        work::advance(&rook, &run.id, |session| Ok(AgentLoop::new(&rook, resumed.clone(), session)), |_| {})
+            .await
+            .unwrap();
+    assert_eq!(next.session, parked.session);
+    assert_eq!(next.iterations, 2);
+    assert_eq!(next.reason, "Manual check still pending.");
 }
 
 #[tokio::test]
@@ -1332,77 +1499,104 @@ async fn loss_immediately_after_the_atomic_tool_checkpoint_does_not_lose_the_wai
 
 #[tokio::test]
 async fn a_late_model_response_cannot_recreate_a_wait_after_pause_and_resume_changed_its_stage() {
-    let workspace = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
-    let rook = engine(workspace.path(), store.path());
-    let run = start(&rook);
-    let provider = held(vec![defer(serde_json::json!({"seconds":60}))]);
-    let mut stage = Box::pin(work::advance(
-        &rook,
-        &run.id,
-        |session| Ok(AgentLoop::new(&rook, provider.clone(), session)),
-        |_| {},
-    ));
-    tokio::select! {
-        result = &mut stage => panic!("request must be held before control changes: {result:?}"),
-        entered = tokio::time::timeout(std::time::Duration::from_secs(60), provider.entered.notified()) => entered.unwrap(),
+    for tool in ["defer_work", "block_work"] {
+        let workspace = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let rook = engine(workspace.path(), store.path());
+        let run = start(&rook);
+        let provider = held(vec![if tool == "block_work" {
+            block(serde_json::json!({"reason":"Stale prerequisite"}))
+        } else {
+            defer(serde_json::json!({"seconds":60}))
+        }]);
+        let mut stage = Box::pin(work::advance(
+            &rook,
+            &run.id,
+            |session| Ok(AgentLoop::new(&rook, provider.clone(), session)),
+            |_| {},
+        ));
+        tokio::select! {
+            result = &mut stage => panic!("request must be held before control changes: {result:?}"),
+            entered = tokio::time::timeout(std::time::Duration::from_secs(60), provider.entered.notified()) => entered.unwrap(),
+        }
+        work::control(&rook, &run.id, Action::Pause).unwrap();
+        work::control(&rook, &run.id, Action::Resume).unwrap();
+        provider.release.notify_one();
+        let after = stage.await.unwrap();
+        assert!(after.waiting.is_none(), "an earlier physical request cannot replace explicit resume");
+        let session = rook_store::parse_session_id(after.session.as_ref().unwrap()).unwrap();
+        assert!(
+            rook.transcript(session, 0, 128, 4096)
+                .unwrap()
+                .iter()
+                .any(|entry| entry.body.contains("checkpoint was not committed"))
+        );
+        work::control(&rook, &run.id, Action::Resume).unwrap();
+        let current = Script::new(vec![defer(serde_json::json!({"seconds":60,"reason":"fresh stage"}))]);
+        let resumed = work::advance(
+            &rook,
+            &run.id,
+            |session| Ok(AgentLoop::new(&rook, current.clone(), session)),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(resumed.waiting.unwrap().reason, "fresh stage");
     }
-    work::control(&rook, &run.id, Action::Pause).unwrap();
-    work::control(&rook, &run.id, Action::Resume).unwrap();
-    provider.release.notify_one();
-    let after = stage.await.unwrap();
-    assert!(after.waiting.is_none(), "an earlier physical request cannot replace explicit resume");
-    let session = rook_store::parse_session_id(after.session.as_ref().unwrap()).unwrap();
-    assert!(
-        rook.transcript(session, 0, 128, 4096)
-            .unwrap()
-            .iter()
-            .any(|entry| entry.body.contains("old wait was not committed"))
-    );
-    work::control(&rook, &run.id, Action::Resume).unwrap();
-    let current = Script::new(vec![defer(serde_json::json!({"seconds":60,"reason":"fresh stage"}))]);
-    let resumed =
-        work::advance(&rook, &run.id, |session| Ok(AgentLoop::new(&rook, current.clone(), session)), |_| {})
-            .await
-            .unwrap();
-    assert_eq!(resumed.waiting.unwrap().reason, "fresh stage");
 }
 
 #[tokio::test]
 async fn a_wait_is_not_a_final_answer_and_does_not_validate_repair_or_write_its_output_contract() {
-    let workspace = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
-    let rook = engine(workspace.path(), store.path());
-    let run = start(&rook);
-    let script = Script::new(vec![defer(serde_json::json!({"seconds":60}))]);
-    let after = work::advance(&rook, &run.id, |session| {
+    for tool in ["defer_work", "block_work"] {
+        let workspace = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let rook = engine(workspace.path(), store.path());
+        let run = start(&rook);
+        let script = Script::with_completion(
+            vec![if tool == "block_work" {
+                block(serde_json::json!({"reason":"Needs a manual verification"}))
+            } else {
+                defer(serde_json::json!({"seconds":60}))
+            }],
+            vec![],
+        );
+        let after = work::advance(&rook, &run.id, |session| {
         let mut agent = AgentLoop::new(&rook, script.clone(), session);
         agent.options.output_schema = Some(serde_json::json!({"type":"object","required":["ok"],"properties":{"ok":{"type":"boolean"}},"additionalProperties":false}));
         agent.options.output = Some("final.json".into());
         Ok(agent)
     }, |_| {}).await.unwrap();
-    assert_eq!(
-        after.status,
-        Status::Queued,
-        "a deferred boundary cannot become an output/provider failure: {after:?}"
-    );
-    assert_eq!(after.consecutive_failures, 0);
-    assert_eq!(after.next_attempt_at, Some(after.waiting.unwrap().until));
-    let session = rook_store::parse_session_id(after.session.as_ref().unwrap()).unwrap();
-    assert_eq!(rook.completed_turn(session).unwrap().unwrap().stopped, "work_deferred");
-    assert!(
-        !rook
-            .store
-            .events(session, 0, 128)
-            .unwrap()
-            .iter()
-            .any(|event| event.record.kind == rook_store::EventKind::Error && event.record.label == "output")
-    );
-    assert!(
-        !workspace.path().join("final.json").exists(),
-        "only an actual final answer may produce the requested artifact"
-    );
-    assert_eq!(script.seen.lock().unwrap().len(), 1);
+        assert_eq!(
+            after.status,
+            if tool == "block_work" { Status::Blocked } else { Status::Queued },
+            "a deferred boundary cannot become an output/provider failure: {after:?}"
+        );
+        assert_eq!(after.consecutive_failures, 0);
+        if tool == "block_work" {
+            assert!(after.next_attempt_at.is_none());
+        } else {
+            assert_eq!(after.next_attempt_at, Some(after.waiting.unwrap().until));
+        }
+        let session = rook_store::parse_session_id(after.session.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            rook.completed_turn(session).unwrap().unwrap().stopped,
+            if tool == "block_work" { "work_blocked" } else { "work_deferred" }
+        );
+        assert!(
+            !rook
+                .store
+                .events(session, 0, 128)
+                .unwrap()
+                .iter()
+                .any(|event| event.record.kind == rook_store::EventKind::Error
+                    && event.record.label == "output")
+        );
+        assert!(
+            !workspace.path().join("final.json").exists(),
+            "only an actual final answer may produce the requested artifact"
+        );
+        assert_eq!(script.seen.lock().unwrap().len(), 1);
+    }
 }
 
 #[tokio::test]
@@ -2070,6 +2264,128 @@ async fn an_unknown_effect_blocks_the_scheduler_before_it_can_retry() {
         .unwrap()["unknown"][0]["id"],
         "operation-one"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn completion_outages_recheck_the_retained_reply_and_park_after_three_failures() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("evidence.txt"), "done").unwrap();
+    let mut rook = engine(workspace.path(), store.path());
+    let run = start(&rook);
+    let reply = "I need you to log into the game and press the key with a physical keyboard to continue.";
+    let mut empty = answer("").unwrap();
+    empty.stop_reason = StopReason::MaxTokens;
+    empty.usage.output_tokens = 512;
+    let provider =
+        Script::with_completion(vec![read(), answer(reply)], vec![Ok(empty), answer("not JSON"), answer("")]);
+    for attempt in 1..=3 {
+        let result = work::advance(
+            &rook,
+            &run.id,
+            |session| Ok(AgentLoop::new(&rook, provider.clone(), session)),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.consecutive_failures, attempt);
+        assert_eq!(result.iterations, 0);
+        assert_eq!(result.reply, reply, "attempt {attempt}: {result:?}");
+        assert_eq!(provider.seen.lock().unwrap().len(), 2, "work/tools must never be replayed");
+        let saved = work::read(&rook, &run.id).unwrap();
+        let retained = saved.active.unwrap().answer.unwrap();
+        assert_eq!(retained.reply, reply);
+        assert_eq!(retained.tools_called, ["read_file"]);
+        if attempt < 3 {
+            assert_eq!(result.status, Status::RetryWait);
+            assert!(result.next_attempt_at.is_some());
+            work::update(&rook, &run.id, |s| {
+                s.run.next_attempt_at = Some(0);
+                if attempt == 1 {
+                    // Crash after the turn receipt committed but before Active.answer did.
+                    s.active.as_mut().unwrap().answer = None;
+                }
+                Ok(())
+            })
+            .unwrap();
+            drop(rook);
+            rook = engine(workspace.path(), store.path());
+        } else {
+            assert_eq!(result.status, Status::Blocked);
+            assert!(result.next_attempt_at.is_none());
+            assert!(result.reason.contains("saved reply retained"));
+            let again =
+                work::advance(&rook, &run.id, |_| panic!("blocked work must not create an agent"), |_| {})
+                    .await
+                    .unwrap();
+            assert_eq!(again.status, Status::Blocked);
+        }
+    }
+    let requests = provider.completion_requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests.iter().all(|r| r.tools.is_empty() && r.max_output_tokens == 4096));
+    assert!(requests.iter().all(|r| {
+        let data: serde_json::Value = serde_json::from_str(&r.messages[1].content).unwrap();
+        data["reply"] == reply
+    }));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recovered_completion_verdict_blocks_or_verifies_without_replaying_work() {
+    for verdict in ["blocked", "finish", "continue"] {
+        let workspace = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("evidence.txt"), "done").unwrap();
+        let rook = engine(workspace.path(), store.path());
+        let run = start(&rook);
+        let provider = Script::with_completion(
+            vec![answer("evidence.txt contains done."), read(), answer("VERDICT: holds")],
+            vec![
+                answer(""),
+                answer(&format!(r#"{{"action":"{verdict}"}}"#)),
+                answer(r#"{"action":"finish"}"#),
+            ],
+        );
+        let first = work::advance(
+            &rook,
+            &run.id,
+            |session| Ok(AgentLoop::new(&rook, provider.clone(), session)),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.status, Status::RetryWait);
+        work::update(&rook, &run.id, |s| {
+            s.run.next_attempt_at = Some(0);
+            Ok(())
+        })
+        .unwrap();
+        let result = work::advance(
+            &rook,
+            &run.id,
+            |session| Ok(AgentLoop::new(&rook, provider.clone(), session)),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.reply, first.reply);
+        assert_eq!(result.iterations, 1);
+        assert_eq!(result.consecutive_failures, 0);
+        let expected = match verdict {
+            "blocked" => Status::Blocked,
+            "finish" => Status::Completed,
+            _ => Status::Queued,
+        };
+        assert_eq!(result.status, expected, "{result:?}");
+        let seen = provider.seen.lock().unwrap();
+        if verdict == "finish" {
+            assert_eq!(seen.len(), 3, "only independent verification may run after classification");
+            assert!(seen[1].contains("the agent has just finished a turn"));
+        } else {
+            assert_eq!(seen.len(), 1, "no new work before an explicit continuation decision");
+        }
+        assert!(result.tokens > first.tokens, "retry classification usage must be charged");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

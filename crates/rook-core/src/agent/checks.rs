@@ -299,6 +299,35 @@ impl<'a> AgentLoop<'a> {
         }
     }
 
+    /// Recheck a retained reply without entering the model/tool execution loop.
+    /// The stage has its own remaining budget; prior turn usage is already charged.
+    pub(crate) async fn recheck_completion(
+        &mut self,
+        task: &str,
+        outcome: &mut TurnOutcome,
+        on_progress: &mut impl FnMut(Progress<'_>),
+    ) {
+        if self.max_turn_secs > 0 {
+            self.by = Some(std::time::Instant::now() + std::time::Duration::from_secs(self.max_turn_secs));
+        }
+        let mut spent = outcome.clone();
+        spent.input_tokens = 0;
+        spent.output_tokens = 0;
+        spent.cached_tokens = 0;
+        let decision = self.completion_check(task, task, &outcome.reply, &mut spent, on_progress).await;
+        outcome.input_tokens = outcome.input_tokens.saturating_add(spent.input_tokens);
+        outcome.output_tokens = outcome.output_tokens.saturating_add(spent.output_tokens);
+        outcome.cached_tokens = outcome.cached_tokens.saturating_add(spent.cached_tokens);
+        outcome.open_questions.retain(|q| !q.starts_with("completion check"));
+        match decision {
+            Ok(crate::completion::Action::Finish) => outcome.stopped = "end_turn".into(),
+            Ok(crate::completion::Action::Blocked) => outcome.stopped = "blocked".into(),
+            // Only a valid continuation decision may admit another work iteration.
+            Ok(crate::completion::Action::Continue) => outcome.stopped = "incomplete".into(),
+            Err(note) => outcome.open_questions.push(note),
+        }
+    }
+
     pub(super) async fn completion_check(
         &self,
         task: &str,

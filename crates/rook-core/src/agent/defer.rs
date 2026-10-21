@@ -1,10 +1,14 @@
 //! Managed waits close the physical turn without another model request.
 use super::{AgentLoop, TurnOutcome, effects::Shown, tools::Recorded};
-use crate::{Result, execution::Journal, work::managed::deferred};
+use crate::{
+    Result,
+    execution::Journal,
+    work::managed::{blocked, deferred},
+};
 use rook_tools::policy::Risk;
 
 impl AgentLoop<'_> {
-    pub(super) async fn defer_work(
+    pub(super) async fn checkpoint_work(
         &self,
         call: &rook_llm::ToolCall,
         outcome: &mut TurnOutcome,
@@ -12,34 +16,45 @@ impl AgentLoop<'_> {
         journal: &Journal,
     ) -> Result<Recorded> {
         let prepared = if !self.managed_iteration || self.depth != 0 || self.checking || self.review_only {
-            Err("defer_work is available only in an admitted root managed stage".into())
+            Err("managed checkpoints are available only in an admitted root managed stage".into())
         } else if children_running {
-            Err("collect running children before deferring; a wait cannot abandon scoped child work".into())
+            Err("collect running children before checkpointing; a checkpoint cannot abandon scoped child work".into())
+        } else if call.name == blocked::TOOL {
+            blocked::parse(&call.arguments).map(|reason| (None, reason)).map_err(|error| error.to_string())
         } else {
-            deferred::parse(&call.arguments).map_err(|error| error.to_string())
+            deferred::parse(&call.arguments)
+                .map(|request| (Some(request.seconds), request.reason))
+                .map_err(|error| error.to_string())
         };
         let result = match prepared {
             Err(why) => Err(why),
-            Ok(mut request) => {
-                request.reason = self.vault.redact(&request.reason);
+            Ok((seconds, reason)) => {
+                let reason = self.vault.redact(&reason);
                 outcome.tools_called.push(call.name.clone());
                 let risk = Risk::Write(vec!["managed work continuation".into()]);
                 if let Some(why) = self.gate_risk(&call.name, &call.arguments, risk, Shown::Nothing).await {
                     Err(why)
                 } else if let Some(identity) = &self.managed_work {
-                    deferred::commit(
-                        self.rook,
-                        identity,
-                        deferred::Call {
-                            session: self.session,
-                            turn: journal.turn(),
-                            id: &call.id,
-                            control_revision: self.managed_control_revision.unwrap_or(u64::MAX),
-                        },
-                        request,
-                        outcome,
-                        |key, bytes, text| journal.complete_checkpoint(text, key, bytes),
-                    )
+                    let checkpoint = deferred::Call {
+                        session: self.session,
+                        turn: journal.turn(),
+                        id: &call.id,
+                        control_revision: self.managed_control_revision.unwrap_or(u64::MAX),
+                    };
+                    let write = |key: &str, bytes: &[u8], text: &str| {
+                        journal.complete_checkpoint(&call.name, text, key, bytes)
+                    };
+                    match seconds {
+                        Some(seconds) => deferred::commit(
+                            self.rook,
+                            identity,
+                            checkpoint,
+                            deferred::Request { seconds, reason },
+                            outcome,
+                            write,
+                        ),
+                        None => blocked::commit(self.rook, identity, checkpoint, reason, outcome, write),
+                    }
                     .map_err(|error| error.to_string())
                 } else {
                     Err("the managed goal changed; no wait was committed".into())
@@ -66,6 +81,7 @@ mod tests {
 
     struct Script {
         seen: Mutex<Vec<Request>>,
+        tool: &'static str,
     }
     #[async_trait]
     impl Provider for Script {
@@ -92,8 +108,12 @@ mod tests {
             if first {
                 message.tool_calls.push(ToolCall {
                     id: "forbidden-wait".into(),
-                    name: "defer_work".into(),
-                    arguments: serde_json::json!({"seconds":60}),
+                    name: self.tool.into(),
+                    arguments: if self.tool == blocked::TOOL {
+                        serde_json::json!({"reason":"Needs user input"})
+                    } else {
+                        serde_json::json!({"seconds":60})
+                    },
                 });
             }
             Ok(Response {
@@ -108,7 +128,10 @@ mod tests {
     #[tokio::test]
     async fn unadvertised_contexts_and_readonly_policy_cannot_be_bypassed_by_a_forged_wait_call() {
         use crate::work::managed as work;
-        for mode in ["ordinary", "checker", "child", "recipe", "readonly"] {
+        for (mode, tool) in ["ordinary", "checker", "child", "recipe", "readonly"]
+            .into_iter()
+            .flat_map(|mode| [deferred::TOOL, blocked::TOOL].map(|tool| (mode, tool)))
+        {
             let workspace = tempfile::tempdir().unwrap();
             let store = tempfile::tempdir().unwrap();
             let rook = crate::Rook::from_parts(
@@ -131,7 +154,7 @@ mod tests {
                 },
             )
             .unwrap();
-            let script = Arc::new(Script { seen: Mutex::new(Vec::new()) });
+            let script = Arc::new(Script { seen: Mutex::new(Vec::new()), tool });
             let make = |session| {
                 let mut agent = AgentLoop::new(&rook, script.clone(), session);
                 agent.allow_everything_not_denied();
@@ -158,11 +181,10 @@ mod tests {
             assert!(work::read(&rook, &run.id).unwrap().run.waiting.is_none(), "{mode}");
             let seen = script.seen.lock().unwrap();
             assert!(!seen.is_empty());
-            let offered = seen[0].tools.iter().any(|tool| tool.name == "defer_work");
+            let offered = seen[0].tools.iter().any(|spec| spec.name == tool);
             assert_eq!(offered, mode == "readonly", "catalog scope for {mode}");
             let rows = rook.transcript(session, 0, 128, 4096).unwrap();
-            let refusal =
-                rows.iter().find(|row| row.kind == "tool-result" && row.label == "defer_work").unwrap();
+            let refusal = rows.iter().find(|row| row.kind == "tool-result" && row.label == tool).unwrap();
             assert!(
                 refusal.body.contains(if mode == "recipe" {
                     "unavailable"

@@ -135,7 +135,9 @@ impl<'a> AgentLoop<'a> {
             let seq = self.rook.log(self.session, EventKind::ToolResult, &call.name, &text)?;
             return Ok(Recorded { text, failed: true, seq: Some(seq), job: None });
         }
-        let effects = if call.name == crate::work::managed::deferred::TOOL {
+        let checkpoint = [crate::work::managed::deferred::TOOL, crate::work::managed::blocked::TOOL]
+            .contains(&call.name.as_str());
+        let effects = if checkpoint {
             // The wait itself is one atomic metadata transaction. Only a hook
             // that can actually run before it introduces an external effect;
             // observer and closing hooks have separate ownership receipts.
@@ -177,8 +179,8 @@ impl<'a> AgentLoop<'a> {
             background,
             self.tool_ctx.jobs.as_deref(),
         )?;
-        if call.name == crate::work::managed::deferred::TOOL {
-            return self.defer_work(call, outcome, nursery.busy(), &journal).await;
+        if checkpoint {
+            return self.checkpoint_work(call, outcome, nursery.busy(), &journal).await;
         }
         self.tool_execution_uncertain.store(false, std::sync::atomic::Ordering::Release);
         *self.launched_job.lock().unwrap_or_else(|e| e.into_inner()) = None;

@@ -75,6 +75,13 @@ impl<'a> AgentLoop<'a> {
         });
         if self.managed_iteration && self.depth == 0 && !checking {
             push(ToolSpec {
+                name: crate::work::managed::blocked::TOOL.into(),
+                description: "Save a blocker and stop this managed goal until the user explicitly resumes it. Use when remaining work requires the user's login, physical input, answer or external action. Explain what is needed; collect running children first. This does not complete the goal.".into(),
+                parameters: json!({"type":"object","properties":{
+                    "reason":{"type":"string","minLength":1,"maxLength":2048}
+                },"required":["reason"],"additionalProperties":false}),
+            });
+            push(ToolSpec {
                 name: crate::work::managed::deferred::TOOL.into(),
                 description: "Save this managed stage and continue its transcript later. Ends the turn; collect running children first. Existing goal budgets and user controls remain in force.".into(),
                 parameters: json!({"type":"object","properties":{

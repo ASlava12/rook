@@ -19,6 +19,30 @@ pub(crate) struct Call<'a> {
     pub control_revision: u64,
 }
 
+/// Called while holding WRITING, before publishing any managed checkpoint.
+pub(super) fn checkpoint(rook: &Rook, identity: &RunIdentity, call: &Call<'_>) -> Result<Saved> {
+    if call.id.is_empty() || call.id.len() > 128 || call.id.chars().any(char::is_control) {
+        return Err(bad("managed checkpoint requires a bounded tool call identity"));
+    }
+    let saved = read_identity(rook, identity)?.ok_or_else(|| bad("the managed goal changed"))?;
+    if saved.control_revision != call.control_revision {
+        return Err(bad("user controls changed after this stage was admitted; checkpoint was not committed"));
+    }
+    if !saved.run.status.runnable() || !owns_step(rook, &identity.id) {
+        return Err(bad("checkpoint requires an admitted runnable managed stage"));
+    }
+    let active = saved.active.as_ref().ok_or_else(|| bad("the managed stage has no checkpoint"))?;
+    if active.session != rook_store::format_session_id(call.session) {
+        return Err(bad("checkpoint cannot change another session"));
+    }
+    if saved.run.instructions.iter().any(|message| message.queued() && message.follow_up.is_none())
+        || !crate::message_queue::pending(rook, call.session)?.is_empty()
+    {
+        return Err(bad("new guidance is queued; read it before ending this managed stage"));
+    }
+    Ok(saved)
+}
+
 pub(crate) fn parse(args: &Value) -> Result<Request> {
     let fields = args.as_object().ok_or_else(|| bad("defer_work expects an object"))?;
     if fields.keys().any(|key| !matches!(key.as_str(), "seconds" | "reason")) {
@@ -57,29 +81,10 @@ pub(crate) fn commit(
     {
         return Err(bad("wait must be 1..86400 seconds with at most 512 bytes of reason text"));
     }
-    if call.id.is_empty() || call.id.len() > 128 || call.id.chars().any(char::is_control) {
-        return Err(bad("defer_work requires a bounded tool call identity"));
-    }
     let _writing = WRITING.lock().unwrap_or_else(|e| e.into_inner());
-    let mut saved = read_identity(rook, identity)?.ok_or_else(|| bad("the managed goal changed"))?;
-    if saved.control_revision != call.control_revision {
-        return Err(bad(
-            "user controls changed after this stage was admitted; the old wait was not committed",
-        ));
-    }
-    if !saved.run.status.runnable() || !owns_step(rook, &identity.id) {
-        return Err(bad("defer_work requires an admitted runnable managed stage"));
-    }
+    let mut saved = checkpoint(rook, identity, &call)?;
     let session = rook_store::format_session_id(call.session);
     let active = saved.active.as_ref().ok_or_else(|| bad("the managed stage has no checkpoint"))?;
-    if active.session != session {
-        return Err(bad("defer_work cannot schedule another session"));
-    }
-    if saved.run.instructions.iter().any(|message| message.queued() && message.follow_up.is_none())
-        || !crate::message_queue::pending(rook, call.session)?.is_empty()
-    {
-        return Err(bad("new guidance is queued; read it before deferring the goal"));
-    }
     let at = now();
     let waiting = if let Some(waiting) = &saved.run.waiting {
         if waiting.turn != call.turn || waiting.call != call.id || waiting.session != session {
@@ -229,7 +234,7 @@ mod tests {
         );
         let (seq, _) =
             commit(&rook, &run.identity(), call("same-call"), request(), &outcome, |key, bytes, text| {
-                journal.complete_checkpoint(text, key, bytes)
+                journal.complete_checkpoint(TOOL, text, key, bytes)
             })
             .unwrap();
         let saved = read(&rook, &run.id).unwrap();
@@ -250,7 +255,7 @@ mod tests {
         );
         journal.begin(TOOL, "{\"seconds\":60}", false, false, None).unwrap();
         commit(&rook, &run.identity(), call("same-call"), request(), &outcome, |key, bytes, text| {
-            journal.complete_checkpoint(text, key, bytes)
+            journal.complete_checkpoint(TOOL, text, key, bytes)
         })
         .unwrap();
         let retried = read(&rook, &run.id).unwrap();

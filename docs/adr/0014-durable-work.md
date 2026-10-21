@@ -37,6 +37,20 @@ Completion requires independent evidence for the current goal as well as any
 configured project scorecard. Saved model verdicts are not trusted after a
 restart without checking current evidence again.
 
+A failed completion classifier retains the proposed reply and retries only its
+classification, including after restart. It must not re-enter the work/tool loop
+to obtain another reply. Three consecutive classification failures park the run
+for explicit review/resume, independently of the iteration limit or retry window.
+A valid continuation verdict admits another iteration; a finish verdict still
+requires independent goal verification. Replies that require the user's answer,
+login or physical input are classified as blocked, even when they also suggest
+further investigation.
+
+An explicit `block_work` checkpoint saves a human prerequisite atomically with
+the tool result and execution receipt. It ends the stage without classification
+or a timer. Existing controls explicitly resume the same transcript; restart
+alone keeps it parked. See [managed blockers](../managed-blockers.md).
+
 ## Costs and limits
 
 A running operating-system process, available machine and working model are

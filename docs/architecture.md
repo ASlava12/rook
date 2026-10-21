@@ -902,6 +902,10 @@ boundary; tool policy and containment remain independent enforcement layers.
 
 ## Durable task supervision
 
+An admitted root stage can save a human prerequisite with `block_work`, parking
+the existing goal until explicit resume. Classifier failures recheck the retained
+reply instead of rerunning work. [Checkpoint contract and recovery](managed-blockers.md).
+
 `rook-proto::work` defines task states and steering receipts.
 `rook-core::work::managed` owns durable transitions, budgets, retry deadlines,
 stage admission and completion verification. Session goals reuse their existing

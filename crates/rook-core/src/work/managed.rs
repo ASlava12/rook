@@ -2,6 +2,7 @@
 //! so a user's correction can be saved while the model or a tool is busy.
 use super::receipts::WRITING;
 
+pub(crate) mod blocked;
 pub(crate) mod deferred;
 
 use rook_proto::work::{
@@ -715,7 +716,10 @@ fn prompt(saved: &Saved, rook: &Rook) -> String {
          increments. Keep .rook/plan.md current: requirements, completed steps and evidence, \
          remaining steps, failed approaches, and the next action. Do not substitute passing \
          existing tests for the requested outcome. A bounded turn may end while the task continues. \
-         The supervisor checks completion independently. Preserve the user's scope and permissions.",
+         The supervisor checks completion independently. Preserve the user's scope and permissions. \
+         If all remaining progress requires the user's answer, login, physical input or external \
+         action, use block_work when available to save the prerequisite and wait for explicit resume. \
+         Do not keep probing the same unavailable input path.",
         saved.run.goal,
         saved.run.iterations.saturating_add(1)
     );
@@ -763,6 +767,20 @@ fn failed(rook: &Rook, id: &str, why: &str) -> Result<()> {
         let at = now();
         let since = *saved.failed_since.get_or_insert(at);
         saved.run.consecutive_failures = saved.run.consecutive_failures.saturating_add(1);
+        let classification = saved
+            .active
+            .as_ref()
+            .and_then(|active| active.answer.as_ref())
+            .filter(|answer| answer.stopped == "completion_unchecked");
+        if let Some(answer) = classification {
+            saved.run.reply = clipped(&answer.reply, 16384);
+        }
+        if classification.is_some() && saved.run.consecutive_failures >= 3 {
+            saved.run.status = Status::Blocked;
+            saved.run.next_attempt_at = None;
+            saved.run.reason = "completion classification remains unresolved after repeated failures; saved reply retained, automatic work stopped. Inspect the reply and resume explicitly".into();
+            return Ok(());
+        }
         let lower = why.to_ascii_lowercase();
         let permanent = [
             "returned 401",
@@ -963,7 +981,7 @@ async fn advance_stage<'a>(
             .iter()
             .any(|e| e.session == active.session && e.start_seq >= active.start_seq)
         && let Some(answer) = rook.completed_turn(session)?
-        && !matches!(answer.stopped.as_str(), "completion_unchecked" | "work_paused" | "work_deferred")
+        && !matches!(answer.stopped.as_str(), "work_paused" | "work_deferred" | "work_blocked")
     {
         update(rook, id, |s| {
             s.active.as_mut().ok_or_else(|| bad("active work session disappeared"))?.answer = Some(answer);
@@ -1023,7 +1041,17 @@ async fn advance_stage<'a>(
         rook.set_goal(session, &goal(&saved.run))?;
     }
     let mut outcome = match saved.active.as_ref().and_then(|a| a.answer.clone()) {
-        Some(answer) => answer,
+        Some(mut answer) => {
+            if answer.stopped == "completion_unchecked" {
+                agent.recheck_completion(&goal(&saved.run), &mut answer, &mut progress).await;
+                update(rook, id, |s| {
+                    s.active.as_mut().ok_or_else(|| bad("active work session disappeared"))?.answer =
+                        Some(answer.clone());
+                    Ok(())
+                })?;
+            }
+            answer
+        }
         None => match agent.run_with(&prompt(&saved, rook), &mut progress).await {
             Ok(answer) => {
                 update(rook, id, |s| {
@@ -1049,6 +1077,14 @@ async fn advance_stage<'a>(
     };
     account(rook, id, session)?;
     saved = read(rook, id)?;
+    if outcome.stopped == "work_blocked" {
+        return update(rook, id, |s| {
+            if let Some(active) = &mut s.active {
+                active.answer = None;
+            }
+            Ok(s.run.clone())
+        });
+    }
     // Pause/cancel is graceful: completed operations retain receipts; the active
     // session stays available until its answer has been safely stored.
     if !saved.run.status.runnable() {
@@ -1075,15 +1111,9 @@ async fn advance_stage<'a>(
             Ok(s.run.clone())
         });
     }
-    // A classifier outage leaves a finished model reply, but not a decision
-    // that the task is blocked. Retry the turn with its existing transcript.
+    // Retain the finished reply: a classifier failure must never replay tools.
+    // Bound these failures independently of completed iterations and retry time.
     if outcome.stopped == "completion_unchecked" {
-        update(rook, id, |s| {
-            if let Some(active) = &mut s.active {
-                active.answer = None;
-            }
-            Ok(())
-        })?;
         failed(rook, id, &outcome.open_questions.join("; "))?;
         return Ok(read(rook, id)?.run);
     }
