@@ -13,6 +13,11 @@ The smoke's endpoint check, scenario turns and transcript reads set both
 inherited config override must not replace the requested model, eight-step
 limit or disabled server installation. This isolates the scenario config;
 provider endpoints and credentials still follow the normal config machinery.
+On failure, diagnostics read the latest root session and at most two of its
+direct children, including verifier sessions. Each read covers up to 40 newest
+events with 1200-byte body previews. The display keeps the beginning and end
+within 80 lines for the root and 40 per child, with omitted lines marked. These
+are bounded excerpts, not a complete transcript or an independent verdict.
 The Linux CI job also runs the pure-Python archive verifier regressions.
 
 An annotated stable `vX.Y.Z` tag triggers `.github/workflows/release.yml`.
