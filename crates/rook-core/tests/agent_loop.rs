@@ -440,8 +440,12 @@ fn conversation_recall_schema_rejects_mixed_discovery_and_read_arguments() {
     assert!(!validate.is_valid(&serde_json::json!({})));
 }
 
-fn fixture_with(config: Config) -> Fixture {
+fn fixture_with(mut config: Config) -> Fixture {
     redirect_home();
+    // Scripted loop tests exercise tools and configured mock servers, never
+    // bootstrap real language servers from the network. Autonomous policy in
+    // an otherwise ordinary file test must not start a GitHub download.
+    config.agent.install_servers = false;
     let store_dir = tempfile::tempdir().unwrap();
     let skill_dir = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
