@@ -35,6 +35,11 @@ jobs:
         run: cargo test --locked -p rook-contain process::tests -- --nocapture
       - run: cargo xtask ci
         timeout-minutes: 45
+      - name: compaction comparison admission
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo build --locked -p rook-core --example compaction-ab
+          python3 xtask/probes/compaction-comparison/run.py --binary target/debug/examples/compaction-ab --output "$RUNNER_TEMP/rook-compaction-comparison.json"
 
       # The Intel slice of macOS has no hosted runner any more, but its SDK is
       # right here on the Apple-silicon one, so it is at least kept compiling.

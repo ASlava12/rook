@@ -18,6 +18,29 @@ struct Entry {
     body: String,
 }
 
+#[derive(Deserialize)]
+struct CompactionOutcome {
+    summarized: bool,
+}
+
+#[derive(Deserialize)]
+struct Auxiliary {
+    purpose: String,
+    receipt: rook_core::model_route::Receipt,
+}
+
+fn record_body(
+    rook: &Rook,
+    event: &rook_store::Event,
+    maximum: usize,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let body = rook.store.get_range(&event.record.body, 0, maximum + 1)?;
+    if body.len() > maximum {
+        return Err("comparison metadata exceeds its admission limit".into());
+    }
+    Ok(body)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     rook_core::config::load_env_file();
     tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(run())
@@ -93,17 +116,51 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let elapsed_ms = start.elapsed().as_millis();
                 let (_, summary) = rook.last_compaction(session)?;
                 let events = rook.transcript(session, 0, 1024, 65536)?;
-                let usage: Vec<_> = rook.store.events(session, 0, 1024)?.into_iter().filter(|e| e.record.label == "compaction usage")
+                let saved = rook.store.events(session, 0, 1024)?;
+                let usage: Vec<_> = saved.iter().filter(|e| e.record.label == "compaction usage")
                     .map(|e| serde_json::json!({"input_tokens":e.record.tokens_in,"output_tokens":e.record.tokens_out})).collect();
-                let available = !usage.is_empty();
+                // Usage is retained for incomplete/empty responses too. Read
+                // committed metadata, never a display-truncated note or prose.
+                let outcome = saved
+                    .iter()
+                    .rev()
+                    .find(|e| e.record.kind == rook_store::EventKind::Compaction)
+                    .map(|event| {
+                        record_body(&rook, event, 1024 * 1024)
+                            .and_then(|body| Ok(serde_json::from_slice::<CompactionOutcome>(&body)?))
+                    })
+                    .transpose()?;
+                let mut model_receipt = None;
+                for event in saved.iter().rev().filter(|e| e.record.label == "rook:model-aux:v1") {
+                    let auxiliary: Auxiliary = serde_json::from_slice(&record_body(&rook, event, 4096)?)?;
+                    if auxiliary.purpose == "compaction" {
+                        model_receipt = Some(auxiliary.receipt);
+                        break;
+                    }
+                }
+                let compaction_outcome = match outcome.as_ref().map(|note| note.summarized) {
+                    Some(true) => "summary",
+                    Some(false) => "source_fallback",
+                    None => "unrecorded",
+                };
                 let summary = summary.unwrap_or_default();
-                let checks:Vec<_>=fixture.checks.iter().map(|term|serde_json::json!({"term":term,"preserved":summary.to_lowercase().contains(&term.to_lowercase())})).collect();
+                let available = compaction_outcome == "summary"
+                    && !summary.trim().is_empty()
+                    && !usage.is_empty()
+                    && model_receipt
+                        .as_ref()
+                        .is_some_and(|receipt| receipt.complete && receipt.usage_reported);
+                let checks: Vec<_> = if available {
+                    fixture.checks.iter().map(|term|serde_json::json!({"term":term,"preserved":summary.to_lowercase().contains(&term.to_lowercase())})).collect()
+                } else {
+                    Vec::new()
+                };
                 println!(
                     "{}",
-                    serde_json::json!({"fixture":fixture.name,"repeat":repeat,"candidate":candidate,"output_budget":budget,"available":available,"elapsed_ms":elapsed_ms,"usage":usage,"checks":checks,"summary":summary,"notices":events.iter().filter(|e|e.kind=="error").map(|e|e.body.clone()).collect::<Vec<_>>() })
+                    serde_json::json!({"fixture":fixture.name,"repeat":repeat,"candidate":candidate,"output_budget":budget,"available":available,"compaction_outcome":compaction_outcome,"model_receipt":model_receipt,"elapsed_ms":elapsed_ms,"usage":usage,"checks":checks,"summary":summary,"notices":events.iter().filter(|e|e.kind=="error").map(|e|e.body.clone()).collect::<Vec<_>>() })
                 );
                 if !available {
-                    return Err("summarizer unavailable; stop comparison, inspect the saved source/error, leave the default unchanged".into());
+                    return Err("summary comparison is incomplete: a confirmed summary and reported usage are required; stop comparison, inspect the saved source/error, leave the default unchanged".into());
                 }
             }
         }
