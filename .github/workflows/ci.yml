@@ -30,6 +30,9 @@ jobs:
       - name: archive verifier regressions
         if: matrix.os == 'ubuntu-latest'
         run: python3 xtask/probes/release-packages/check.py
+      - name: macOS process-group lifecycle
+        if: matrix.os == 'macos-latest'
+        run: cargo test --locked -p rook-contain process::tests -- --nocapture
       - run: cargo xtask ci
         timeout-minutes: 45
 

@@ -12,6 +12,9 @@
 //! The network is not restrained by this: an integrity level is about objects
 //! on the machine. The result of every command says so.
 
+#[cfg(target_os = "macos")]
+mod process;
+
 /// The environment variable that makes a rook binary a launcher instead of
 /// whatever it was started as. Its value is the command; the others carry
 /// where to run it and where its temporary files go.
@@ -305,15 +308,18 @@ impl Group {
     ///
     /// Signal 0 is the question rather than an answer: it performs the
     /// permission and existence checks and delivers nothing. The command's own
-    /// shell is in this group and has been reaped by the time this is asked, so
-    /// a member left is one the command started and did not wait for. The job
-    /// object answers the same question by counting.
+    /// shell may already be reaped while descendants remain. On macOS, BSD
+    /// process state also distinguishes live members from unreaped zombies;
+    /// zombies cannot perform more writes. An incomplete or refused inspection
+    /// remains unknown. The job object answers by counting on Windows.
     ///
     /// `None` where there is nothing to ask, which is not the same as an empty
     /// one — `false` there would claim nothing was left behind, and `true` that
     /// every command leaves something.
     pub fn alive(&self) -> Option<bool> {
-        #[cfg(unix)]
+        #[cfg(target_os = "macos")]
+        return self.pid.and_then(process::alive);
+        #[cfg(all(unix, not(target_os = "macos")))]
         // Safety: a signal number of 0 delivers nothing and only asks.
         return self.pid.map(|pid| unsafe { libc::kill(-(pid as i32), 0) == 0 });
         #[cfg(windows)]
