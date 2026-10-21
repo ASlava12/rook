@@ -176,6 +176,7 @@ impl Tool for RunCommand {
                     .await
                     .map_err(|e| ToolError::ExecutionUnknown(e.to_string()))?;
                 if let Err(error) = completion {
+                    outcome.meta.remove("command_result_bytes");
                     outcome.is_error = true;
                     outcome.meta.insert("exit_code".into(), serde_json::json!(-1));
                     outcome.content.push_str(&format!("\n{error}"));
@@ -197,7 +198,7 @@ impl Tool for RunCommand {
                 .collect::<Vec<_>>();
             redactions.sort_by_key(|value| std::cmp::Reverse(value.len()));
             for value in redactions {
-                outcome.content = outcome.content.replace(value, "[redacted]");
+                redact_command_result(&mut outcome, value);
             }
             cancellation.armed = false;
             return Ok(outcome.with("execution_environment", prepared.description));
@@ -567,6 +568,43 @@ impl Tool for RunCommand {
 impl RunCommand {
     fn command_of(args: &serde_json::Value) -> String {
         args.get("command").and_then(|c| c.as_str()).unwrap_or_default().to_string()
+    }
+}
+
+fn redact_command_result(outcome: &mut ToolOutcome, value: &str) {
+    let boundary = outcome
+        .meta
+        .get("command_result_bytes")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .and_then(|bytes| outcome.content.get(..bytes))
+        .map(|prefix| prefix.replace(value, "[redacted]"));
+    outcome.content = outcome.content.replace(value, "[redacted]");
+    outcome.meta.remove("command_result_bytes");
+    if let Some(prefix) = boundary.filter(|prefix| outcome.content.starts_with(prefix)) {
+        outcome.meta.insert("command_result_bytes".into(), serde_json::json!(prefix.len()));
+    }
+}
+
+#[cfg(test)]
+mod command_result_tests {
+    use super::*;
+
+    #[test]
+    fn redaction_preserves_the_output_boundary_before_appended_receipts() {
+        for secret in ["z", "long-private-value", "\u{1f980}"] {
+            let prefix = format!("exit 0\n{secret}\n");
+            let mut outcome = ToolOutcome::ok(format!("{prefix}\n[receipt: changing-id]"))
+                .with("command_result_bytes", prefix.len());
+            redact_command_result(&mut outcome, secret);
+            let bytes = outcome.meta["command_result_bytes"].as_u64().unwrap() as usize;
+            assert_eq!(outcome.content.get(..bytes), Some("exit 0\n[redacted]\n"));
+            assert!(outcome.content.ends_with("[receipt: changing-id]"));
+        }
+        let mut crossing = ToolOutcome::ok("exit 0\nxNOTE").with("command_result_bytes", 8);
+        redact_command_result(&mut crossing, "xNOTE");
+        assert!(!crossing.meta.contains_key("command_result_bytes"));
+        assert_eq!(crossing.content, "exit 0\n[redacted]");
     }
 }
 

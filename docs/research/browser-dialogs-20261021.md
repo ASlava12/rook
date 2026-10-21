@@ -76,3 +76,10 @@ and cleanup, timeout and approval behavior is unchanged. The new engine
 regression failed before this correction and passed afterward with all 11
 selected tool-cycle engine regressions on Windows. Full-suite and final platform
 validation remain pending for the corrected revision.
+
+Configured execution can redact secrets after receiving a command result. Its
+boundary is adjusted for that replacement, including UTF-8 and shorter/longer
+masked values; a replacement crossing the boundary invalidates it. A failed
+environment completion invalidates the boundary so the full error remains part
+of cycle evidence. The focused boundary/redaction regression passed on Windows.
+The six native command integration tests also passed.
