@@ -12,10 +12,11 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use serde_json::json;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 use rook_llm::ToolSpec;
 use rook_lsp::{Server, ServerConfig};
@@ -218,14 +219,30 @@ pub struct Servers {
     configs: Vec<ServerConfig>,
     root: PathBuf,
     running: Mutex<HashMap<String, Arc<Server>>>,
+    starting: HashMap<String, Arc<Starting>>,
+    closed: RwLock<bool>,
     /// Why a server would not start, so the cost of finding out is paid once.
     /// rustup installs a `rust-analyzer` shim whether or not the component is,
     /// and a turn that asked it three questions waited for three failures.
     failed: Mutex<HashMap<String, String>>,
 }
 
+#[derive(Default)]
+struct Starting {
+    gate: Mutex<()>,
+    warming: AtomicBool,
+}
+
+struct Warming(Arc<Starting>);
+impl Drop for Warming {
+    fn drop(&mut self) {
+        self.0.warming.store(false, Ordering::Release);
+    }
+}
+
 impl Servers {
     pub fn new(configs: Vec<ServerConfig>, root: &Path) -> Arc<Self> {
+        let starting = configs.iter().map(|c| (c.language.clone(), Arc::new(Starting::default()))).collect();
         Arc::new(Self {
             configs,
             // Canonical, because a server answers in whatever spelling it
@@ -233,6 +250,8 @@ impl Servers {
             // directory and results arrive under both.
             root: root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
             running: Mutex::new(HashMap::new()),
+            starting,
+            closed: RwLock::new(false),
             failed: Mutex::new(HashMap::new()),
         })
     }
@@ -271,6 +290,19 @@ impl Servers {
     /// Each in turn rather than only the first: in a Python project with a
     /// `rust-analyzer` shim on PATH, the first is the one that cannot start.
     pub async fn any(&self) -> rook_lsp::Result<Arc<Server>> {
+        // Workspace-wide queries can use an already-running server instead
+        // of queueing behind the first configured language's cold handshake.
+        let ready = {
+            let running = self.running.lock().await;
+            self.configs.iter().find(|config| {
+                running.get(&config.language).is_some_and(|server| server.is_running() == Some(true))
+            })
+        };
+        if let Some(config) = ready
+            && let Ok(server) = self.start(config).await
+        {
+            return Ok(server);
+        }
         let mut last = None;
         for config in &self.configs {
             match self.start(config).await {
@@ -282,20 +314,35 @@ impl Servers {
     }
 
     async fn start(&self, config: &ServerConfig) -> rook_lsp::Result<Arc<Server>> {
-        if let Some(complaint) = self.failed.lock().await.get(&config.language) {
+        // Shared lifetime admission lets unrelated languages initialize in
+        // parallel, while shutdown waits for already-admitted starts.
+        let closed = self.closed.try_read().map_err(|_| rook_lsp::LspError::Closed {
+            server: config.language.clone(),
+            complaint: Some("the language-server pool is shutting down".into()),
+        })?;
+        if *closed {
             return Err(rook_lsp::LspError::Closed {
                 server: config.language.clone(),
-                complaint: Some(complaint.clone()),
+                complaint: Some("the language-server pool has been shut down".into()),
             });
         }
-        let mut running = self.running.lock().await;
-        if let Some(server) = running.get(&config.language) {
-            return Ok(server.clone());
+        if let Some(server) = self.known(config).await? {
+            return Ok(server);
+        }
+        let starting = self
+            .starting
+            .get(&config.language)
+            .ok_or_else(|| rook_lsp::LspError::NoServer(config.language.clone()))?;
+        let _one = starting.gate.lock().await;
+        // Another caller may have completed or failed this very startup while
+        // we waited. Failure reuse matters as much as successful coalescing.
+        if let Some(server) = self.known(config).await? {
+            return Ok(server);
         }
         match Server::start(config, &self.root).await {
             Ok(server) => {
                 let server = Arc::new(server);
-                running.insert(config.language.clone(), server.clone());
+                self.running.lock().await.insert(config.language.clone(), server.clone());
                 Ok(server)
             }
             Err(e) => {
@@ -305,8 +352,28 @@ impl Servers {
         }
     }
 
+    async fn known(&self, config: &ServerConfig) -> rook_lsp::Result<Option<Arc<Server>>> {
+        if let Some(complaint) = self.failed.lock().await.get(&config.language).cloned() {
+            return Err(rook_lsp::LspError::Closed {
+                server: config.language.clone(),
+                complaint: Some(complaint),
+            });
+        }
+        let server = self.running.lock().await.get(&config.language).cloned();
+        if server.as_ref().is_some_and(|server| server.is_running() == Some(false)) {
+            return Err(rook_lsp::LspError::Closed {
+                server: config.language.clone(),
+                complaint: Some("the owned language-server process has exited".into()),
+            });
+        }
+        Ok(server)
+    }
+
     pub async fn shutdown(&self) {
-        for server in self.running.lock().await.values() {
+        let mut closed = self.closed.write().await;
+        *closed = true;
+        let running: Vec<_> = self.running.lock().await.values().cloned().collect();
+        for server in running {
             server.shutdown().await;
         }
     }
@@ -351,6 +418,10 @@ impl Servers {
 
     /// The server for this file, only if it is already running.
     async fn already_running(&self, path: &Path) -> Option<(Arc<Server>, String)> {
+        let closed = self.closed.try_read().ok()?;
+        if *closed {
+            return None;
+        }
         let config = self.configs.iter().find(|c| c.handles(path))?;
         let server = self.running.lock().await.get(&config.language)?.clone();
         Some((server, config.language_id.clone().unwrap_or_else(|| config.language.clone())))
@@ -358,12 +429,23 @@ impl Servers {
 
     /// Start the server for this file, without waiting for it.
     fn warm(self: &Arc<Self>, path: &Path) {
-        if !self.configs.iter().any(|c| c.handles(path)) {
+        let Ok(closed) = self.closed.try_read() else { return };
+        if *closed {
             return;
         }
+        let Some(config) = self.configs.iter().find(|c| c.handles(path)) else { return };
+        let Some(starting) = self.starting.get(&config.language) else { return };
+        if starting.warming.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            return;
+        }
+        // Created before spawn: even a future dropped before its first poll
+        // resets the per-language warm flag. Queued writes cannot accumulate
+        // one waiting background task each while a server initializes.
+        let warming = Warming(starting.clone());
         let servers = self.clone();
         let path = path.to_path_buf();
         tokio::spawn(async move {
+            let _warming = warming;
             let _ = servers.for_path(&path).await;
         });
     }

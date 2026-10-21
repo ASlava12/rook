@@ -18,6 +18,8 @@ fn main() {
     let from_the_text = std::env::args().any(|arg| arg == "--broken-lines");
     let initialization_log =
         std::env::args().find_map(|arg| arg.strip_prefix("--initialize-log=").map(str::to_owned));
+    let initialization_gate =
+        std::env::args().find_map(|arg| arg.strip_prefix("--initialize-gate=").map(str::to_owned));
 
     while let Some(length) = read_content_length(&mut stdin) {
         let mut body = vec![0u8; length];
@@ -35,6 +37,26 @@ fn main() {
                 "{}",
                 serde_json::json!({"pid":std::process::id(),"root":message["params"]["rootUri"]})
             );
+        }
+
+        if method == "initialize"
+            && let Some(path) = &initialization_gate
+        {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(180);
+            while !std::path::Path::new(path).is_file() {
+                if std::time::Instant::now() >= until {
+                    eprintln!("owned initialize gate was never released");
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let mut control = [0_u8; 4];
+            if std::fs::File::open(path).and_then(|mut file| file.read_exact(&mut control)).is_ok()
+                && control == *b"fail"
+            {
+                eprintln!("owned initialization failure");
+                return;
+            }
         }
 
         if method == "textDocument/didOpen" || method == "textDocument/didChange" {

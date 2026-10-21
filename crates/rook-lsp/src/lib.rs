@@ -355,6 +355,12 @@ impl Server {
         Ok(result.as_array().map(|items| items.iter().filter_map(symbol).collect()).unwrap_or_default())
     }
 
+    /// Observed child-process liveness, without waiting for its ownership lock.
+    /// `None` means unavailable; a live process does not establish RPC health.
+    pub fn is_running(&self) -> Option<bool> {
+        self.child.try_lock().ok()?.try_wait().ok().map(|status| status.is_none())
+    }
+
     pub async fn shutdown(&self) {
         let _ = self.notify("exit", serde_json::json!({})).await;
         let _ = self.child.lock().await.kill().await;
