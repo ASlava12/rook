@@ -300,6 +300,7 @@ document.querySelector('#prompt').onclick=()=>{const result=prompt('Owned prompt
         ("Alert", true, None, "alert:closed"),
         ("Confirm", false, None, "confirm:false"),
         ("Confirm", true, None, "confirm:true"),
+        ("Confirm", true, None, "confirm:true"),
         ("Prompt", true, Some("Rook answer"), "prompt:\"Rook answer\""),
         ("Prompt", false, None, "prompt:null"),
         ("Prompt", true, Some(""), "prompt:\"\""),
@@ -328,6 +329,7 @@ document.querySelector('#prompt').onclick=()=>{const result=prompt('Owned prompt
     }
     assert!(!observed.contains("outcome is unknown"), "{observed}");
     assert!(!observed.contains("No dialog visible"), "{observed}");
+    assert!(!observed.contains("tool-cycle guard"), "{observed}");
     assert!(rook.execution(session).unwrap().iter().all(|r| r.pending.is_none()));
     assert!(std::fs::read_dir(&rook.workspace).unwrap().next().is_none());
 }

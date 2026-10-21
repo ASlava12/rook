@@ -14,7 +14,9 @@ to confirm that contract before implementation. No upstream code is copied.
 
 The new `browser` action `dialog` reuses ordinary dispatch, approvals, MCP result
 attribution, call limits and process ownership. A required `context` from local
-`status` binds it to the current conversation and browser generation. The
+`status` binds it to the current conversation, browser generation and latest
+browser call. A response consumes that context; intervening browser calls also
+invalidate it, so a new response requires fresh local status. The
 response addresses the driver's current dialog, not a persistent per-dialog ID.
 `text` is bounded to 16384 UTF-8 bytes and applies only when accepting. A dialog
 response cannot start a browser. Driver capabilities are retained from startup
@@ -43,6 +45,16 @@ the admitted context. Uncertain effects still require explicit close.
   form/screenshot journey also passed. Integrated platform checks remain pending
   for the final feature revision. This work is isolated from the 0.20.0 release
   source.
+
+An expanded native journey then exposed a second premature refusal: a third
+identical confirmation response in one context looked like replay even after a
+new dialog opened. Binding response contexts to the current browser call
+distinguishes the new operation and rejects consumed contexts before dispatch.
+The expanded seven-dialog journey passed on Windows together with all four
+browser integration tests, including the previous form/screenshot journey.
+Both admission tests and all-target core clippy passed again after this change.
+The additional Unix protocol assertions for consumed and superseded response
+contexts remain pending in platform CI.
 
 The bundled browser QA guidance is updated to describe offered dialog actions
 and the existing console/network/viewport controls accurately. A resized

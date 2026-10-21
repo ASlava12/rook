@@ -37,7 +37,8 @@ schema. It does not expose arbitrary JavaScript. An existing approved Playwright
 test setup can cover checks beyond the offered actions.
 
 If a native JavaScript dialog blocks the page and `dialog` is offered, inspect
-the observation, read `status` and use its exact `context` in the response.
+the observation, read `status` immediately before each response and use its exact
+fresh `context`. Intervening browser actions invalidate that response context.
 Choose accept or dismiss according to the authorized journey; supply `text`
 only to answer an accepted prompt. Inspect the resulting page state before
 continuing. Do not guess a context or repeat a response whose outcome was lost.

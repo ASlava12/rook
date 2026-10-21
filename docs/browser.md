@@ -43,13 +43,16 @@ only inspects the local runtime and does not contact a page.
 | `dialog` | `context`, `accept`, optional `text` | Accept or dismiss an observed native JavaScript dialog; `text` supplies an accepted prompt's answer. |
 
 For a native `alert`, `confirm` or `prompt` reported by the browser, read local
-`status`, then pass its `context` string to `dialog` along with boolean `accept`.
+`status`, then immediately pass its fresh `context` string to `dialog` along
+with boolean `accept`. Read status again for each response; an intervening
+browser action invalidates the earlier response context.
 An empty `text` is an explicit empty prompt answer; omit it to use the driver's
 default. Text is allowed only with `accept = true`, is limited to 16384 UTF-8
 bytes and cannot contain NUL. This action remains subject to ordinary external
 action approvals, even when dismissing a dialog.
 
-The context binds the response to this conversation and browser generation.
+The context binds the response to this conversation, browser generation and
+latest browser call. A consumed response context cannot dispatch again.
 Foreign, closed or restarted contexts are refused before dispatch, and a dialog
 response cannot start a browser. It addresses the driver's current native
 dialog; the backend does not expose a per-dialog ID. Inspect the current
@@ -125,7 +128,7 @@ identifies Chromium through its exact driver ancestry before checking cleanup
 after cancelled page calls, cancelled close and engine drop.
 
 The owned native-dialog journey is opt-in and requires the pinned driver and
-installed Chromium. It accepts an alert, accepts and dismisses a confirmation,
+installed Chromium. It accepts an alert, accepts repeated confirmations and dismisses one,
 answers and dismisses a prompt, and submits an explicit empty prompt answer
 through the ordinary agent loop:
 

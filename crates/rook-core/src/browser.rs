@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub const TOOL: &str = "browser";
+const MAX_CONTEXT: usize = 58; // Two ULIDs, separators and a call index capped at 1024.
 const ACTIONS: &[(&str, &str)] = &[
     ("navigate", "browser_navigate"),
     ("snapshot", "browser_snapshot"),
@@ -272,7 +273,7 @@ fn arguments(args: &Value) -> Result<(&str, Value), &'static str> {
         }
         "click" => json!({"target":target()?}),
         "dialog" => {
-            string("context", 53)?;
+            string("context", MAX_CONTEXT)?;
             let accept = args.get("accept").and_then(Value::as_bool).ok_or("dialog needs boolean accept")?;
             let mut mapped = json!({"accept":accept});
             if let Some(value) = args.get("text") {
@@ -450,10 +451,10 @@ impl Tool for Browser {
     }
     fn spec(&self) -> rook_llm::ToolSpec {
         rook_llm::ToolSpec {
-            name: TOOL.into(), description: "Control the session browser: navigate, snapshot, click/type, screenshot, console, requests, resize and dialog. Use snapshot refs. To answer an observed native dialog, get context from status, then call dialog with that context and accept; optional text answers an accepted prompt. Close after uncertain effects.".into(),
+            name: TOOL.into(), description: "Control the session browser: navigate, snapshot, click/type, screenshot, console, requests, resize and dialog. Use snapshot refs. Before each native dialog response, get a fresh context from status, then call dialog with it and accept; intervening browser actions invalidate that context. Optional text answers an accepted prompt. Close after uncertain effects.".into(),
             parameters: json!({"type":"object","properties":{
                 "action":{"type":"string","enum":["navigate","snapshot","click","type","wait","screenshot","status","close","console","requests","resize","dialog"]},
-                "context":{"type":"string","maxLength":53}, "accept":{"type":"boolean"},
+                "context":{"type":"string","maxLength":MAX_CONTEXT}, "accept":{"type":"boolean"},
                 "url":{"type":"string","maxLength":4096}, "ref":{"type":"string","maxLength":80},
                 "width":{"type":"integer","minimum":240,"maximum":3840}, "height":{"type":"integer","minimum":240,"maximum":3840}, "level":{"type":"string","enum":["error","warning","info","debug"]},
                 "text":{"type":"string","maxLength":16384}, "seconds":{"type":"integer","minimum":1,"maximum":30}
@@ -500,12 +501,13 @@ impl Tool for Browser {
             rook_store::format_session_id(self.session),
             rook_store::format_session_id(slot.generation)
         );
+        let response_context = format!("{browser_context}:{}", slot.calls.load(Ordering::Relaxed));
         if action == "status" {
             return Ok(ToolOutcome::ok(
                 json!({"session":rook_store::format_session_id(self.session),
                 "busy":slot.busy.load(Ordering::Acquire), "uncertain":slot.uncertain.load(Ordering::Acquire),
                 "calls":slot.calls.load(Ordering::Relaxed), "limit":slot.settings.max_calls,
-                "generation":rook_store::format_session_id(slot.generation), "context":browser_context,
+                "generation":rook_store::format_session_id(slot.generation), "context":response_context,
                 "started":slot.connected.lock().unwrap_or_else(|e| e.into_inner()).is_some() })
                 .to_string(),
             ));
@@ -532,10 +534,11 @@ impl Tool for Browser {
             return Ok(error("browser configuration changed; close before using the new configuration"));
         }
         let prefix = format!("{browser_context}:");
-        if action == "dialog" && args.get("context").and_then(Value::as_str) != Some(browser_context.as_str())
+        if action == "dialog"
+            && args.get("context").and_then(Value::as_str) != Some(response_context.as_str())
         {
             return Ok(error(
-                "browser dialog context belongs to another session or closed context; read this session's status",
+                "browser dialog context is stale or belongs to another session; read this session's status immediately before responding",
             ));
         }
         if let Some(target) = mapped.get("target").and_then(Value::as_str) {
@@ -608,7 +611,7 @@ impl Tool for Browser {
         let mut outcome = rook_tools::mcp::outcome(&result, ctx, TOOL)
             .with("browser_session", rook_store::format_session_id(self.session))
             .with("browser_action", action)
-            .with("browser_context", browser_context)
+            .with("browser_context", format!("{browser_context}:{}", slot.calls.load(Ordering::Relaxed)))
             .with("browser_generation", rook_store::format_session_id(slot.generation));
         let observed = if matches!(action, "console" | "requests") {
             diagnostic_text(&outcome.content)
@@ -769,6 +772,34 @@ mod tests {
             json!({"accept":true,"promptText":"answer"})
         );
         assert_eq!(calls(root.path()).last().unwrap()["name"], "browser_handle_dialog");
+        let before = calls(root.path()).len();
+        let replay = first
+            .call(&ctx, &json!({"action":"dialog","context":token,"accept":true,"text":"answer"}))
+            .await
+            .unwrap();
+        assert!(replay.is_error && replay.content.contains("stale"));
+        assert_eq!(
+            calls(root.path()).len(),
+            before,
+            "a consumed response context cannot reach the driver again"
+        );
+        let status = first.call(&ctx, &json!({"action":"status"})).await.unwrap();
+        let fresh = serde_json::from_str::<Value>(&status.content).unwrap()["context"].clone();
+        assert_ne!(fresh, token);
+        first.call(&ctx, &json!({"action":"snapshot"})).await.unwrap();
+        let before = calls(root.path()).len();
+        assert!(
+            first
+                .call(&ctx, &json!({"action":"dialog","context":fresh,"accept":false}))
+                .await
+                .unwrap()
+                .is_error
+        );
+        assert_eq!(
+            calls(root.path()).len(),
+            before,
+            "an intervening browser action invalidates the response context"
+        );
         let before = calls(root.path()).len();
         let unsupported = first.call(&ctx, &json!({"action":"console"})).await.unwrap();
         assert!(unsupported.is_error && unsupported.content.contains("does not support"));
@@ -1119,7 +1150,7 @@ mod dialog_tests {
             json!({"action":"dialog","context":"x","accept":true,"text":null}),
             json!({"action":"dialog","context":"x","accept":true,"text":"Ж".repeat(8193)}),
             json!({"action":"dialog","context":"x","accept":true,"text":"a\0b"}),
-            json!({"action":"dialog","context":"x".repeat(54),"accept":true}),
+            json!({"action":"dialog","context":"x".repeat(MAX_CONTEXT+1),"accept":true}),
             json!({"action":"dialog","context":"x","accept":true,"dialog_id":"not-supported"}),
             json!({"action":"snapshot","accept":true}),
         ] {
@@ -1148,6 +1179,19 @@ mod dialog_tests {
             .unwrap();
         assert!(result.is_error && result.content.contains("browser is closed"));
         assert!(browser.pool.slots.lock().unwrap().is_empty());
+        let slot = browser.pool.slot(browser.session, &browser.settings, true, false).unwrap().unwrap();
+        let status = browser.call(&ctx, &json!({"action":"status"})).await.unwrap();
+        let token = serde_json::from_str::<Value>(&status.content).unwrap()["context"].clone();
+        slot.calls.store(1, Ordering::Relaxed);
+        let stale =
+            browser.call(&ctx, &json!({"action":"dialog","context":token,"accept":true})).await.unwrap();
+        assert!(stale.is_error && stale.content.contains("stale"));
+        assert_eq!(slot.calls.load(Ordering::Relaxed), 1);
+        assert!(
+            slot.connected.lock().unwrap().is_none(),
+            "a stale response cannot start the configured executable"
+        );
+        assert!(!slot.uncertain.load(Ordering::Acquire));
         assert_eq!(browser.mcp_source(&json!({"action":"dialog"})), Some((TOOL, "browser_handle_dialog")));
         assert!(matches!(
             browser.risk(&json!({"action":"dialog"})),
