@@ -1,8 +1,13 @@
 //! Compare summary output budgets against explicitly exported real transcripts.
 //! Run with an isolated ROOK_HOME; see docs/reference-r17-adoption.md.
+use futures_util::StreamExt;
 use rook_core::{Config, Rook, Vault, agent::AgentLoop};
+use rook_llm::{Delta, Provider, Request, ResponseStream, StopReason};
 use serde::Deserialize;
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 #[derive(Deserialize)]
 struct Fixture {
@@ -27,6 +32,75 @@ struct CompactionOutcome {
 struct Auxiliary {
     purpose: String,
     receipt: rook_core::model_route::Receipt,
+}
+
+#[derive(Clone, Default)]
+struct SummaryTrace {
+    admitted_output_tokens: Option<u32>,
+    stop_reason: Option<StopReason>,
+    text_bytes: usize,
+    reasoning_text_bytes: usize,
+}
+
+struct MeasuredSummary {
+    inner: Arc<dyn Provider>,
+    trace: Arc<Mutex<SummaryTrace>>,
+}
+
+impl MeasuredSummary {
+    fn admitted(&self, request: &Request) {
+        self.trace.lock().unwrap_or_else(|poison| poison.into_inner()).admitted_output_tokens =
+            Some(request.max_output_tokens);
+    }
+
+    fn capture(&self, stream: ResponseStream) -> ResponseStream {
+        let trace = self.trace.clone();
+        Box::pin(stream.inspect(move |delta| {
+            let mut trace = trace.lock().unwrap_or_else(|poison| poison.into_inner());
+            match delta {
+                Ok(Delta::Done { stop_reason, .. }) => trace.stop_reason = Some(*stop_reason),
+                Ok(Delta::Text(text)) => trace.text_bytes = trace.text_bytes.saturating_add(text.len()),
+                Ok(Delta::Reasoning(text)) => {
+                    trace.reasoning_text_bytes = trace.reasoning_text_bytes.saturating_add(text.len())
+                }
+                _ => {}
+            }
+        }))
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for MeasuredSummary {
+    fn id(&self) -> &str {
+        self.inner.id()
+    }
+    fn configured_source(&self) -> Option<&str> {
+        self.inner.configured_source()
+    }
+    fn context_window(&self) -> usize {
+        self.inner.context_window()
+    }
+    fn supports_streaming(&self) -> bool {
+        self.inner.supports_streaming()
+    }
+    async fn complete(&self, request: Request) -> rook_llm::Result<rook_llm::Response> {
+        self.inner.complete(request).await
+    }
+    async fn complete_with_metadata(&self, request: Request) -> rook_llm::Result<rook_llm::Completion> {
+        self.inner.complete_with_metadata(request).await
+    }
+    async fn stream(&self, request: Request) -> rook_llm::Result<ResponseStream> {
+        self.admitted(&request);
+        Ok(self.capture(self.inner.stream(request).await?))
+    }
+    async fn stream_observed(
+        &self,
+        request: Request,
+        observer: Arc<dyn rook_llm::AttemptObserver>,
+    ) -> rook_llm::Result<ResponseStream> {
+        self.admitted(&request);
+        Ok(self.capture(self.inner.stream_observed(request, observer).await?))
+    }
 }
 
 fn record_body(
@@ -62,12 +136,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if fixtures.is_empty() || fixtures.len() > 8 {
         return Err("use 1..8 real transcript fixtures".into());
     }
+    if fixtures.iter().any(|fixture| fixture.entries.len() > 512 || fixture.checks.len() > 64) {
+        return Err("fixture entry/check ceiling exceeded".into());
+    }
     let base = Config::load()?;
     let vault = Vault::load()?;
     for fixture in fixtures {
-        if fixture.entries.len() > 512 || fixture.checks.len() > 64 {
-            return Err("fixture entry/check ceiling exceeded".into());
-        }
         for repeat in 0..2 {
             let arms = if repeat == 0 { [false, true] } else { [true, false] };
             for candidate in arms {
@@ -94,7 +168,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let rook = Rook::from_parts(
                     rook_store::Store::open(root.path().join("store"))?,
                     config,
-                    rook_skills::Environment::bare("experiment", "experiment", "0.16.0"),
+                    rook_skills::Environment::bare("experiment", "experiment", env!("CARGO_PKG_VERSION")),
                     rook_skills::SkillIndex::default(),
                     root.path().into(),
                 );
@@ -111,9 +185,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         rook.log(session, kind, &entry.label, &vault.redact(&entry.body))?;
                     }
                 }
+                let trace = Arc::new(Mutex::new(SummaryTrace::default()));
+                let mut agent = AgentLoop::new(&rook, provider.clone(), session);
+                // Pin the selected experimental summarizer so fallback to a
+                // different model cannot silently change the comparison arm.
+                agent.summariser = Some(Arc::new(MeasuredSummary { inner: provider, trace: trace.clone() }));
                 let start = std::time::Instant::now();
-                AgentLoop::new(&rook, provider, session).compact_now().await;
+                agent.compact_now().await;
                 let elapsed_ms = start.elapsed().as_millis();
+                let trace = trace.lock().unwrap_or_else(|poison| poison.into_inner()).clone();
                 let (_, summary) = rook.last_compaction(session)?;
                 let events = rook.transcript(session, 0, 1024, 65536)?;
                 let saved = rook.store.events(session, 0, 1024)?;
@@ -150,6 +230,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     && model_receipt
                         .as_ref()
                         .is_some_and(|receipt| receipt.complete && receipt.usage_reported);
+                let truncated = if model_receipt.as_ref().is_some_and(|receipt| receipt.complete) {
+                    match trace.stop_reason {
+                        Some(StopReason::MaxTokens) => Some(true),
+                        Some(StopReason::EndTurn | StopReason::ToolUse | StopReason::Refusal) => Some(false),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
                 let checks: Vec<_> = if available {
                     fixture.checks.iter().map(|term|serde_json::json!({"term":term,"preserved":summary.to_lowercase().contains(&term.to_lowercase())})).collect()
                 } else {
@@ -157,7 +246,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 println!(
                     "{}",
-                    serde_json::json!({"fixture":fixture.name,"repeat":repeat,"candidate":candidate,"output_budget":budget,"available":available,"compaction_outcome":compaction_outcome,"model_receipt":model_receipt,"elapsed_ms":elapsed_ms,"usage":usage,"checks":checks,"summary":summary,"notices":events.iter().filter(|e|e.kind=="error").map(|e|e.body.clone()).collect::<Vec<_>>() })
+                    serde_json::json!({"fixture":fixture.name,"repeat":repeat,"candidate":candidate,"rook_version":env!("CARGO_PKG_VERSION"),"output_budget":budget,"admitted_output_tokens":trace.admitted_output_tokens,"stop_reason":trace.stop_reason.map(StopReason::as_str),"truncated":truncated,"text_bytes":trace.text_bytes,"reasoning_text_bytes":trace.reasoning_text_bytes,"available":available,"compaction_outcome":compaction_outcome,"model_receipt":model_receipt,"elapsed_ms":elapsed_ms,"usage":usage,"checks":checks,"summary":summary,"notices":events.iter().filter(|e|e.kind=="error").map(|e|e.body.clone()).collect::<Vec<_>>() })
                 );
                 if !available {
                     return Err("summary comparison is incomplete: a confirmed summary and reported usage are required; stop comparison, inspect the saved source/error, leave the default unchanged".into());

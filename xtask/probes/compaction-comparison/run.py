@@ -55,7 +55,7 @@ class Service(http.server.BaseHTTPRequestHandler):
             assert len(calls) <= 24
         delta = {'reasoning_content': text} if mode == 'reasoning' else {'content': '' if mode == 'empty' else text}
         chunk = {'model': 'fixture', 'choices': [{'index': 0, 'delta': delta,
-                  'finish_reason': None if mode == 'incomplete' else 'stop'}]}
+                  'finish_reason': None if mode == 'incomplete' else 'length' if mode == 'limited' else 'stop'}]}
         if mode != 'unreported':
             chunk['usage'] = {'prompt_tokens': 20, 'completion_tokens': 7}
         wire = 'data: ' + json.dumps(chunk) + '\n\n'
@@ -89,11 +89,12 @@ context_window=65536
                     'body': f'Owned task entry {n}: ' + ('Preserve the default and read saved source facts. ' * 12)}
                    for n in range(32)]
         fixture = root / 'fixture.json'
-        fixture.write_text(json.dumps([{'name': 'protocol-fixture-not-quality-data', 'entries': entries,
-                                       'checks': ['default unchanged']}]), encoding='utf-8')
+        fixture_data = {'name': 'protocol-fixture-not-quality-data', 'entries': entries,
+                        'checks': ['default unchanged']}
+        fixture.write_text(json.dumps([fixture_data]), encoding='utf-8')
         env = dict(os.environ, ROOK_HOME=str(home), ROOK_CONFIG_DIR=str(home), ROOK_LOG='error')
         cases = {}
-        for mode in ['incomplete', 'empty', 'unreported', 'confirmed', 'reasoning']:
+        for mode in ['incomplete', 'empty', 'unreported', 'confirmed', 'reasoning', 'limited']:
             with lock:
                 current['mode'] = mode
                 before = len(calls)
@@ -105,6 +106,19 @@ context_window=65536
                 requests = len(calls) - before
             cases[mode] = {'exit': child.returncode, 'requests': requests, 'records': records,
                            'stderr': child.stderr[-2000:]}
+
+        # A valid first fixture must not spend requests before a malformed
+        # later fixture is rejected. Validate the complete input batch first.
+        invalid = dict(fixture_data, checks=['too many'] * 65)
+        fixture.write_text(json.dumps([fixture_data, invalid]), encoding='utf-8')
+        with lock:
+            before = len(calls)
+            current['mode'] = 'confirmed'
+        invalid_child = subprocess.run([str(binary), str(fixture)], env=env, capture_output=True,
+                                       encoding='utf-8', timeout=45,
+                                       creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        admission = {'exit': invalid_child.returncode, 'requests': len(calls) - before,
+                     'stdout': invalid_child.stdout, 'stderr': invalid_child.stderr[-2000:]}
 
         def stopped(case):
             return (case['exit'] != 0 and case['requests'] == 1 and len(case['records']) == 1
@@ -137,10 +151,22 @@ context_window=65536
                 and rejected[2].get('model_receipt', {}).get('usage_reported') is False),
             'confirmed_summary_retains_abba': paired(cases['confirmed']),
             'confirmed_reasoning_summary_retains_abba': paired(cases['reasoning']),
-            'exact_owned_streaming_requests': len(calls) == 11 and all(call['stream'] is True and call['model'] == 'fixture' for call in calls),
+            'admitted_output_budget_recorded': all(record.get('admitted_output_tokens') == record['output_budget']
+                                                  for case in cases.values() for record in case['records']),
+            'termination_and_truncation_reported': (len(rejected) == 3 and paired(cases['limited'])
+                and all(record.get('stop_reason') == 'max_tokens' and record.get('truncated') is True for record in cases['limited']['records'])
+                and all(record.get('stop_reason') == 'end_turn' and record.get('truncated') is False
+                        for mode in ['confirmed', 'reasoning'] for record in cases[mode]['records'])
+                and rejected[0].get('truncated') is None),
+            'reasoning_text_bytes_distinct': (all(record.get('text_bytes') == 0 and record.get('reasoning_text_bytes', 0) > 0
+                                              for record in cases['reasoning']['records'])
+                and all(record.get('text_bytes', 0) > 0 and record.get('reasoning_text_bytes') == 0 for record in cases['confirmed']['records'])),
+            'all_fixtures_admitted_before_any_request': (admission['exit'] != 0 and admission['requests'] == 0
+                and not admission['stdout'].strip() and 'fixture entry/check ceiling exceeded' in admission['stderr']),
+            'exact_owned_streaming_requests': len(calls) == 15 and all(call['stream'] is True and call['model'] == 'fixture' for call in calls),
         }
         report = {'binary': str(binary), 'binary_sha256': hashlib.sha256(binary.read_bytes()).hexdigest(),
-                  'checks': checks, 'cases': cases, 'calls': calls, 'quality_experiment': False}
+                  'checks': checks, 'cases': cases, 'calls': calls, 'admission': admission, 'quality_experiment': False}
         with args.output.open('x', encoding='utf-8') as sink:
             json.dump(report, sink, indent=2)
         print(json.dumps({'binary_sha256': report['binary_sha256'], 'checks': checks}), flush=True)
