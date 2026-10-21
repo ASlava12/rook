@@ -9099,7 +9099,12 @@ async fn effort_metadata_does_not_end_the_wait_for_the_models_first_token() {
                 tokio::time::sleep(std::time::Duration::from_secs(70)).await;
                 Ok(rook_llm::Delta::Text("answered".into()))
             });
-            Ok(Box::pin(metadata.chain(answer)))
+            let done = futures_util::stream::iter(vec![Ok(rook_llm::Delta::Done {
+                stop_reason: StopReason::EndTurn,
+                usage: Default::default(),
+                model: "fixture".into(),
+            })]);
+            Ok(Box::pin(metadata.chain(answer).chain(done)))
         }
     }
     let f = fixture();

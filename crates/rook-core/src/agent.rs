@@ -1506,11 +1506,20 @@ impl<'a> AgentLoop<'a> {
             // one as text some of the time, and the turn ended with nothing
             // called. Only a tool that was offered is taken as called.
             let offered = |name: &str| self.tool_specs().iter().any(|t| t.name == name);
-            rook_llm::prompted::adopt(&mut response, offered);
-            // And in the thinking, where one arrived: a model that writes its
-            // call in `reasoning_content` and nothing in `content` ended the
-            // turn mid-task, with the call written out in the transcript.
-            rook_llm::prompted::adopt_thought(&mut response, &thinking, offered);
+            if route_complete {
+                rook_llm::prompted::adopt(&mut response, offered);
+                // And in the thinking, where one arrived: a model that writes its
+                // call in `reasoning_content` and nothing in `content` ended the
+                // turn mid-task, with the call written out in the transcript.
+                rook_llm::prompted::adopt_thought(&mut response, &thinking, offered);
+            } else {
+                // Parseable arguments are not admission: a native stream may
+                // reach EOF after a complete call but before its terminal frame.
+                // Keep text/usage below, without executable calls or a signed
+                // assistant envelope that replay could mistake for a full turn.
+                response.message.tool_calls.clear();
+                response.message.reasoning.clear();
+            }
 
             // Only when it is at least what the text plainly weighs. A provider
             // reporting less than that is not counting what this needs counted —
@@ -1590,6 +1599,12 @@ impl<'a> AgentLoop<'a> {
             if self.managed_stopped()? {
                 outcome.stopped = "work_paused".into();
                 break;
+            }
+
+            if !route_complete {
+                let note = "The model stream ended without confirmed completion. No tool calls from this response were executed; its partial text and reported usage were retained.";
+                self.rook.log(self.session, EventKind::Note, "model incomplete", note)?;
+                return Err(CoreError::Other(note.into()));
             }
 
             // What goes back to the model at the next step, thinking and all.
