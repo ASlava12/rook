@@ -8,6 +8,11 @@ in `docs/releases/` consistent with the package version.
 The source must pass formatting, workspace/all-target clippy and workspace
 tests. Inspect the eight required platform CI jobs on the release revision;
 the optional model smoke is separate evidence, including its failures.
+Its [preparation step](../xtask/probes/model-smoke/README.md) requires a complete
+pull response and confirms the requested model is available. HTTP 200 alone is
+insufficient; a preparation failure stops before scenarios and is recorded
+separately from model task failures. Offline preparation regressions run in the
+required Linux gate.
 The smoke's endpoint check, scenario turns and transcript reads set both
 `ROOK_HOME` and `ROOK_CONFIG_DIR` to the scenario's temporary directory. An
 inherited config override must not replace the requested model, eight-step
