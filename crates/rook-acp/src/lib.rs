@@ -1417,14 +1417,14 @@ impl rook_tools::Files for EditorFiles {
         }
         let params = serde_json::json!({ "sessionId": self.session, "path": path, "content": contents });
         let answer = self.peer.request("fs/write_text_file", params).await.ok_or_else(|| {
-            rook_tools::ToolError::Io {
-                path: path.to_path_buf(),
-                source: std::io::Error::other("the editor closed the connection"),
-            }
+            rook_tools::ToolError::ExecutionUnknown(
+                "The editor did not acknowledge the write; inspect its buffer and /recovery before retrying"
+                    .into(),
+            )
         })?;
         if !answer.is_null() && !answer.is_object() {
-            return Err(rook_tools::ToolError::Denied(
-                "The editor returned an invalid write acknowledgement; inspect its buffer before retrying"
+            return Err(rook_tools::ToolError::ExecutionUnknown(
+                "The editor returned an invalid write acknowledgement; inspect its buffer and /recovery before retrying"
                     .into(),
             ));
         }

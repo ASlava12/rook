@@ -65,8 +65,9 @@ check Windows host versions with `--host`. Run the
 CLI when browser behavior changes, alongside the managed-work probe.
 When ACP payload handling changes, run the
 [owned ACP null/default probe](../xtask/probes/acp-null/README.md) on the extracted
-CLI. Require all eleven flags, including malformed/error controls, required
-read content and single terminal cleanup. Its editor buffers and provider are
+CLI. Require all thirteen flags, including malformed/error controls, required
+read content, single terminal cleanup and durable uncertain-write recovery.
+Its editor buffers and provider are
 local fixtures; it does not establish compatibility with a particular editor.
 When language-server startup changes, run the
 [owned daemon LSP probe](../xtask/probes/lsp-startup/README.md) against the extracted

@@ -196,7 +196,7 @@ url='http://127.0.0.1:{port}/{case}/v1'
                     break
             else:
                 raise AssertionError('bounded turn frame count')
-            return {'methods': methods, 'statuses': statuses, 'buffer': buffer,
+            report = {'methods': methods, 'statuses': statuses, 'buffer': buffer,
                     'disk_unchanged': (workspace / 'notes.txt').read_text(encoding='utf-8') == original,
                     'list': {name: 'result' in frame and any(item['sessionId'] == session for item in frame['result']['sessions'])
                              for name, frame in listing.items() if name != 'invalid'},
@@ -217,6 +217,28 @@ url='http://127.0.0.1:{port}/{case}/v1'
             reader.join(timeout=2)
             process.stdout.close()
             assert process.returncode == 0, f'owned ACP CLI exit {process.returncode}'
+    inspection = subprocess.run([str(binary), '--workspace', str(workspace), 'session', 'recovery', session],
+        env=env, cwd=workspace, capture_output=True, timeout=30,
+        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    assert inspection.returncode == 0, inspection.stderr[-4096:]
+    assert len(inspection.stdout) <= 128 * 1024
+    executions = json.loads(inspection.stdout)
+    assert isinstance(executions, list) and len(executions) <= 8
+    unknown = {operation['id']: operation for execution in executions for operation in execution['unknown']}
+    report['unknown'] = [{'id': operation['id'], 'tool': operation['tool'], 'may_have_effects': operation['may_have_effects']}
+                         for operation in unknown.values()]
+    report['recovery_pending'] = any(execution['pending'] or execution['background'] for execution in executions)
+    report['retry'] = None
+    if case in ['missing-write', 'error-write', 'invalid-write'] and unknown:
+        before = counts[case]
+        retried = subprocess.run([str(binary), '--workspace', str(workspace), 'run', '--session', session,
+            'Retry the owned file write.'], env=env, cwd=workspace, capture_output=True, timeout=30,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        text = (retried.stdout + retried.stderr).decode('utf-8', errors='replace')
+        report['retry'] = {'exit': retried.returncode, 'tail': text[-2400:],
+                          'provider_unchanged': before == counts[case],
+                          'disk_unchanged': (workspace / 'notes.txt').read_text(encoding='utf-8') == original}
+    return report
 
 
 server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Provider)
@@ -240,6 +262,16 @@ try:
                 and cases['null-terminal']['methods'] == ['terminal/create', 'terminal/wait_for_exit', 'terminal/output', 'terminal/release'],
             'null_and_omitted_list_are_default_requests': all(all(case['list'].values()) for case in cases.values()),
             'invalid_nonnull_list_refused': all(case['invalid_list_refused'] for case in cases.values()),
+            'uncertain_write_retained_after_connection_close': all(
+                len(case['unknown']) == 1 and case['unknown'][0]['tool'] == 'write_file'
+                and case['unknown'][0]['may_have_effects'] and not case['recovery_pending']
+                for name, case in cases.items() if name in ['missing-write', 'error-write', 'invalid-write'])
+                and all(not case['unknown'] for name, case in cases.items()
+                        if name not in ['missing-write', 'error-write', 'invalid-write']),
+            'fresh_process_retry_stops_before_model_or_write': all(case['retry']
+                and case['retry']['provider_unchanged'] and case['retry']['disk_unchanged']
+                and 'recovery' in case['retry']['tail'].lower()
+                for name, case in cases.items() if name in ['missing-write', 'error-write', 'invalid-write']),
             'editor_buffers_used_without_disk_fallback': all(case['disk_unchanged'] for case in cases.values())
                 and all(case['buffer'] == 'owned editor update\n' for name, case in cases.items() if name.endswith('-write'))
                 and all('fs/write_text_file' in case['methods'] for name, case in cases.items() if name.endswith('-write')),

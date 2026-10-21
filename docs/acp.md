@@ -11,8 +11,11 @@ JSON-RPC `result: null` remains a present result. Defaultable editor write,
 terminal wait and cleanup acknowledgements may use it instead of `{}`; it does
 not certify an exit code. A missing result or an explicit error remains a
 failed acknowledgement. File reads still require their text `content`, and
-scalar/array write acknowledgements are refused without retrying the mutation.
-Inspect the editor buffer before retrying an unacknowledged write.
+scalar/array write acknowledgements are refused. Once a write was submitted,
+an unavailable, error or malformed acknowledgement retains an unknown-effect
+receipt instead of certifying that nothing changed. That receipt survives
+connection close; another process cannot resume mutations or model work until
+the user inspects the editor buffer and explicitly acknowledges recovery.
 
 For the defaultable `session/list` request, omitted parameters and `null` use
 the same unfiltered request as `{}`. Non-null malformed requests remain errors;

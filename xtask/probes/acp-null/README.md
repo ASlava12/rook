@@ -15,17 +15,23 @@ uses its own buffers and fake terminal responses. No terminal command or real
 model runs, disk fixture contents remain unchanged, and the installed daemon is
 not involved. Only owned child processes/services and temporary state are cleaned.
 
-Require exit zero and all eleven flags. Controls distinguish object/null write
+Require exit zero and all thirteen flags. Controls distinguish object/null write
 acknowledgements from missing results, explicit errors and invalid scalar
 acknowledgements. Null read results still fail without required text. Terminal
 wait/release null acknowledgements must produce one create/wait/output/release
 sequence with no duplicate cleanup. All connections exercise object, null,
-omitted and malformed session-list parameters. The report binds the checks,
+omitted and malformed session-list parameters. After connection close, missing,
+error and malformed write acknowledgements must retain a potentially effective
+`write_file` operation in CLI recovery. An actual fresh CLI process then tries
+to resume each affected session and must stop before any model request or file
+write. Ordinary successful operations and refused reads leave no unknown write.
+The report binds the checks,
 method/status observations and 28 physical provider requests to the CLI SHA256.
 
 The published Windows 0.21.3 baseline passes the object, missing/error and read
 controls but fails null write, scalar acknowledgement refusal, null/omitted
-list requests and single terminal cleanup. The baseline's acknowledged terminal
+list requests, single terminal cleanup and durable uncertain-write recovery.
+The baseline's acknowledged terminal
 release is followed by another kill/release. Corrected-source native CI and
 downloaded-package evidence are separate requirements.
 
