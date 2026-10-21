@@ -17,6 +17,8 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--bin-dir', type=Path, required=True)
 parser.add_argument('--tmp-root', type=Path)
 args = parser.parse_args()
+if not __debug__:
+    parser.error('Run the managed-work probe without Python optimization (-O).')
 binary = args.bin_dir.resolve()
 suffix = '.exe' if os.name == 'nt' else ''
 for name in ['rook', 'rookd']:
