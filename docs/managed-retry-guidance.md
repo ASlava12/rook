@@ -11,6 +11,10 @@ not wake another attempt or reset idle accounting. Failure counts, spend, time
 and iteration budgets, the active transcript and execution recovery are retained.
 The receipt is acknowledged as applied only when delivered to the agent.
 
+An ordinary retry also releases its execution slot while retaining live
+controls and observation. A due or newly guided continuation waits for capacity
+before its next model request; see [retry capacity](managed-retry-capacity.md).
+
 This is not a resume control. Paused, blocked, cancelled and limited goals keep
 their state. An explicit `defer_work` deadline is preserved even when guidance
 is queued for the next admitted stage. Existing generation and unknown-effect

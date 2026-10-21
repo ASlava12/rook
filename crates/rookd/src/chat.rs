@@ -29,6 +29,7 @@ use rook_core::delivery;
 pub(crate) mod activity;
 pub(crate) mod followups;
 mod replay;
+mod work_slot;
 
 /// `?workspace=` names the project this conversation is in, defaulting to the
 /// daemon's own. A connection is bound to one for its life, because a project is
@@ -1418,6 +1419,7 @@ async fn begin(
     // Counted while it runs: a daemon asked to stop should say what stopping
     // would interrupt rather than find out after.
     let counted = state.turn_started();
+    let work_slot = Arc::new(work_slot::Slot::new(state));
     let running_turn = turn(
         engine.clone(),
         Connection {
@@ -1426,6 +1428,7 @@ async fn begin(
             settings: settings.clone(),
             options,
             activity: Some(activity.clone()),
+            work_slot: work_slot.clone(),
         },
         shared.clone(),
         from_turn,
@@ -1457,6 +1460,7 @@ async fn begin(
         settings: settings.clone(),
         activity: Some(activity),
         completed,
+        work_slot,
     })
 }
 
@@ -1543,6 +1547,7 @@ pub struct Live {
     epoch: String,
     activity: Option<Arc<activity::Observation>>,
     completed: Arc<AtomicBool>,
+    work_slot: Arc<work_slot::Slot>,
     /// Aborting this is what `Cancel` means, and the only thing that ends a
     /// turn early. A window closing is a window closing.
     task: tokio::task::JoinHandle<()>,
@@ -1709,6 +1714,7 @@ impl Live {
             task,
             activity: None,
             completed: Default::default(),
+            work_slot: Default::default(),
             helpers,
             said,
             backlog: Default::default(),
@@ -1722,6 +1728,10 @@ impl Live {
         // Publishing an ending commits completion, even while helpers and
         // persisted observations are still being cleaned up.
         !self.completed.load(Ordering::Acquire) && !self.task.is_finished()
+    }
+
+    pub(crate) fn has_work_slot(&self) -> bool {
+        self.running() && self.work_slot.held()
     }
 
     /// Everything said so far, then everything said from now on.
@@ -1799,6 +1809,7 @@ impl Live {
 
 #[derive(Clone)]
 struct Connection {
+    work_slot: Arc<work_slot::Slot>,
     activity: Option<Arc<activity::Observation>>,
     options: rook_proto::TurnOptions,
     approver: Arc<ChannelApprover>,
@@ -1949,6 +1960,7 @@ async fn goal_turn(
     let _ = outbound.send(ChatEvent::Agent { receipt: None, admission: None, extension_ui: None, text: "Goal started in this session; continuing automatically between stages. Ctrl-C pauses; /continue resumes.".into() });
     let mut announced_retry = None;
     let mut announced_generation = None;
+    let mut capacity_since = None;
     loop {
         let rook = engine.read().await;
         let run = match managed::read(&rook, id) {
@@ -1959,22 +1971,60 @@ async fn goal_turn(
             let _ = outbound.send(goal_event(Some(&run)));
             announced_generation = Some(run.generation.clone());
         }
+        let followups_ready = match goal_followups_ready(&rook, session, &run) {
+            Ok(ready) => ready,
+            Err(error) => return ended_badly(&rook, session, outbound, error),
+        };
+        // Admission and waiting must agree even across a wall-clock second.
+        let now = managed::now();
+        if (crate::work::ready(&run, now) || followups_ready) && !connection.work_slot.held() {
+            // Admission takes work -> config locks. Never wait for it while
+            // retaining this project's engine guard, including during reload.
+            drop(rook);
+            match connection.work_slot.acquire().await {
+                Ok(true) => {}
+                Ok(false) => {
+                    if capacity_since.is_none() {
+                        let at = run.next_attempt_at.unwrap_or_else(managed::now);
+                        capacity_since = Some(at);
+                        if let Some(activity) = &connection.activity {
+                            let _ = outbound.send(ChatEvent::Activity { state: activity.retry_wait(at) });
+                        }
+                        let _ = outbound.send(ChatEvent::Agent {
+                            receipt: None,
+                            admission: None,
+                            extension_ui: None,
+                            text: "Continuation is ready; waiting for an available work slot.".into(),
+                        });
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+                Err(error) => {
+                    let rook = engine.read().await;
+                    return ended_badly(&rook, session, outbound, error);
+                }
+            }
+            // Re-read generation, pause/cancel and any changed deadline after
+            // admission rather than acting on the state read before waiting.
+            continue;
+        }
         if !run.status.runnable() {
             if run.status.terminal() {
                 let _ = outbound.send(goal_event(Some(&run)));
             }
-            if !ended_goal(&rook, outbound, session, run, connection, shared).await {
+            if !ended_goal(&rook, outbound, session, run, connection, shared, followups_ready).await {
                 return;
             }
             announced_retry = None;
             drop(rook);
             continue;
         }
-        if let Some(at) = run.next_attempt_at.filter(|at| *at > managed::now()) {
+        if let Some(at) = run.next_attempt_at.filter(|at| *at > now) {
             if run.waiting.is_some() {
-                ended_goal(&rook, outbound, session, run, connection, shared).await;
+                ended_goal(&rook, outbound, session, run, connection, shared, false).await;
                 return;
             }
+            connection.work_slot.release();
             if announced_retry != Some(at) {
                 if let Some(activity) = &connection.activity {
                     let _ = outbound.send(ChatEvent::Activity { state: activity.retry_wait(at) });
@@ -1992,6 +2042,7 @@ async fn goal_turn(
             continue;
         }
         announced_retry = None;
+        capacity_since = None;
         if let Some(activity) = &connection.activity
             && let Some(state) = activity.clear_retry()
         {
@@ -2033,14 +2084,18 @@ async fn goal_turn(
         .await;
         match result {
             Ok(run) if run.status.runnable() && run.waiting.is_some() => {
-                ended_goal(&rook, outbound, session, run, connection, shared).await;
+                ended_goal(&rook, outbound, session, run, connection, shared, false).await;
                 return;
             }
             Ok(run) if !run.status.runnable() => {
                 if run.status.terminal() {
                     let _ = outbound.send(goal_event(Some(&run)));
                 }
-                if !ended_goal(&rook, outbound, session, run, connection, shared).await {
+                let ready = match goal_followups_ready(&rook, session, &run) {
+                    Ok(ready) => ready,
+                    Err(error) => return ended_badly(&rook, session, outbound, error),
+                };
+                if !ended_goal(&rook, outbound, session, run, connection, shared, ready).await {
                     return;
                 }
                 announced_retry = None;
@@ -2075,6 +2130,14 @@ async fn goal_turn(
     }
 }
 
+fn goal_followups_ready(rook: &rook_core::Rook, session: u128, run: &Run) -> Result<bool, String> {
+    if run.status == Status::Completed {
+        rook_core::message_queue::followups::ready(rook, session).map_err(|error| error.to_string())
+    } else {
+        Ok(false)
+    }
+}
+
 async fn ended_goal(
     rook: &rook_core::Rook,
     outbound: &mpsc::UnboundedSender<ChatEvent>,
@@ -2082,18 +2145,8 @@ async fn ended_goal(
     run: Run,
     connection: &Connection,
     shared: &Shared,
+    followups_ready: bool,
 ) -> bool {
-    let followups_ready = if run.status == Status::Completed {
-        match rook_core::message_queue::followups::ready(rook, session) {
-            Ok(ready) => ready,
-            Err(error) => {
-                ended_badly(rook, session, outbound, error.to_string());
-                return false;
-            }
-        }
-    } else {
-        false
-    };
     if followups_ready {
         let named = connection.settings.model();
         let provider = match rook.provider_for_turn(session, named.as_deref()) {
@@ -2505,6 +2558,7 @@ mod tests {
             task: tokio::spawn(std::future::pending()),
             activity: None,
             completed: Default::default(),
+            work_slot: Default::default(),
             helpers: vec![relay.abort_handle(), ask_relay.abort_handle()],
             said,
             backlog: Default::default(),
@@ -2970,6 +3024,7 @@ mod tests {
             engine.clone(),
             Connection {
                 options: Default::default(),
+                work_slot: Default::default(),
                 activity: None,
                 approver,
                 asker,

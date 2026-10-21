@@ -147,7 +147,8 @@ pub(crate) async fn submit(state: &Arc<AppState>, input: &Input) -> Result<Strin
             if live.is_some() {
                 return Err("Session has another active turn; this captured prompt remains separate".into());
             }
-            if state.live.read().await.values().filter(|l| l.running()).count()
+            if crate::work::occupied(state, _admission.values().filter(|task| !task.is_finished()).count())
+                .await
                 >= rook.config.work.max_parallel_runs
             {
                 return Err(

@@ -157,6 +157,7 @@ port=0
 [models.A]
 model='A'
 api='openai'
+parallel=4
 url='http://127.0.0.1:{server.server_port}/v1'
 context_window=32768
 ''')
@@ -363,7 +364,19 @@ context_window=32768
         return activity if activity and activity.get('retry_at') == deadline else None
     activity = until(scheduled_activity, 'expected retry was not reported', seconds=15)
     assert activity['stage'] == 'queued' and activity['owner_live'] and not activity['stalled'], activity
+    held.clear()
+    release.clear()
+    occupied = submit('NATIVE_CAPACITY_B', other_workspace)
+    assert held.wait(30), 'ordinary retry did not release the only managed work slot'
+    assert counts['NATIVE_GUIDANCE_G'] == 1, 'retry deadline cannot be bypassed by releasing capacity'
     api('/api/work/' + guided['id'] + '/steer', {'id': 'native-guidance', 'text': 'GUIDANCE_AFTER_RETRY'})
+    def capacity_activity():
+        activity = api('/api/sessions/' + guidance_session + '/diagnostics?logs=false')['activity']
+        return activity if activity and activity.get('retry_at') is not None and activity['retry_at'] < deadline else None
+    waiting_capacity = until(capacity_activity, 'ready guidance did not wait for occupied capacity', seconds=15)
+    assert waiting_capacity['stage'] == 'queued' and waiting_capacity['owner_live'], waiting_capacity
+    assert counts['NATIVE_GUIDANCE_G'] == 1, 'fresh guidance bypassed an occupied work slot'
+    release.set()
     resumed = until(lambda: view(guided) if view(guided)['status'] == 'blocked' else None,
                     'fresh guidance did not wake the thirty-minute retry', seconds=20)
     assert resumed['session'] == guidance_session and counts['NATIVE_GUIDANCE_G'] == 2, resumed
@@ -371,9 +384,10 @@ context_window=32768
     assert receipt['applied_at'] is not None and receipt['applied_at'] - receipt['submitted_at'] < 20, receipt
     assert (workspace / 'NATIVE_GUIDANCE_G.txt').read_text() == 'fresh guidance delivered'
     complete_observer(observer, observation_path)
-    assert observation(observation_path)['retry_at'] == deadline
+    assert observation(observation_path)['retry_at'] == waiting_capacity['retry_at']
     until(lambda: api('/api/health')['turns_running'] == 0, 'guided conversation did not retire')
     cancel(guided)
+    cancel(occupied)
     assert not errors, errors
     print(json.dumps({'single_slot_released': True, 'due_wait_respects_other_owner': True,
                       'same_transcript_after_wake': True, 'physical_daemon_restart': True,
@@ -386,6 +400,9 @@ context_window=32768
                       'ordinary_retry_reports_scheduled_activity': True,
                       'fresh_guidance_wakes_retry_without_deadline_wait': True,
                       'guidance_applied_to_same_session': True,
+                      'ordinary_retry_releases_slot_for_other_workspace': True,
+                      'guidance_reacquires_capacity_before_model': True,
+                      'observer_survives_slot_readmission': True,
                       'requests': counts}))
     daemon.terminate(); daemon.wait(timeout=20); daemon = None
 finally:

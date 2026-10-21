@@ -367,6 +367,7 @@ mod tests {
             settings: Arc::new(Settings::for_test()),
             activity: Some(observation.clone()),
             completed,
+            work_slot: Default::default(),
         };
         observation.observe(&ChatEvent::ModelRequest {
             model: "local".into(),
@@ -388,6 +389,28 @@ mod tests {
         tokio::time::advance(Duration::from_secs(31)).await;
         tokio::time::timeout(Duration::from_secs(3), signal.recv()).await.unwrap().unwrap();
         assert_eq!(live.activity().unwrap().notifications, 2);
+        observation.observe(&ChatEvent::Text { text: "physical progress".into() });
+        let last_progress = live.activity().unwrap().last_progress_at;
+        live.work_slot.release();
+        let at = u64::try_from(rook_store::now_unix()).unwrap() + 1800;
+        observation.retry_wait(at);
+        tokio::time::advance(Duration::from_secs(600)).await;
+        tokio::task::yield_now().await;
+        let waiting = live.activity().unwrap();
+        assert!(!live.has_work_slot());
+        assert_eq!(waiting.owner_live, Some(true), "releasing capacity retains the observer");
+        assert_eq!(waiting.retry_at, Some(at));
+        assert_eq!(waiting.last_progress_at, last_progress);
+        assert!(!waiting.stalled, "expected retry time is not a stalled model");
+        assert!(signal.try_recv().is_err());
+        tokio::time::advance(Duration::from_secs(1231)).await;
+        tokio::time::timeout(Duration::from_secs(3), signal.recv()).await.unwrap().unwrap();
+        let overdue = live.activity().unwrap();
+        assert!(overdue.stalled, "an unoccupied retry still monitors overdue scheduling");
+        assert_eq!(overdue.notifications, 3);
+        assert_eq!(overdue.stage, rook_proto::activity::Stage::Queued);
+        assert_eq!(overdue.last_progress_at, last_progress);
+        assert!(overdue.idle_secs >= 1831);
         live.shutdown().await;
         watchdog.await.unwrap_err();
         assert_eq!(rook.diagnostics(session, false).unwrap().activity.unwrap().owner_live, None);

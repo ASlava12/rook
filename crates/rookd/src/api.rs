@@ -2966,6 +2966,203 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ordinary_retry_releases_capacity_and_guidance_waits_for_its_readmission() {
+        use axum::response::IntoResponse;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+        let f = fixture();
+        f.state.rook.write().await.config.work.max_parallel_runs = 1;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (sent, mut requests) = tokio::sync::mpsc::channel(8);
+        let upstream = tokio::spawn({
+            let (calls, release) = (calls.clone(), release.clone());
+            async move {
+                let app = Router::new().route("/v1/chat/completions", axum::routing::post(move |Json(request): Json<serde_json::Value>| {
+                    let (calls, release, sent) = (calls.clone(), release.clone(), sent.clone());
+                    async move {
+                        let text = request.to_string();
+                        let retry = text.contains("CAPACITY_RETRY");
+                        sent.send(if retry { "retry" } else { "other" }).await.unwrap();
+                        if retry && calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":{"message":"owned fixture","type":"invalid_request_error"}}))).into_response();
+                        }
+                        if retry {
+                            assert!(text.contains("GUIDANCE_WHILE_BUSY"), "guidance reaches the same resumed session");
+                        } else {
+                            assert!(text.contains("CAPACITY_OTHER"), "{text}");
+                            release.notified().await;
+                        }
+                        let call=serde_json::json!({"index":0,"id":"park","type":"function","function":{"name":"block_work","arguments":"{\"reason\":\"owned capacity fixture complete\"}"}});
+                        let first=serde_json::json!({"id":"capacity","model":"held-test","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[call]},"finish_reason":null}]});
+                        let last=serde_json::json!({"id":"capacity","model":"held-test","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}});
+                        ([(axum::http::header::CONTENT_TYPE,"text/event-stream")],format!("data: {first}\n\ndata: {last}\n\ndata: [DONE]\n\n")).into_response()
+                    }
+                }));
+                axum::serve(listener, app).await.unwrap();
+            }
+        });
+        let source = format!("capacity-owned-{}", address.port());
+        {
+            let mut rook = f.state.rook.write().await;
+            rook.config.agent.model = source.clone();
+            rook.config.agent.plan_first = false;
+            rook.config.agent.one_script = false;
+            rook.config.agent.install_servers = false;
+            rook.config.work.retry_initial_secs = 1800;
+            rook.config.work.retry_max_secs = 1800;
+            rook.config.models.insert(
+                source.clone(),
+                rook_core::config::ModelSource {
+                    api: "openai".into(),
+                    model: "held-test".into(),
+                    url: format!("http://{address}/v1"),
+                    context_window: Some(32768),
+                    parallel: Some(4),
+                    proxy: "direct".into(),
+                    ..Default::default()
+                },
+            );
+        }
+        let supervisor = tokio::spawn(crate::work::supervise(f.state.clone()));
+        let (status, retry) = post(&f, "/api/work", serde_json::json!({
+            "goal":"CAPACITY_RETRY", "workspace":f._workspace.path(), "autonomous":true,
+            "conversation":{"session":rook_store::format_session_id(f.session),"model":source,"effort":"medium","stance":"autonomous","options":{}}
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{retry}");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(90), requests.recv()).await.unwrap(),
+            Some("retry")
+        );
+        let id = retry["id"].as_str().unwrap();
+        let deadline = tokio::time::timeout(Duration::from_secs(90), async {
+            loop {
+                let (_, run) = get(&f, &format!("/api/work/{id}")).await;
+                if run["status"] == "retry_wait" {
+                    break run["next_attempt_at"].as_u64().unwrap();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(deadline > rook_core::work::managed::now() + 1700);
+        let other_workspace = tempfile::tempdir().unwrap();
+        let (status, scheduled) = post(
+            &f,
+            "/api/tasks",
+            serde_json::json!({"id":rook_store::format_session_id(rook_store::new_session_id()),"spec":{
+                "goal":"CAPACITY_OTHER","workspace":other_workspace.path(),"timing":"every 1h",
+                "timezone":"UTC","stance":"autonomous","max_seconds":300,"max_tokens":10000,"max_iterations":10
+            }}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{scheduled}");
+        let (status, reserved) = post(
+            &f,
+            &format!("/api/tasks/{}/control", scheduled["id"].as_str().unwrap()),
+            serde_json::json!("run_now"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{reserved}");
+        assert!(!reserved["pending"].is_null(), "the due schedule is actually reserved");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(90), requests.recv()).await.unwrap(),
+            Some("other"),
+            "a sleeping retry must not reserve the only worker"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // Expire the saved deadline without spending thirty minutes. A due
+        // retry must re-enter admission, even before guidance is submitted.
+        {
+            let rook = f.state.rook.read().await;
+            rook_core::work::managed::update(&rook, id, |saved| {
+                saved.run.next_attempt_at = Some(rook_core::work::managed::now());
+                Ok(())
+            })
+            .unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(90), async {
+            loop {
+                assert_eq!(calls.load(Ordering::SeqCst), 1, "a due retry cannot bypass the occupied slot");
+                let observation = f.state.live.read().await.get(&f.session).and_then(|live| live.activity());
+                if let Some(activity) = observation
+                    && activity.retry_at.is_some_and(|at| at < deadline)
+                {
+                    assert_eq!(activity.stage, rook_proto::activity::Stage::Queued);
+                    assert_eq!(activity.owner_live, Some(true));
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let (status, receipt) = post(
+            &f,
+            &format!("/api/work/{id}/steer"),
+            serde_json::json!({"id":"capacity-guidance","text":"GUIDANCE_WHILE_BUSY"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{receipt}");
+        let (_, ready) = get(&f, &format!("/api/work/{id}")).await;
+        assert_eq!(ready["status"], "queued");
+        assert!(ready["next_attempt_at"].is_null());
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "guidance cannot bypass the occupied slot");
+        assert!(requests.try_recv().is_err());
+        let (status, paused) = post(&f, &format!("/api/work/{id}/control"), serde_json::json!("pause")).await;
+        assert_eq!(status, StatusCode::OK, "{paused}");
+        assert_eq!(paused["status"], "paused");
+        tokio::time::timeout(Duration::from_secs(90), async {
+            loop {
+                if f.state.live.read().await.get(&f.session).is_none_or(|live| !live.running()) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "pause retires the waiting owner without a model call");
+        let (status, resumed) =
+            post(&f, &format!("/api/work/{id}/control"), serde_json::json!("resume")).await;
+        assert_eq!(status, StatusCode::OK, "{resumed}");
+        assert_eq!(resumed["status"], "queued", "explicit resume still waits for admission");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        release.notify_one();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(90), requests.recv()).await.unwrap(),
+            Some("retry")
+        );
+        tokio::time::timeout(Duration::from_secs(90), async {
+            loop {
+                let (_, run) = get(&f, &format!("/api/work/{id}")).await;
+                if run["status"] == "blocked" {
+                    assert_eq!(run["session"], rook_store::format_session_id(f.session));
+                    assert!(
+                        run["instructions"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|receipt| receipt["id"] == "capacity-guidance"
+                                && !receipt["applied_at"].is_null())
+                    );
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        supervisor.abort();
+        crate::work::stop(&f.state).await;
+        upstream.abort();
+    }
+
+    #[tokio::test]
     async fn unattended_worker_activity_reports_capacity_and_model_waits_without_a_live_chat() {
         use rook_proto::activity::Stage;
         use std::time::Duration;

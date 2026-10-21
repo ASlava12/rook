@@ -46,6 +46,16 @@ impl Tasks {
     }
 }
 
+/// Caller holds the work admission lock. A live retry observer is not an
+/// occupied executor; its continuation claims a slot under this same lock.
+pub(crate) async fn occupied(state: &AppState, legacy: usize) -> usize {
+    legacy.saturating_add(state.live.read().await.values().filter(|live| live.has_work_slot()).count())
+}
+
+pub(crate) fn ready(run: &Run, now: u64) -> bool {
+    run.status.runnable() && run.next_attempt_at.is_none_or(|at| at <= now)
+}
+
 /// Starting and recovery use the same lock: a scheduler tick must not launch a
 /// second writer while the socket that submitted the goal is attaching to it.
 pub async fn join_conversation(
@@ -65,7 +75,7 @@ pub async fn join_conversation(
         return Err(current.reason);
     }
     let legacy = tasks.values().filter(|run| !run.is_finished()).count();
-    let live = state.live.read().await.values().filter(|live| live.running()).count();
+    let live = occupied(state, 0).await;
     if current.next_attempt_at.is_some_and(|at| at > managed::now())
         || legacy.saturating_add(live) >= state.rook.read().await.config.work.max_parallel_runs
     {
@@ -326,10 +336,7 @@ pub async fn supervise(state: Arc<AppState>) {
         let conversations = managed::list(&*state.rook.read().await);
         if let Ok(runs) = conversations {
             for run in runs.into_iter().filter(|r| {
-                r.conversation.is_some()
-                    && r.status.runnable()
-                    && r.next_attempt_at.is_none_or(|at| at <= managed::now())
-                    && state.drain.allows_run(&r.id)
+                r.conversation.is_some() && ready(r, managed::now()) && state.drain.allows_run(&r.id)
             }) {
                 if let Err(error) = join_conversation(&state, &run).await {
                     block(&state, &run.id, &error).await;
@@ -388,17 +395,10 @@ pub async fn supervise(state: Arc<AppState>) {
             if run.conversation.is_some() {
                 continue;
             }
-            if tasks
-                .len()
-                .saturating_add(state.live.read().await.values().filter(|live| live.running()).count())
-                >= cap
-            {
+            if occupied(&state, tasks.len()).await >= cap {
                 continue;
             }
-            if tasks.contains_key(&run.id)
-                || !run.status.runnable()
-                || run.next_attempt_at.is_some_and(|at| at > managed::now())
-            {
+            if tasks.contains_key(&run.id) || !ready(&run, managed::now()) {
                 continue;
             }
             let shared = state.clone();
@@ -533,7 +533,7 @@ async fn schedule_tick(state: &Arc<AppState>) {
             managed::list(&rook)
                 .map(|runs| {
                     task.pending.as_ref().is_some_and(|id| runs.iter().any(|r| &r.id == id))
-                        || runs.iter().filter(|r| r.status.runnable()).count()
+                        || runs.iter().filter(|r| ready(r, managed::now())).count()
                             < rook.config.work.max_parallel_runs
                 })
                 .unwrap_or(false)

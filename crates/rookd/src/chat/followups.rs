@@ -124,8 +124,7 @@ pub(crate) async fn supervise(state: &Arc<AppState>, legacy_running: usize, curs
     };
     let Ok(sessions) = sessions else { return };
     let at_end = sessions.len() < scan;
-    let mut running =
-        legacy_running.saturating_add(state.live.read().await.values().filter(|l| l.running()).count());
+    let mut running = crate::work::occupied(state, legacy_running).await;
     for session in sessions {
         if running >= cap {
             return;
