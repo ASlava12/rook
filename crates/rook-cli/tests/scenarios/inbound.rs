@@ -97,7 +97,7 @@ impl Model {
                             serde_json::from_str(record["payload_utf8"].as_str().unwrap()).unwrap();
                         assert_eq!(payload["code"], "INBOUND_HTTP_42");
                         (
-                            json!({"tool_calls":[{"index":0,"id":"event-write","type":"function","function":{"name":"run_command","arguments":json!({"command":"printf INBOUND_HTTP_42 > event-result"}).to_string()}}]}),
+                            json!({"tool_calls":[{"index":0,"id":"event-write","type":"function","function":{"name":"write_file","arguments":json!({"path":"event-result","content":"INBOUND_HTTP_42"}).to_string()}}]}),
                             "tool_calls",
                         )
                     };
@@ -167,9 +167,15 @@ fn authenticated_http_delivery_survives_restart_dispatches_one_ordinary_task_and
     fixture.write_config(&format!("[agent]\nmodel='local'\ninstall_servers=false\none_script=false\nplan_first=false\n[memory]\nenabled=false\n[web]\nenabled=false\n[sandbox]\nstance='autonomous'\n[models.local]\napi='openai'\nmodel='test'\nurl='{}'\ncontext_window=128000\n[inbound]\nenabled=true\nbody_bytes=1024\n[inbound.routes.alpha]\nworkspace={}\nsecret='inbound'\ntask='Write the event code into event-result and verify it.'\nautonomous=true\nmax_iterations=2\nmax_tokens=65536\nmax_seconds=120\n",model.url,serde_json::to_string(fixture.workspace.path().to_str().unwrap()).unwrap()));
     let mut vault = rook_core::Vault::load_from(fixture.home.path().join("secrets.toml")).unwrap();
     vault.keep("inbound", std::str::from_utf8(SECRET).unwrap()).unwrap();
+    std::fs::create_dir_all(fixture.workspace.path().join(".rook")).unwrap();
+    let check = if cfg!(windows) {
+        r#"powershell -NoProfile -NonInteractive -Command "if ([IO.File]::ReadAllText('event-result') -ceq 'INBOUND_HTTP_42') { exit 0 }; exit 1""#
+    } else {
+        "grep -Fx INBOUND_HTTP_42 event-result"
+    };
     std::fs::write(
-        fixture.workspace.path().join("evaluation.toml"),
-        "[[check]]\nname='event result'\nrun='grep -Fx INBOUND_HTTP_42 event-result'\n",
+        fixture.workspace.path().join(".rook/evaluation.toml"),
+        format!("[[check]]\nname='event result'\nrun={}\n", serde_json::to_string(check).unwrap()),
     )
     .unwrap();
     // Hold the configured workspace so receipt acceptance and restart happen
@@ -243,6 +249,12 @@ fn authenticated_http_delivery_survives_restart_dispatches_one_ordinary_task_and
     assert_eq!(
         std::fs::read_to_string(fixture.workspace.path().join("event-result")).unwrap(),
         "INBOUND_HTTP_42"
+    );
+    assert!(
+        observed["work"]["recent"].as_array().unwrap().iter().any(|iteration| {
+            iteration["summary"].as_str().is_some_and(|summary| summary.starts_with("1 of 1 checks pass"))
+        }),
+        "the declared content check must actually run: {observed}"
     );
     let duplicate =
         runtime.block_on(send(&client, &restarted.address, "delivery-one", body, true)).json::<Value>();

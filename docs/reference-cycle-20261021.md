@@ -41,8 +41,15 @@ read-only contexts. Changed-control checks cover both checkpoint tools.
 
 The first local `cargo xtask ci` passed formatting, workspace/all-target clippy
 and frontend builds, but the full test link exhausted the Z drive (LNK1180).
-A new full gate uses a separate C-drive target with incremental compilation
-disabled and three build jobs; it is running, not recorded as a pass yet.
+A new full gate used a separate C-drive target with incremental compilation
+disabled and three build jobs. Formatting, clippy, builds and all test targets
+except the CLI target passed. The inbound HTTP CLI scenario depended on POSIX
+`printf` through Windows `cmd`, leaving an empty redirected file when `printf`
+was absent. Its scorecard also lived at the workspace root instead of
+`.rook/evaluation.toml`, so the declared check had not run. The fixture now uses
+ordinary `write_file`, puts the scorecard in its actual location, selects a
+platform-native content check and asserts that its passing report is present.
+The focused rerun is pending; this full gate is not recorded as a pass.
 
 The owned HTTP/CLI/daemon probe passed on candidate binaries, including a human
 blocker, physical daemon restart, explicit same-session continuation and a
@@ -59,6 +66,11 @@ command obedience, unchanged file content and cross-session memory scenarios
 failed. Those failures are retained as model-quality evidence, not converted
 to passing checks or a quality-improvement claim.
 
-Exact-revision CI for the final probe/docs revision, release package builds,
-tag/publication and archive/host verification remain pending. No release has
-been claimed complete.
+All five release dry-run packages from `d1f7ae0` built successfully. Archive
+paths, checksums, binary architectures, versions and all 50 bundled skills were
+verified. Both host binaries report `0.20.0`, and the owned HTTP/CLI/daemon probe
+passed again using the packaged Windows binaries. The following `9e0eba5`
+revision changes only release verification notes.
+
+Exact-revision CI for the final source, tag/publication and verification of
+published assets remain pending. No release has been claimed complete.
