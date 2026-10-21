@@ -1,7 +1,7 @@
 # Rook
 
-[Rook 0.21.0](docs/releases/0.21.0.md): native browser dialogs, reliable command
-progress comparison and responsive managed retry waits.
+[Rook 0.21.1](docs/releases/0.21.1.md): available execution capacity during retry
+waits, Unicode skill previews and macOS command cleanup.
 
 [Domain network policy with OS containment](docs/domain-network-policy.md).
 
