@@ -34,9 +34,28 @@ only inspects the local runtime and does not contact a page.
 | `click` | `ref` | Click the referenced element. |
 | `type` | `ref`, `text` | Replace textbox contents; an empty string clears it. |
 | `wait` | `text` or `seconds` | Wait for visible text, or 1–30 seconds. |
-| `screenshot` | — | Capture the 1280×720 viewport as PNG. |
+| `screenshot` | — | Capture the current viewport as PNG; initially 1280×720. |
 | `status` | — | Inspect context, activity, call count and uncertainty. |
 | `close` | — | End the context and invalidate its refs. |
+| `console` | optional `level` | Read bounded console messages at error, warning, info or debug level. |
+| `requests` | — | Read observed network requests with credentials and URL query data removed. |
+| `resize` | `width`, `height` | Set viewport dimensions, each in 240–3840 pixels. |
+| `dialog` | `context`, `accept`, optional `text` | Accept or dismiss an observed native JavaScript dialog; `text` supplies an accepted prompt's answer. |
+
+For a native `alert`, `confirm` or `prompt` reported by the browser, read local
+`status`, then pass its `context` string to `dialog` along with boolean `accept`.
+An empty `text` is an explicit empty prompt answer; omit it to use the driver's
+default. Text is allowed only with `accept = true`, is limited to 16384 UTF-8
+bytes and cannot contain NUL. This action remains subject to ordinary external
+action approvals, even when dismissing a dialog.
+
+The context binds the response to this conversation and browser generation.
+Foreign, closed or restarted contexts are refused before dispatch, and a dialog
+response cannot start a browser. It addresses the driver's current native
+dialog; the backend does not expose a per-dialog ID. Inspect the current
+observation before responding. A response is never replayed after cancellation
+or an uncertain outcome. A configured backend missing an optional action is
+reported without consuming a call or poisoning an otherwise healthy context.
 
 Call `snapshot` after navigation to read the page. Playwright may return an
 artifact link instead of inline page text from navigation or other actions;
@@ -104,6 +123,20 @@ fill, exactly one submission, visible confirmation, retained PNG, full durable
 call history, no pending receipts and an untouched workspace. The second
 identifies Chromium through its exact driver ancestry before checking cleanup
 after cancelled page calls, cancelled close and engine drop.
+
+The owned native-dialog journey is opt-in and requires the pinned driver and
+installed Chromium. It accepts an alert, accepts and dismisses a confirmation,
+answers and dismisses a prompt, and submits an explicit empty prompt answer
+through the ordinary agent loop:
+
+```sh
+cargo test -p rook-core --test browser native_dialogs_resume_the_page_through_the_ordinary_agent_loop -- --ignored --exact --nocapture
+```
+
+Argument and closed-context tests run without Chromium; Unix protocol fixtures
+also exercise foreign/stale contexts, cancellation without replay, exact driver
+arguments and unsupported optional actions. See the
+[reference and verification record](research/browser-dialogs-20261021.md).
 
 Reference: [Playwright MCP](https://github.com/microsoft/playwright-mcp),
 with browser interaction ideas from the pinned OpenClaw reference. Rook's

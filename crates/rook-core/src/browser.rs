@@ -1,7 +1,7 @@
 //! One browser context per conversation, carried through ordinary tool dispatch.
 //! Pages never choose tools or permissions. The configured local MCP executable
 //! is trusted equipment; observations from it remain external source data.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -24,6 +24,7 @@ const ACTIONS: &[(&str, &str)] = &[
     ("console", "browser_console_messages"),
     ("requests", "browser_network_requests"),
     ("resize", "browser_resize"),
+    ("dialog", "browser_handle_dialog"),
 ];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -83,6 +84,7 @@ impl Settings {
 
 struct Connected {
     server: rook_mcp::Server,
+    tools: BTreeSet<String>,
     // Screenshots and any upstream artifacts stay outside the user's workspace.
     _directory: tempfile::TempDir,
 }
@@ -205,11 +207,20 @@ fn arguments(args: &Value) -> Result<(&str, Value), &'static str> {
         || object.keys().any(|k| {
             !matches!(
                 k.as_str(),
-                "action" | "url" | "ref" | "text" | "seconds" | "width" | "height" | "level"
+                "action"
+                    | "url"
+                    | "ref"
+                    | "text"
+                    | "seconds"
+                    | "width"
+                    | "height"
+                    | "level"
+                    | "accept"
+                    | "context"
             )
         })
     {
-        return Err("browser arguments: action, url, ref, text or seconds only");
+        return Err("unknown or excessive browser arguments; use the browser action schema");
     }
     let action = args.get("action").and_then(Value::as_str).ok_or("browser needs action")?;
     let allowed: &[&str] = match action {
@@ -220,6 +231,7 @@ fn arguments(args: &Value) -> Result<(&str, Value), &'static str> {
         "snapshot" | "screenshot" | "status" | "close" | "requests" => &["action"],
         "console" => &["action", "level"],
         "resize" => &["action", "width", "height"],
+        "dialog" => &["action", "context", "accept", "text"],
         _ => return Err("unknown browser action"),
     };
     if object.keys().any(|k| !allowed.contains(&k.as_str())) {
@@ -259,6 +271,22 @@ fn arguments(args: &Value) -> Result<(&str, Value), &'static str> {
             json!({"url":url})
         }
         "click" => json!({"target":target()?}),
+        "dialog" => {
+            string("context", 53)?;
+            let accept = args.get("accept").and_then(Value::as_bool).ok_or("dialog needs boolean accept")?;
+            let mut mapped = json!({"accept":accept});
+            if let Some(value) = args.get("text") {
+                if !accept {
+                    return Err("prompt text applies only when accepting a dialog");
+                }
+                let text = value
+                    .as_str()
+                    .filter(|text| text.len() <= 16384 && !text.contains('\0'))
+                    .ok_or("dialog text must be a string of at most 16384 bytes")?;
+                mapped["promptText"] = json!(text);
+            }
+            mapped
+        }
         "type" => {
             let text = args
                 .get("text")
@@ -343,20 +371,20 @@ async fn connect(settings: &Settings) -> Result<Arc<Connected>, String> {
         catalog_timeout_secs: settings.startup_timeout_secs,
         ..Default::default()
     };
-    let connected = Arc::new(Connected {
-        server: rook_mcp::Server::connect(&config, &rook_llm::Proxy::Direct)
-            .await
-            .map_err(|e| e.to_string())?,
-        _directory: directory,
-    });
-    let tools = connected.server.list_tools().await.map_err(|e| e.to_string())?;
+    let server =
+        rook_mcp::Server::connect(&config, &rook_llm::Proxy::Direct).await.map_err(|e| e.to_string())?;
+    let tools = server.list_tools().await.map_err(|e| e.to_string())?;
     if ACTIONS.iter().take(6).any(|(_, name)| !tools.iter().any(|tool| tool.name == *name)) {
         return Err(
             "configured browser server lacks required Playwright tools; check pinned package and arguments"
                 .into(),
         );
     }
-    Ok(connected)
+    Ok(Arc::new(Connected {
+        server,
+        tools: tools.into_iter().map(|tool| tool.name).collect(),
+        _directory: directory,
+    }))
 }
 
 fn namespaced(text: &str, prefix: &str, budget: usize) -> (String, usize) {
@@ -422,9 +450,10 @@ impl Tool for Browser {
     }
     fn spec(&self) -> rook_llm::ToolSpec {
         rook_llm::ToolSpec {
-            name: TOOL.into(), description: "Control the session browser: navigate, snapshot, click/type, screenshot, console, requests and resize. Use snapshot refs. Close after uncertain effects.".into(),
+            name: TOOL.into(), description: "Control the session browser: navigate, snapshot, click/type, screenshot, console, requests, resize and dialog. Use snapshot refs. To answer an observed native dialog, get context from status, then call dialog with that context and accept; optional text answers an accepted prompt. Close after uncertain effects.".into(),
             parameters: json!({"type":"object","properties":{
-                "action":{"type":"string","enum":["navigate","snapshot","click","type","wait","screenshot","status","close","console","requests","resize"]},
+                "action":{"type":"string","enum":["navigate","snapshot","click","type","wait","screenshot","status","close","console","requests","resize","dialog"]},
+                "context":{"type":"string","maxLength":53}, "accept":{"type":"boolean"},
                 "url":{"type":"string","maxLength":4096}, "ref":{"type":"string","maxLength":80},
                 "width":{"type":"integer","minimum":240,"maximum":3840}, "height":{"type":"integer","minimum":240,"maximum":3840}, "level":{"type":"string","enum":["error","warning","info","debug"]},
                 "text":{"type":"string","maxLength":16384}, "seconds":{"type":"integer","minimum":1,"maximum":30}
@@ -466,12 +495,17 @@ impl Tool for Browser {
                 Ok(None) => return Ok(error("browser is closed; navigate first; old page refs are invalid")),
                 Err(why) => return Ok(error(why)),
             };
+        let browser_context = format!(
+            "{}:{}",
+            rook_store::format_session_id(self.session),
+            rook_store::format_session_id(slot.generation)
+        );
         if action == "status" {
             return Ok(ToolOutcome::ok(
                 json!({"session":rook_store::format_session_id(self.session),
                 "busy":slot.busy.load(Ordering::Acquire), "uncertain":slot.uncertain.load(Ordering::Acquire),
                 "calls":slot.calls.load(Ordering::Relaxed), "limit":slot.settings.max_calls,
-                "generation":rook_store::format_session_id(slot.generation),
+                "generation":rook_store::format_session_id(slot.generation), "context":browser_context,
                 "started":slot.connected.lock().unwrap_or_else(|e| e.into_inner()).is_some() })
                 .to_string(),
             ));
@@ -497,11 +531,13 @@ impl Tool for Browser {
         if slot.settings != self.settings {
             return Ok(error("browser configuration changed; close before using the new configuration"));
         }
-        let prefix = format!(
-            "{}:{}:",
-            rook_store::format_session_id(self.session),
-            rook_store::format_session_id(slot.generation)
-        );
+        let prefix = format!("{browser_context}:");
+        if action == "dialog" && args.get("context").and_then(Value::as_str) != Some(browser_context.as_str())
+        {
+            return Ok(error(
+                "browser dialog context belongs to another session or closed context; read this session's status",
+            ));
+        }
         if let Some(target) = mapped.get("target").and_then(Value::as_str) {
             let Some(target) = target.strip_prefix(&prefix) else {
                 return Ok(error(
@@ -513,9 +549,17 @@ impl Tool for Browser {
         if slot.calls.load(Ordering::Relaxed) >= self.settings.max_calls {
             return Ok(error("browser call limit reached; close before starting a new context"));
         }
+        let Some(name) = remote(action) else {
+            return Ok(error("unknown browser action"));
+        };
+        let previous = slot.connected.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if previous.as_ref().is_some_and(|connected| !connected.tools.contains(name)) {
+            return Ok(error(
+                "configured browser server does not support this action; check the pinned package and arguments",
+            ));
+        }
         calling.started = true;
         slot.calls.fetch_add(1, Ordering::Relaxed);
-        let previous = slot.connected.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let connected = match previous {
             Some(connected) => connected,
             None => {
@@ -543,9 +587,6 @@ impl Tool for Browser {
                 }
             }
         };
-        let Some(name) = remote(action) else {
-            return Ok(error("unknown browser action"));
-        };
         let result = match tokio::time::timeout(
             Duration::from_secs(self.settings.call_timeout_secs),
             connected.server.call_tool(name, &mapped),
@@ -567,6 +608,7 @@ impl Tool for Browser {
         let mut outcome = rook_tools::mcp::outcome(&result, ctx, TOOL)
             .with("browser_session", rook_store::format_session_id(self.session))
             .with("browser_action", action)
+            .with("browser_context", browser_context)
             .with("browser_generation", rook_store::format_session_id(slot.generation));
         let observed = if matches!(action, "console" | "requests") {
             diagnostic_text(&outcome.content)
@@ -697,6 +739,87 @@ mod tests {
         assert!(resumed.call(&ctx, &json!({"action":"click","ref":old_ref})).await.unwrap().is_error);
         assert_eq!(calls(root.path()).len(), before);
         resumed.call(&ctx, &json!({"action":"close"})).await.unwrap();
+    }
+    #[tokio::test]
+    async fn dialog_responses_use_only_the_live_conversation_context_and_driver_capabilities() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = context(root.path());
+        let pool = Arc::new(Pool::default());
+        let first = fixture(root.path(), 1, pool.clone());
+        let second = fixture(root.path(), 2, pool);
+        let opened =
+            first.call(&ctx, &json!({"action":"navigate","url":"http://localhost/dialog"})).await.unwrap();
+        let token = opened.meta["browser_context"].clone();
+        assert!(token.is_string());
+        second.call(&ctx, &json!({"action":"navigate","url":"http://localhost/other"})).await.unwrap();
+        let before = calls(root.path()).len();
+        let wrong =
+            second.call(&ctx, &json!({"action":"dialog","context":token,"accept":true})).await.unwrap();
+        assert!(wrong.is_error && wrong.content.contains("another session"));
+        assert_eq!(calls(root.path()).len(), before);
+        let status = first.call(&ctx, &json!({"action":"status"})).await.unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&status.content).unwrap()["context"], token);
+        let accepted = first
+            .call(&ctx, &json!({"action":"dialog","context":token,"accept":true,"text":"answer"}))
+            .await
+            .unwrap();
+        assert!(!accepted.is_error, "{}", accepted.content);
+        assert_eq!(
+            calls(root.path()).last().unwrap()["arguments"],
+            json!({"accept":true,"promptText":"answer"})
+        );
+        assert_eq!(calls(root.path()).last().unwrap()["name"], "browser_handle_dialog");
+        let before = calls(root.path()).len();
+        let unsupported = first.call(&ctx, &json!({"action":"console"})).await.unwrap();
+        assert!(unsupported.is_error && unsupported.content.contains("does not support"));
+        assert_eq!(calls(root.path()).len(), before);
+        assert!(!first.call(&ctx, &json!({"action":"snapshot"})).await.unwrap().is_error);
+        first.call(&ctx, &json!({"action":"close"})).await.unwrap();
+        first.call(&ctx, &json!({"action":"navigate","url":"http://localhost/fresh"})).await.unwrap();
+        let before = calls(root.path()).len();
+        assert!(
+            first
+                .call(&ctx, &json!({"action":"dialog","context":token,"accept":false}))
+                .await
+                .unwrap()
+                .is_error
+        );
+        assert_eq!(calls(root.path()).len(), before);
+        first.call(&ctx, &json!({"action":"close"})).await.unwrap();
+        second.call(&ctx, &json!({"action":"close"})).await.unwrap();
+    }
+    #[tokio::test]
+    async fn cancelling_a_dialog_response_invalidates_the_context_without_replaying_it() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = context(root.path());
+        let browser = Arc::new(fixture(root.path(), 1, Arc::new(Pool::default())));
+        let opened =
+            browser.call(&ctx, &json!({"action":"navigate","url":"http://localhost/dialog"})).await.unwrap();
+        let token = opened.meta["browser_context"].clone();
+        let args = json!({"action":"dialog","context":token,"accept":true,"text":"wait"});
+        let task = tokio::spawn({
+            let browser = browser.clone();
+            let ctx = ctx.clone();
+            let args = args.clone();
+            async move { browser.call(&ctx, &args).await }
+        });
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !calls(root.path()).iter().any(|call| call["name"] == "browser_handle_dialog") {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        let status = browser.call(&ctx, &json!({"action":"status"})).await.unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&status.content).unwrap()["uncertain"], true);
+        assert!(browser.call(&ctx, &args).await.unwrap().is_error);
+        assert_eq!(
+            calls(root.path()).iter().filter(|call| call["name"] == "browser_handle_dialog").count(),
+            1
+        );
+        browser.call(&ctx, &json!({"action":"close"})).await.unwrap();
     }
     #[tokio::test]
     async fn cancellation_and_transport_loss_poison_the_context_without_replaying_a_call() {
@@ -981,6 +1104,55 @@ mod tests {
         }
         app.abort();
         let _ = app.await;
+    }
+}
+
+#[cfg(test)]
+mod dialog_tests {
+    use super::*;
+    #[test]
+    fn dialog_acceptance_and_prompt_bounds_are_checked_before_dispatch() {
+        for request in [
+            json!({"action":"dialog","accept":true}),
+            json!({"action":"dialog","context":"x","accept":"true"}),
+            json!({"action":"dialog","context":"x","accept":false,"text":"discarded"}),
+            json!({"action":"dialog","context":"x","accept":true,"text":null}),
+            json!({"action":"dialog","context":"x","accept":true,"text":"Ж".repeat(8193)}),
+            json!({"action":"dialog","context":"x","accept":true,"text":"a\0b"}),
+            json!({"action":"dialog","context":"x".repeat(54),"accept":true}),
+            json!({"action":"dialog","context":"x","accept":true,"dialog_id":"not-supported"}),
+            json!({"action":"snapshot","accept":true}),
+        ] {
+            assert!(arguments(&request).is_err(), "{request}");
+        }
+        for (args, expected) in [
+            (json!({"accept":true,"text":""}), json!({"accept":true,"promptText":""})),
+            (json!({"accept":false}), json!({"accept":false})),
+        ] {
+            let mut request = args;
+            request["action"] = json!("dialog");
+            request["context"] = json!("a:b");
+            assert_eq!(arguments(&request).unwrap().1, expected);
+        }
+    }
+    #[tokio::test]
+    async fn a_dialog_response_cannot_start_a_browser_or_address_an_unstarted_generation() {
+        let root = tempfile::tempdir().unwrap();
+        let settings =
+            Settings { enabled: true, command: "rook-browser-must-not-start".into(), ..Default::default() };
+        let browser = Browser { pool: Arc::new(Pool::default()), settings, session: 1 };
+        let ctx = ToolContext::new(root.path().into());
+        let result = browser
+            .call(&ctx, &json!({"action":"dialog","context":"old:context","accept":true}))
+            .await
+            .unwrap();
+        assert!(result.is_error && result.content.contains("browser is closed"));
+        assert!(browser.pool.slots.lock().unwrap().is_empty());
+        assert_eq!(browser.mcp_source(&json!({"action":"dialog"})), Some((TOOL, "browser_handle_dialog")));
+        assert!(matches!(
+            browser.risk(&json!({"action":"dialog"})),
+            rook_tools::policy::Risk::External { claims_read_only: false, .. }
+        ));
     }
 }
 

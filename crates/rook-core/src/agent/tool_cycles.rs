@@ -265,6 +265,18 @@ impl AgentLoop<'_> {
         let mut input = sha2::Sha256::new();
         let mut total = 0;
         let mut complete = self.tool_ctx.files.is_none();
+        // Browser observations have inputs outside the workspace proof. A page
+        // or local browser status may change between identical calls. Let the
+        // actual answers establish a cycle, rather than refusing the next read
+        // based on earlier answers. Mutation calls keep their normal guard.
+        if call.name == crate::browser::TOOL
+            && matches!(
+                call.arguments.get("action").and_then(serde_json::Value::as_str),
+                Some("snapshot" | "screenshot" | "console" | "requests" | "wait" | "status")
+            )
+        {
+            complete = false;
+        }
         if let Some(tool) = self.tools.get(&call.name) {
             let paths = tool.observed_paths(&call.arguments);
             if paths.len() > 32 {

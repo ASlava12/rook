@@ -13,7 +13,7 @@ with open(log, 'a') as output:
     output.write(json.dumps({'child': child.pid}) + '\n')
 url = ''
 names = ['browser_navigate', 'browser_snapshot', 'browser_click', 'browser_type',
-         'browser_wait_for', 'browser_take_screenshot', 'browser_close']
+         'browser_wait_for', 'browser_take_screenshot', 'browser_close', 'browser_handle_dialog']
 for line in sys.stdin:
     request = json.loads(line)
     if 'id' not in request:
@@ -34,6 +34,8 @@ for line in sys.stdin:
             if url.endswith('/crash'):
                 os._exit(0)
         if name == 'browser_wait_for':
+            time.sleep(60)
+        if name == 'browser_handle_dialog' and args.get('promptText') == 'wait':
             time.sleep(60)
         text = url + '\n- textbox "Message" [ref=e1]\n- button "Save" [ref=e2]'
         result = {'content': [{'type': 'text', 'text': text}]}

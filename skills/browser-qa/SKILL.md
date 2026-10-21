@@ -1,7 +1,7 @@
 ---
 name: browser-qa
 description: Use when checking a web interface through real browser interactions.
-version: 1.0.0
+version: 1.1.0
 license: MIT
 requires:
   agent: ">=0.12.1"
@@ -24,15 +24,23 @@ HTML source inspection alone cannot establish that an interaction works.
 Exercise the main journey, recovery from invalid input, empty/loading states and
 the relevant permission boundary. Use observable page state as the completion
 condition, not a fixed sleep. Capture a screenshot when layout or visual evidence
-matters. Rook's native screenshot is a fixed viewport: do not claim a mobile or
-multi-viewport audit from it. See the examples below.
+matters. When `resize` is offered, verify the requested viewport before making
+responsive-layout claims. A narrow viewport alone does not emulate a mobile
+device's touch input or browser. See the examples below.
 
 For each defect retain the starting state, minimal reproduction, expected and
 observed behavior, and an attributable snapshot/screenshot or test output. Report
 console, network, keyboard and responsive checks only when the selected tools
-actually exposed and exercised them. The native adapter does not expose console
-inspection or arbitrary JavaScript; an existing approved Playwright test setup
-can cover these separately.
+actually exposed and exercised them. The native adapter can expose bounded
+console/network observations and viewport resizing; confirm the offered action
+schema. It does not expose arbitrary JavaScript. An existing approved Playwright
+test setup can cover checks beyond the offered actions.
+
+If a native JavaScript dialog blocks the page and `dialog` is offered, inspect
+the observation, read `status` and use its exact `context` in the response.
+Choose accept or dismiss according to the authorized journey; supply `text`
+only to answer an accepted prompt. Inspect the resulting page state before
+continuing. Do not guess a context or repeat a response whose outcome was lost.
 
 After a timed-out or cancelled submission, inspect `status` and the visible or
 server-recorded outcome before doing anything else. Do not click again to discover
@@ -60,8 +68,9 @@ These are arguments to the single `browser` tool, not separate tool names:
 
 Use the exact refs returned by the current snapshot; placeholder refs above are
 not real targets. Confirm the accepted schema of the offered tool. Native actions
-are navigate, snapshot, click, type, wait, screenshot, status and close. Native
-screenshots use a 1280 by 720 viewport. Images are retained in normal tool results;
+include navigate, snapshot, click, type, wait, screenshot, status and close;
+optional actions include console, requests, resize and dialog. Screenshots use
+the current viewport, initially 1280 by 720. Images are retained in normal tool results;
 when image input is disabled, use snapshots for model-visible page evidence.
 
 The user configuration must enable `[browser] enabled = true`. The supported

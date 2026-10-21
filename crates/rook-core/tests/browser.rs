@@ -72,6 +72,20 @@ impl Provider for Scripted {
                     action.as_object_mut().unwrap().remove("ref_label");
                     action["ref"] = json!(reference);
                 }
+                if action["action"] == "dialog" && action.get("context").is_none() {
+                    action["context"] = request
+                        .messages
+                        .iter()
+                        .rev()
+                        .filter(|m| m.role == Role::Tool)
+                        .find_map(|m| {
+                            serde_json::from_str::<Value>(&body(&m.content))
+                                .ok()
+                                .and_then(|status| status["context"].as_str().map(str::to_owned))
+                        })
+                        .expect("the agent must read current browser status before responding to a dialog")
+                        .into();
+                }
                 Message {
                     tool_calls: vec![ToolCall {
                         id: format!("action-{}", self.actions.lock().unwrap().len()),
@@ -168,7 +182,10 @@ async fn browser_denial_precedes_startup_and_is_saved_as_an_ordinary_tool_result
     config.agent.lazy_tools = false;
     let rook = open(root.path(), config);
     let session = rook.start_session("browser approval").unwrap();
-    let provider = provider(vec![json!({"action":"navigate","url":"http://localhost/approval-test"})]);
+    let provider = provider(vec![
+        json!({"action":"navigate","url":"http://localhost/approval-test"}),
+        json!({"action":"dialog","context":"unadmitted:context","accept":true}),
+    ]);
     let mut agent = AgentLoop::new(&rook, provider.clone(), session);
     let cost = agent
         .tool_specs()
@@ -189,6 +206,130 @@ async fn browser_denial_precedes_startup_and_is_saved_as_an_ordinary_tool_result
     let receipts = rook.execution(session).unwrap();
     assert!(!receipts.is_empty());
     assert!(receipts.iter().all(|r| r.pending.is_none()));
+}
+
+#[tokio::test]
+async fn browser_observations_recheck_external_state_but_stable_answers_and_mutations_still_stop() {
+    struct StableBrowser(Arc<std::sync::atomic::AtomicUsize>);
+    #[async_trait]
+    impl rook_tools::Tool for StableBrowser {
+        fn name(&self) -> &str {
+            "browser"
+        }
+        fn spec(&self) -> rook_llm::ToolSpec {
+            rook_llm::ToolSpec {
+                name: "browser".into(),
+                description: "Owned stable browser fixture".into(),
+                parameters: json!({"type":"object"}),
+            }
+        }
+        fn risk(&self, _: &Value) -> rook_tools::policy::Risk {
+            rook_tools::policy::Risk::ReadOnly
+        }
+        async fn call(
+            &self,
+            _: &rook_tools::ToolContext,
+            _: &Value,
+        ) -> rook_tools::Result<rook_tools::ToolOutcome> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(rook_tools::ToolOutcome::ok("unchanged page"))
+        }
+    }
+    for (action, attempts, expected, dispatched) in [
+        (json!({"action":"snapshot"}), 5, "end_turn", 5),
+        (json!({"action":"snapshot"}), 24, "looping", 20),
+        (json!({"action":"click","ref":"fixture"}), 5, "looping", 2),
+        (json!({"action":"dialog","context":"fixture:context","accept":true}), 5, "looping", 2),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.agent.lazy_tools = false;
+        config.agent.max_steps = 32;
+        let rook = open(root.path(), config);
+        let session = rook.start_session("browser input proof").unwrap();
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut agent = AgentLoop::new(&rook, provider(vec![action; attempts]), session);
+        agent.tools.register(Arc::new(StableBrowser(count.clone())));
+        let outcome = agent
+            .run("Observe the owned browser fixture; do not assume workspace files prove its page state.")
+            .await
+            .unwrap();
+        assert_eq!(outcome.stopped, expected, "{outcome:?}");
+        assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed), dispatched);
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires pinned Playwright MCP and installed Chromium; run explicitly as documented"]
+async fn native_dialogs_resume_the_page_through_the_ordinary_agent_loop() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let _ = socket.read(&mut request).await;
+            let html = r#"<!doctype html><title>Owned Rook dialogs</title><button id="alert">Alert</button><button id="confirm">Confirm</button><button id="prompt">Prompt</button><p id="result">Waiting</p><script>
+document.querySelector('#alert').onclick=()=>{alert('Owned alert');document.querySelector('#result').textContent='alert:closed';};
+document.querySelector('#confirm').onclick=()=>{const result=confirm('Owned confirm');document.querySelector('#result').textContent='confirm:'+result;};
+document.querySelector('#prompt').onclick=()=>{const result=prompt('Owned prompt','default');document.querySelector('#result').textContent='prompt:'+JSON.stringify(result);};
+</script>"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html}",
+                html.len()
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+    let root = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    config.browser.enabled = true;
+    config.browser.startup_timeout_secs = 120;
+    if let Ok(path) = std::env::var("ROOK_BROWSER_MCP_CLI") {
+        config.browser.command = "node".into();
+        config.browser.args = vec![path];
+    }
+    config.agent.lazy_tools = false;
+    config.agent.max_steps = 48;
+    config.sandbox.stance = rook_tools::policy::Stance::Autonomous;
+    let rook = open(root.path(), config);
+    let session = rook.start_session("native dialogs").unwrap();
+    let mut actions = vec![json!({"action":"navigate","url":format!("http://{address}/")})];
+    let cases = [
+        ("Alert", true, None, "alert:closed"),
+        ("Confirm", false, None, "confirm:false"),
+        ("Confirm", true, None, "confirm:true"),
+        ("Prompt", true, Some("Rook answer"), "prompt:\"Rook answer\""),
+        ("Prompt", false, None, "prompt:null"),
+        ("Prompt", true, Some(""), "prompt:\"\""),
+    ];
+    for (label, accept, text, expected) in cases {
+        actions.push(json!({"action":"snapshot"}));
+        actions.push(json!({"action":"click","ref_label":format!("button \"{label}\"")}));
+        actions.push(json!({"action":"status"}));
+        let mut dialog = json!({"action":"dialog","accept":accept});
+        if let Some(text) = text {
+            dialog["text"] = json!(text);
+        }
+        actions.push(dialog);
+        actions.push(json!({"action":"wait","text":expected}));
+        actions.push(json!({"action":"snapshot"}));
+    }
+    actions.push(json!({"action":"close"}));
+    let provider = provider(actions);
+    let result = tokio::time::timeout(Duration::from_secs(240),AgentLoop::new(&rook,provider.clone(),session).run("Respond to the owned alert, accept and dismiss confirm, and answer, dismiss and clear the prompt. Observe each result and close.")).await.unwrap().unwrap();
+    app.abort();
+    let _ = app.await;
+    assert_eq!(result.stopped, "end_turn", "{result:?}");
+    let observed = provider.observed.lock().unwrap().join("\n");
+    for (_, _, _, expected) in cases {
+        assert!(observed.contains(expected), "missing {expected}: {observed}");
+    }
+    assert!(!observed.contains("outcome is unknown"), "{observed}");
+    assert!(!observed.contains("No dialog visible"), "{observed}");
+    assert!(rook.execution(session).unwrap().iter().all(|r| r.pending.is_none()));
+    assert!(std::fs::read_dir(&rook.workspace).unwrap().next().is_none());
 }
 
 #[tokio::test]
