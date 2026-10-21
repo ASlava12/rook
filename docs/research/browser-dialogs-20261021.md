@@ -113,5 +113,12 @@ command obedience, delegation with streamed repetition, false-claim verification
 and cross-session memory failed. These are retained quality limits, not passing
 checks or a model-quality improvement claim. Later scheduler guidance
 and retry-observation changes are described with their own validation scope in
-[managed retry guidance](../managed-retry-guidance.md); final candidate platform
-and artifact checks are still required for the combined release.
+[managed retry guidance](../managed-retry-guidance.md); combined-release platform
+and artifact checks were still pending at that baseline.
+
+The combined 0.21.0 source passed all eight required jobs. All five downloaded
+archives passed content, provenance and linkage verification. The extracted
+Windows CLI also passed the seven native dialog cases, including exact events
+recorded independently by the local page server. Public assets match the tested
+draft. The [publication record](../releases/0.21.0-verification.md) preserves the
+final 5/8 optional smoke result separately from the earlier 3/8 baseline.
