@@ -8,6 +8,11 @@ in `docs/releases/` consistent with the package version.
 The source must pass formatting, workspace/all-target clippy and workspace
 tests. Inspect the eight required platform CI jobs on the release revision;
 the optional model smoke is separate evidence, including its failures.
+The smoke's endpoint check, scenario turns and transcript reads set both
+`ROOK_HOME` and `ROOK_CONFIG_DIR` to the scenario's temporary directory. An
+inherited config override must not replace the requested model, eight-step
+limit or disabled server installation. This isolates the scenario config;
+provider endpoints and credentials still follow the normal config machinery.
 The Linux CI job also runs the pure-Python archive verifier regressions.
 
 An annotated stable `vX.Y.Z` tag triggers `.github/workflows/release.yml`.

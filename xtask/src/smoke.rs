@@ -205,6 +205,7 @@ pub fn smoke(model: Option<String>) -> Result<()> {
     std::fs::write(home.path().join("config.toml"), config_for(&model))?;
     let reachable = Command::new(&rook)
         .env("ROOK_HOME", home.path())
+        .env("ROOK_CONFIG_DIR", home.path())
         .env("ROOK_LOG", "error")
         .arg("models")
         .output()
@@ -293,6 +294,7 @@ fn no_model_behind_it(why: &str) -> bool {
 fn transcript(rook: &Path, home: &Path) -> String {
     let listed = Command::new(rook)
         .env("ROOK_HOME", home)
+        .env("ROOK_CONFIG_DIR", home)
         .env("ROOK_LOG", "error")
         .args(["--json", "session", "ls", "--all"])
         .output();
@@ -311,6 +313,7 @@ fn transcript(rook: &Path, home: &Path) -> String {
     };
     let shown = Command::new(rook)
         .env("ROOK_HOME", home)
+        .env("ROOK_CONFIG_DIR", home)
         .env("ROOK_LOG", "error")
         .args(["session", "show", id, "--limit", "40", "--max-body", "1200"])
         .output();
@@ -329,6 +332,9 @@ fn transcript(rook: &Path, home: &Path) -> String {
 fn run(rook: &Path, home: &Path, workspace: &Path, prompt: &str) -> Result<Turn> {
     let out = Command::new(rook)
         .env("ROOK_HOME", home)
+        // ROOK_HOME does not override an inherited, separate config location.
+        // Keep the requested model and eight-step/no-install fixture policy.
+        .env("ROOK_CONFIG_DIR", home)
         .env("ROOK_LOG", "error")
         .args(["--workspace", &workspace.display().to_string(), "--yes", "--json", "run", prompt])
         .output()
