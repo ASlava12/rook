@@ -168,6 +168,13 @@ fn config_for(model: &str) -> String {
     format!("[agent]\nmodel = \"{model}\"\ninstall_servers = false\nmax_steps = 8\n")
 }
 
+fn fixture_command(rook: &Path, home: &Path) -> Command {
+    let mut command = Command::new(rook);
+    // ROOK_HOME does not override an inherited, separate config location.
+    command.env("ROOK_HOME", home).env("ROOK_CONFIG_DIR", home).env("ROOK_LOG", "error");
+    command
+}
+
 fn expect(held: bool, why: &str, turn: &Turn) -> Result<()> {
     match held {
         true => Ok(()),
@@ -203,9 +210,7 @@ pub fn smoke(model: Option<String>) -> Result<()> {
     // itself recommends.
     let home = tempfile::tempdir()?;
     std::fs::write(home.path().join("config.toml"), config_for(&model))?;
-    let reachable = Command::new(&rook)
-        .env("ROOK_HOME", home.path())
-        .env("ROOK_LOG", "error")
+    let reachable = fixture_command(&rook, home.path())
         .arg("models")
         .output()
         .context("asking what the endpoint offers")?;
@@ -289,47 +294,92 @@ fn no_model_behind_it(why: &str) -> bool {
         .any(|said| why.contains(said))
 }
 
-/// The tool calls and results of the one session in `home`, bounded.
-fn transcript(rook: &Path, home: &Path) -> String {
-    let listed = Command::new(rook)
-        .env("ROOK_HOME", home)
-        .env("ROOK_LOG", "error")
-        .args(["--json", "session", "ls", "--all"])
-        .output();
-    let Ok(listed) = listed else { return "    (no transcript: `session ls` failed)".into() };
-    let sessions: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap_or_default();
-    // The turn's own session, not a checker's: `verify` forks one, and it
-    // is listed too.
+/// Latest root and at most two direct children, never unrelated earlier turns.
+fn diagnostic_sessions(sessions: &serde_json::Value) -> Vec<(&'static str, &str)> {
+    let Some(sessions) = sessions.as_array() else { return Vec::new() };
+    fn order(s: &serde_json::Value) -> (i64, &str) {
+        (s["updated_at"].as_i64().unwrap_or_default(), s["id"].as_str().unwrap_or_default())
+    }
     let Some(id) = sessions
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|s| s["parent"].is_null())
+        .iter()
+        .filter(|s| s["parent"].is_null())
+        .max_by_key(|s| order(s))
         .and_then(|s| s["id"].as_str())
     else {
-        return "    (no transcript: no session was recorded)".into();
+        return Vec::new();
     };
-    let shown = Command::new(rook)
-        .env("ROOK_HOME", home)
-        .env("ROOK_LOG", "error")
-        .args(["session", "show", id, "--limit", "40", "--max-body", "1200"])
-        .output();
-    match shown {
-        Ok(out) => String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .take(60)
-            .map(|l| format!("    {l}"))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        Err(e) => format!("    (no transcript: {e})"),
+    let mut children: Vec<_> = sessions.iter().filter(|s| s["parent"].as_str() == Some(id)).collect();
+    children.sort_by_key(|s| std::cmp::Reverse(order(s)));
+    let mut selected = vec![("main", id)];
+    selected.extend(children.into_iter().filter_map(|s| s["id"].as_str()).take(2).map(|id| ("child", id)));
+    selected
+}
+
+/// Preserve the final verdict even when diff/catalog lines fill the display.
+fn diagnostic_excerpt(text: &str, limit: usize) -> String {
+    let lines: Vec<_> = text.lines().filter(|line| !line.trim().is_empty()).collect();
+    let selected: Vec<String> = if lines.len() <= limit {
+        lines.iter().map(|line| (*line).to_owned()).collect()
+    } else {
+        let head = limit / 3;
+        let tail = limit.saturating_sub(head + 1);
+        lines[..head]
+            .iter()
+            .map(|line| (*line).to_owned())
+            .chain(std::iter::once(format!("... {} display lines omitted ...", lines.len() - head - tail)))
+            .chain(lines[lines.len() - tail..].iter().map(|line| (*line).to_owned()))
+            .collect()
+    };
+    selected.iter().map(|line| format!("    {line}")).collect::<Vec<_>>().join("\n")
+}
+
+/// Latest bounded history includes late checks, rather than just first calls.
+fn session_transcript(rook: &Path, home: &Path, id: &str, lines: usize) -> Result<String> {
+    let page =
+        fixture_command(rook, home).args(["--json", "session", "history", id, "--limit", "40"]).output()?;
+    if !page.status.success() {
+        bail!("`session history` exited {}", page.status);
     }
+    let page: serde_json::Value = serde_json::from_slice(&page.stdout)?;
+    let Some(from) = page["items"].as_array().and_then(|items| items.first()).and_then(|e| e["seq"].as_u64())
+    else {
+        return Ok("    (no recorded events)".into());
+    };
+    let shown = fixture_command(rook, home)
+        .args(["session", "show", id, "--from", &from.to_string(), "--limit", "40", "--max-body", "1200"])
+        .output()?;
+    if !shown.status.success() {
+        bail!("`session show` exited {}", shown.status);
+    }
+    Ok(diagnostic_excerpt(&String::from_utf8_lossy(&shown.stdout), lines))
+}
+
+/// Tool calls/results of the latest scenario and its bounded child diagnostics.
+fn transcript(rook: &Path, home: &Path) -> String {
+    let listed = fixture_command(rook, home).args(["--json", "session", "ls", "--all"]).output();
+    let Ok(listed) = listed else { return "    (no transcript: `session ls` failed)".into() };
+    if !listed.status.success() {
+        return format!("    (no transcript: `session ls` exited {})", listed.status);
+    }
+    let sessions: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap_or_default();
+    let selected = diagnostic_sessions(&sessions);
+    if selected.is_empty() {
+        return "    (no transcript: no session was recorded)".into();
+    }
+    selected
+        .into_iter()
+        .map(|(role, id)| {
+            let limit = if role == "main" { 80 } else { 40 };
+            let body = session_transcript(rook, home, id, limit)
+                .unwrap_or_else(|e| format!("    (no transcript: {e})"));
+            format!("    [{role} {id}: latest up to 40 events; bounded display]\n{body}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn run(rook: &Path, home: &Path, workspace: &Path, prompt: &str) -> Result<Turn> {
-    let out = Command::new(rook)
-        .env("ROOK_HOME", home)
-        .env("ROOK_LOG", "error")
+    let out = fixture_command(rook, home)
         .args(["--workspace", &workspace.display().to_string(), "--yes", "--json", "run", prompt])
         .output()
         .context("running a turn")?;
@@ -369,7 +419,39 @@ fn turn_from(printed: &serde_json::Value) -> Result<Turn> {
 
 #[cfg(test)]
 mod tests {
-    use super::{no_model_behind_it, turn_from};
+    use super::{diagnostic_excerpt, diagnostic_sessions, no_model_behind_it, turn_from};
+
+    #[test]
+    fn failure_diagnostics_keep_the_final_verdict_after_a_long_diff() {
+        let mut text = String::from("first tool call\n\n");
+        for n in 0..200 {
+            text.push_str(&format!("diff line {n}\n"));
+        }
+        text.push_str("final checker verdict: content changed\n");
+        let shown = diagnostic_excerpt(&text, 60);
+        assert_eq!(shown.lines().count(), 60);
+        assert!(shown.starts_with("    first tool call\n"));
+        assert!(shown.ends_with("    final checker verdict: content changed"));
+        assert!(shown.contains("143 display lines omitted"));
+        assert_eq!(diagnostic_excerpt("α\n\nβ\n", 60), "    α\n    β");
+    }
+
+    #[test]
+    fn failure_diagnostics_select_the_current_root_and_only_two_own_children() {
+        let sessions = serde_json::json!([
+            {"id":"old", "updated_at":1},
+            {"id":"foreign", "parent":"old", "updated_at":100},
+            {"id":"current", "updated_at":2},
+            {"id":"third", "parent":"current", "updated_at":3},
+            {"id":"first", "parent":"current", "updated_at":5},
+            {"id":"second", "parent":"current", "updated_at":4}
+        ]);
+        assert_eq!(
+            diagnostic_sessions(&sessions),
+            [("main", "current"), ("child", "first"), ("child", "second")]
+        );
+        assert!(diagnostic_sessions(&serde_json::json!({})).is_empty());
+    }
 
     /// The contract with `rook run --json`, pinned: the outcome is nested,
     /// and a print with none is an error rather than an empty turn.

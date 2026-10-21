@@ -101,6 +101,20 @@ It uses temporary state, a held HTTP model fixture and sibling built binaries. I
 
 ## Summarizer experiment
 
+Comparison admission requires a committed summary, a confirmed compaction model
+receipt and reported usage. Token usage alone is insufficient: incomplete or
+empty model output can retain usage while core saves a source-fallback marker.
+An ineligible arm records its outcome and receipt, omits preservation scores and
+stops before subsequent requests. The [owned protocol probe](../xtask/probes/compaction-comparison/README.md)
+checks these cases and confirmed text/reasoning controls; it is not real-model
+quality evidence and does not resolve the pending experiment below.
+Each arm pins the selected summarizer and records the admitted provider-boundary
+output budget, stop reason, confirmed token-limit termination and streamed
+text/reasoning-text byte counts. Unknown truncation remains unknown. These fields
+do not expose extra reasoning content or claim that a transport's final wire
+budget equals the admitted request. All fixture limits are checked before any
+generation; an invalid later fixture cannot spend requests on earlier ones.
+
 The harness `crates/rook-core/examples/compaction-ab.rs` compares 2048 against `clamp(summarizer_window / 16, 2048, 8192)`, in alternating A/B and B/A order. It accepts an explicitly prepared JSON array of `{name, entries:[{kind,label,body}], checks:["required fact"]}` exported from real saved conversations (maximum 4 MiB, 8 fixtures, 512 entries and 64 checks each). Source text is redacted through the configured vault. Run under an isolated `ROOK_HOME`/`ROOK_CONFIG_DIR` with only the selected model's configuration and explicitly supplied credentials; do not use the working daemon/store as a fixture. The harness does not run agent tools. Its phase ceiling defaults to 90 seconds and honors an explicit `agent.compaction_timeout_secs`, bounded to 1..600 seconds for this experiment. It stops after a failed baseline/candidate rather than comparing fallback source markers as summaries.
 
 ```sh
