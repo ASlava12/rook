@@ -330,7 +330,9 @@ impl Group {
 
     /// Ends all of it. `true` when the call was made.
     pub fn end(&self) -> bool {
-        #[cfg(unix)]
+        #[cfg(target_os = "macos")]
+        return self.pid.is_some_and(process::end);
+        #[cfg(all(unix, not(target_os = "macos")))]
         // Safety: a documented call. The negative pid is the group, which is
         // the whole point — killing the shell alone leaves what it started.
         return self.pid.is_some_and(|pid| unsafe { libc::kill(-(pid as i32), libc::SIGKILL) == 0 });

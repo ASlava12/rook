@@ -1,6 +1,6 @@
-//! Darwin keeps a process group addressable while it contains only zombies.
-//! Those processes cannot write; waiting for launchd to reap them can otherwise
-//! hold command cancellation and inspected recovery indefinitely.
+//! Darwin signals a snapshot of group members; a concurrent fork can miss it.
+//! Keep the owned group through bounded repeated sweeps. Native BSD state also
+//! distinguishes a retained zombie from a refused signal/inspection.
 
 fn exists(group: i32) -> Option<bool> {
     // Safety: a positive process-group ID, and signal zero delivers nothing.
@@ -32,7 +32,7 @@ fn info(pid: i32) -> Result<libc::proc_bsdshortinfo, Option<i32>> {
 
 pub(super) fn alive(pid: u32) -> Option<bool> {
     let group = i32::try_from(pid).ok().filter(|pid| *pid > 0)?;
-    if !exists(group)? {
+    if exists(group) == Some(false) {
         return Some(false);
     }
     // A bounded snapshot: a full buffer cannot prove the group is empty.
@@ -62,6 +62,28 @@ pub(super) fn alive(pid: u32) -> Option<bool> {
         }
     }
     if uncertain { None } else { Some(false) }
+}
+
+pub(super) fn end(pid: u32) -> bool {
+    let Some(group) = i32::try_from(pid).ok().filter(|pid| *pid > 0) else {
+        return false;
+    };
+    // Safety: a positive, owned process-group ID; one signal reaches a kernel
+    // snapshot, not necessarily a child joining while that snapshot is used.
+    if unsafe { libc::kill(-group, libc::SIGKILL) } != 0 {
+        return false;
+    }
+    // Cancellation can drop the async owner, so finish this bounded cleanup
+    // here rather than detaching another future that shutdown can discard.
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while alive(pid) == Some(true) && std::time::Instant::now() < until {
+        // Safety: the same owned group, still observed with live members.
+        unsafe { libc::kill(-group, libc::SIGKILL) };
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    // Like other targets, this means a signal was sent. Callers still require
+    // alive() == Some(false) before certifying terminal execution effects.
+    true
 }
 
 #[cfg(test)]
@@ -110,17 +132,19 @@ mod tests {
 
     #[test]
     fn an_unreaped_zombie_does_not_keep_its_owned_group_running() {
-        let _serial = TESTS.lock().unwrap();
+        let _serial = TESTS.lock().unwrap_or_else(|error| error.into_inner());
         let workspace = tempfile::tempdir().unwrap();
         let owned = Owned::start("exit 0", workspace.path());
         owned.wait_for_zombie();
-        assert_eq!(exists(owned.child.id() as i32), Some(true), "signal zero still sees the zombie");
+        // Darwin's group signal probe can return EPERM for an all-zombie
+        // group. Native state proves termination despite that ambiguity.
+        assert_eq!(exists(owned.child.id() as i32), None);
         assert_eq!(owned.group.alive(), Some(false), "a zombie cannot perform any more writes");
     }
 
     #[test]
     fn a_live_descendant_counts_even_when_the_group_leader_is_a_zombie() {
-        let _serial = TESTS.lock().unwrap();
+        let _serial = TESTS.lock().unwrap_or_else(|error| error.into_inner());
         let workspace = tempfile::tempdir().unwrap();
         let owned = Owned::start("sleep 60 & printf '%s' \"$!\" > child-pid; exit 0", workspace.path());
         owned.wait_for_zombie();
@@ -135,6 +159,27 @@ mod tests {
         while owned.group.alive() != Some(false) {
             assert!(Instant::now() < until, "all actual group members must become terminal");
             std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn cancellation_at_the_shell_fork_boundary_leaves_no_running_descendants() {
+        let _serial = TESTS.lock().unwrap_or_else(|error| error.into_inner());
+        for round in 0..32 {
+            let workspace = tempfile::tempdir().unwrap();
+            let mut owned =
+                Owned::start("printf 'ready' > started; sleep 60; printf 'late' > late", workspace.path());
+            let until = Instant::now() + Duration::from_secs(30);
+            while !workspace.path().join("started").exists() {
+                assert!(Instant::now() < until, "round {round}: the actual shell must start");
+                std::thread::yield_now();
+            }
+            // Keep the cue before sleep's fork: moving it after child setup
+            // would remove the cancellation window this regression exercises.
+            assert!(owned.group.end(), "round {round}: signal the actual command group");
+            owned.child.wait().unwrap();
+            assert_eq!(owned.group.alive(), Some(false), "round {round}: no straggling descendant");
+            assert!(!workspace.path().join("late").exists(), "round {round}: no late effect");
         }
     }
 }
