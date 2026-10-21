@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 #[cfg(all(test, any(unix, windows)))]
 mod command_tests;
 mod concurrent;
+mod ownership;
 
 use sha2::Digest;
 
@@ -437,9 +438,11 @@ impl Installer {
             std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))
         };
 
+        let _ownership;
         let (tag, verified, unverified) = match recipe.command_into(&current) {
             // The prefix has to exist for the tool to install into it.
             Some((command, env_vars)) => {
+                _ownership = ownership::acquire(&self.into, recipe.command).await?;
                 make(&current)?;
                 run_to_completion(&command, &current, &env_vars).await?;
                 let (verified, unverified) = recipe.checked("latest", "", "");
@@ -451,6 +454,7 @@ impl Installer {
                 let bytes = self.download(&release).await?;
                 // Nothing on disk until the bytes have matched: a refused
                 // download leaves not even a directory behind.
+                _ownership = ownership::acquire(&self.into, recipe.command).await?;
                 let versioned = self.into.join(recipe.command).join(&release.tag);
                 make(&versioned)?;
                 make(&current)?;

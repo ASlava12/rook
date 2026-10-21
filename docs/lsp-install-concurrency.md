@@ -26,9 +26,11 @@ lookup/publication only; awaiting work and dropping last-owner resources happen
 after unlocking. Cache identity resolves existing path components before applying
 parent components, preserving symlink semantics without creating directories.
 
-Ownership is process-local. Separate CLI/daemon processes retain independent
-downloads and filesystem publication. Cross-process coordination is a separate
-concern, as are real package build quality and language-server startup/indexing.
+Operation sharing is process-local. Separate CLI/daemon processes retain
+independent downloads; cooperating installers now serialize the mutation phase
+through [cache writer ownership](lsp-install-publication.md). System package
+managers and legacy writers do not participate. Real package build quality and
+language-server startup/indexing remain separate concerns.
 There are no new dependencies, configuration keys or stored formats.
 
 The idea was reviewed in historical OpenCode

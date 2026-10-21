@@ -159,6 +159,11 @@ async fn a_download_that_does_not_match_the_listed_digest_installs_nothing() {
     assert!(refused.contains("does not match the digest"), "{refused}");
     assert!(refused.contains("nothing was installed"), "{refused}");
     assert!(!into.path().join("rust-analyzer").exists(), "not even a directory");
+    assert_eq!(
+        std::fs::read_dir(into.path()).unwrap().count(),
+        0,
+        "a rejected digest creates no cache control metadata either"
+    );
 }
 
 #[tokio::test]
