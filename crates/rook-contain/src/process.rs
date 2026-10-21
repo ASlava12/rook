@@ -101,12 +101,9 @@ mod tests {
     }
     impl Owned {
         fn start(script: &str, workspace: &std::path::Path) -> Self {
-            let child = Command::new("/bin/sh")
-                .args(["-c", script])
-                .current_dir(workspace)
-                .process_group(0)
-                .spawn()
-                .unwrap();
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", script]).current_dir(workspace).process_group(0);
+            let child = crate::quietly(&mut command).spawn().unwrap();
             let group = crate::Group::holding(Some(child.id()));
             Self { child, group }
         }
