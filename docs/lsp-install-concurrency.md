@@ -12,8 +12,10 @@ targeting one cache command wait for the current owner, then perform their own
 operation. Other cache directories and commands continue independently.
 
 Cancelling one caller leaves the work available to remaining callers. Cancelling
-all callers drops the shared future and uses the installer's existing download
-and command cleanup. Completed successes and failures retire from admission;
+all callers drops the shared future. Installer build commands retain an owned
+process group across awaits so cancellation ends descendants as well as the
+shell. This also applies to a directly cancelled installer future. Completed
+successes and failures retire from admission;
 a later explicit install performs a fresh operation. There is no permanent
 positive or negative result cache.
 
@@ -38,8 +40,13 @@ handling. No upstream code is copied or reference pointer advanced.
 
 Owned HTTP tests check one physical download, independent caches, caller
 cancellation, retry after failure/success, separate source/proxy operations and
-64 admitted operations plus a refused new destination. Test payloads are never
-executed. The [owned daemon probe](../xtask/probes/lsp-install/README.md) separately
+64 admitted operations plus a refused new destination. Download test payloads
+are never executed. A separate native command regression launches an owned child
+test harness behind the shell: cancellation must close its independent TCP
+channel, while normal command success/failure results are retained. The Windows
+baseline continued writing after cancellation; guarding the process group stops
+the descendant. This is cancellation evidence, not real package build quality.
+The [owned daemon probe](../xtask/probes/lsp-install/README.md) separately
 checks the background-install entry point and durable receipts through two
 ordinary chats. Both workspace sessions finish against one verified local
 download, with each caller's background receipt retired. The published 0.21.1
