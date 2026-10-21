@@ -24,6 +24,8 @@ for name in ['rook', 'rookd']:
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 held = threading.Event()
 release = threading.Event()
+guidance_started = threading.Event()
+guidance_failure = threading.Event()
 counts = {}
 errors = []
 
@@ -35,9 +37,9 @@ class Model(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         self.reply({'data': [{'id': 'A'}]})
 
-    def reply(self, value):
+    def reply(self, value, status=200):
         data = json.dumps(value).encode()
-        self.send_response(200)
+        self.send_response(status)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(data)))
         self.end_headers()
@@ -52,7 +54,7 @@ class Model(http.server.BaseHTTPRequestHandler):
             # Workspace listings contain earlier fixtures' file names. Route
             # only by the admitted managed goal, not incidental source text.
             marker = next(name for name in ['NATIVE_DEFER_A', 'NATIVE_CAPACITY_B',
-                                           'NATIVE_RESTART_C', 'NATIVE_PAUSED_D', 'NATIVE_CONVERSATION_E', 'NATIVE_HUMAN_F']
+                                           'NATIVE_RESTART_C', 'NATIVE_PAUSED_D', 'NATIVE_CONVERSATION_E', 'NATIVE_HUMAN_F', 'NATIVE_GUIDANCE_G']
                           if any(message['role'] == 'user' and name + '\n\nThis is iteration' in str(message.get('content', ''))
                                  for message in request['messages']))
             assert 'Classify whether' not in text, 'a deferred boundary cannot request completion classification'
@@ -73,7 +75,18 @@ class Model(http.server.BaseHTTPRequestHandler):
             resumed = any(message['role'] == 'tool' and 'Work checkpoint saved' in str(message.get('content', ''))
                           for message in request['messages'])
             calls = []
-            if marker == 'NATIVE_HUMAN_F':
+            if marker == 'NATIVE_GUIDANCE_G':
+                if counts[marker] == 1:
+                    guidance_started.set()
+                    assert guidance_failure.wait(20), 'guidance observer did not attach'
+                    # Non-retryable at the HTTP wrapper, but an ordinary managed
+                    # failure: the goal scheduler must retain its retry wait.
+                    self.reply({'error': {'message': 'owned guidance fixture', 'type': 'invalid_request_error'}}, 400)
+                    return
+                assert counts[marker] == 2 and 'GUIDANCE_AFTER_RETRY' in text
+                calls.append(self.call('guided-write', 'write_file', {'path': marker + '.txt', 'content': 'fresh guidance delivered'}))
+                calls.append(self.call('guided-stop', 'block_work', {'reason': 'Owned guidance probe complete; explicit resume required.'}))
+            elif marker == 'NATIVE_HUMAN_F':
                 initial = counts[marker] == 1
                 if initial:
                     calls.append(self.call('before', 'write_file', {'path': marker + '.txt', 'content': 'one write'}))
@@ -89,7 +102,7 @@ class Model(http.server.BaseHTTPRequestHandler):
                 delay = {'NATIVE_DEFER_A': 20, 'NATIVE_RESTART_C': 8, 'NATIVE_PAUSED_D': 2, 'NATIVE_CONVERSATION_E': 3}[marker]
                 reason = 'initial wait'
                 calls.append(self.call('before', 'write_file', {'path': marker + '.txt', 'content': 'one write'}))
-            if marker != 'NATIVE_HUMAN_F':
+            if marker not in ['NATIVE_HUMAN_F', 'NATIVE_GUIDANCE_G']:
                 calls.append(self.call('wait', 'defer_work', {'seconds': delay, 'reason': reason}))
                 if not resumed and marker != 'NATIVE_CAPACITY_B':
                     calls.append(self.call('tail', 'write_file', {'path': marker + '-forbidden.txt', 'content': 'tail'}))
@@ -137,6 +150,8 @@ one_script=false
 max_steps=4
 [work]
 max_parallel_runs=1
+retry_initial_secs=1800
+retry_max_secs=1800
 [server]
 port=0
 [models.A]
@@ -287,13 +302,16 @@ context_window=32768
     until(lambda: api('/api/health')['turns_running'] == 0, 'paused owner did not retire')
     daemon.terminate(); daemon.wait(timeout=20); daemon = None
     cli = [str(binary / ('rook' + suffix)), '--workspace', str(workspace)]
-    before_ids = {row['id'] for row in json.loads(subprocess.check_output(cli + ['--json', 'session', 'ls'], env=env, cwd=workspace, text=True, timeout=30))}
-    empty = subprocess.run(cli + ['chat'], input='/quit\n', capture_output=True, text=True, env=env, cwd=workspace, timeout=30)
-    assert empty.returncode == 0, (empty.stdout, empty.stderr)
-    after_ids = {row['id'] for row in json.loads(subprocess.check_output(cli + ['--json', 'session', 'ls'], env=env, cwd=workspace, text=True, timeout=30))}
-    new_ids = after_ids - before_ids
-    assert len(new_ids) == 1, new_ids
-    chat_session = new_ids.pop()
+    def empty_session():
+        assert daemon is None, 'empty conversation creation uses only the stopped owned store'
+        before_ids = {row['id'] for row in json.loads(subprocess.check_output(cli + ['--json', 'session', 'ls'], env=env, cwd=workspace, text=True, timeout=30))}
+        empty = subprocess.run(cli + ['chat'], input='/quit\n', capture_output=True, text=True, env=env, cwd=workspace, timeout=30)
+        assert empty.returncode == 0, (empty.stdout, empty.stderr)
+        after_ids = {row['id'] for row in json.loads(subprocess.check_output(cli + ['--json', 'session', 'ls'], env=env, cwd=workspace, text=True, timeout=30))}
+        new_ids = after_ids - before_ids
+        assert len(new_ids) == 1, new_ids
+        return new_ids.pop()
+    chat_session = empty_session()
     start()
     conversation = api('/api/work', {'goal': 'NATIVE_CONVERSATION_E', 'workspace': str(workspace),
         'autonomous': True, 'max_iterations': 10, 'max_tokens': 10000, 'max_seconds': 300,
@@ -326,6 +344,36 @@ context_window=32768
     until(lambda: api('/api/health')['turns_running'] == 0, 'resumed chat owners did not retire')
     cancel(occupied)
     cancel(conversation)
+    daemon.terminate(); daemon.wait(timeout=20); daemon = None
+    guidance_session = empty_session()
+    start()
+    guided = api('/api/work', {'goal': 'NATIVE_GUIDANCE_G', 'workspace': str(workspace),
+        'autonomous': True, 'max_iterations': 10, 'max_tokens': 10000, 'max_seconds': 3600,
+        'conversation': {'session': guidance_session, 'model': 'A', 'effort': 'medium', 'stance': 'autonomous', 'options': {}}})
+    assert guidance_started.wait(20), 'guidance fixture did not reach its first physical request'
+    observer, observation_path = observe(guidance_session, 'retry-guidance', 'retry')
+    until(lambda: observation(observation_path).get('attached'), 'guidance observer did not attach', seconds=15)
+    guidance_failure.set()
+    retry = until(lambda: view(guided) if view(guided)['status'] == 'retry_wait' else None,
+                  'provider error did not establish an ordinary retry wait', seconds=15)
+    deadline = retry['next_attempt_at']
+    assert deadline > time.time() + 1700 and retry['consecutive_failures'] == 1, retry
+    def scheduled_activity():
+        activity = api('/api/sessions/' + guidance_session + '/diagnostics?logs=false')['activity']
+        return activity if activity and activity.get('retry_at') == deadline else None
+    activity = until(scheduled_activity, 'expected retry was not reported', seconds=15)
+    assert activity['stage'] == 'queued' and activity['owner_live'] and not activity['stalled'], activity
+    api('/api/work/' + guided['id'] + '/steer', {'id': 'native-guidance', 'text': 'GUIDANCE_AFTER_RETRY'})
+    resumed = until(lambda: view(guided) if view(guided)['status'] == 'blocked' else None,
+                    'fresh guidance did not wake the thirty-minute retry', seconds=20)
+    assert resumed['session'] == guidance_session and counts['NATIVE_GUIDANCE_G'] == 2, resumed
+    receipt = next(item for item in resumed['instructions'] if item['id'] == 'native-guidance')
+    assert receipt['applied_at'] is not None and receipt['applied_at'] - receipt['submitted_at'] < 20, receipt
+    assert (workspace / 'NATIVE_GUIDANCE_G.txt').read_text() == 'fresh guidance delivered'
+    complete_observer(observer, observation_path)
+    assert observation(observation_path)['retry_at'] == deadline
+    until(lambda: api('/api/health')['turns_running'] == 0, 'guided conversation did not retire')
+    cancel(guided)
     assert not errors, errors
     print(json.dumps({'single_slot_released': True, 'due_wait_respects_other_owner': True,
                       'same_transcript_after_wake': True, 'physical_daemon_restart': True,
@@ -335,10 +383,14 @@ context_window=32768
                       'conversation_releases_chat_owner': True, 'conversation_due_wake_same_session': True,
                       'chat_observer_follows_automatic_wake': True, 'early_chat_resume_queues_at_capacity': True,
                       'human_blocker_survives_restart': True, 'human_blocker_requires_explicit_resume': True,
+                      'ordinary_retry_reports_scheduled_activity': True,
+                      'fresh_guidance_wakes_retry_without_deadline_wait': True,
+                      'guidance_applied_to_same_session': True,
                       'requests': counts}))
     daemon.terminate(); daemon.wait(timeout=20); daemon = None
 finally:
     release.set()
+    guidance_failure.set()
     for observer in observers:
         if observer.poll() is None:
             observer.terminate()

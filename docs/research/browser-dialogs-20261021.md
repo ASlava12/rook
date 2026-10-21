@@ -108,7 +108,10 @@ it passed, as did the renewed workspace/all-target clippy check.
 On `9b07098`, the complete local workspace test preflight passed, including all
 281 ordinary-agent tests. All eight required platform jobs passed in
 [run 39600126761](https://github.com/ASlava12/rook/actions/runs/39600126761).
-The optional model smoke remains separate evidence. Later scheduler guidance
+The optional `ollama/qwen2.5-coder:3b` smoke passed 3 of 8 scenarios. File editing,
+command obedience, delegation with streamed repetition, false-claim verification
+and cross-session memory failed. These are retained quality limits, not passing
+checks or a model-quality improvement claim. Later scheduler guidance
 and retry-observation changes are described with their own validation scope in
 [managed retry guidance](../managed-retry-guidance.md); final candidate platform
 and artifact checks are still required for the combined release.

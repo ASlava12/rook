@@ -1,7 +1,7 @@
 # Rook
 
-[Rook 0.20.0](docs/releases/0.20.0.md): explicit human-blocker checkpoints and
-completion-check recovery that never replays the working turn.
+[Rook 0.21.0](docs/releases/0.21.0.md): native browser dialogs, reliable command
+progress comparison and responsive managed retry waits.
 
 [Domain network policy with OS containment](docs/domain-network-policy.md).
 

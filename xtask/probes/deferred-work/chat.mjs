@@ -3,7 +3,7 @@ import { writeFile, rename } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const [base, session, output, mode = 'observe'] = process.argv.slice(2);
-const status = { attached: false, started: 0, deferred: 0, queued: 0, requested: false, error: null, events: [] };
+const status = { attached: false, started: 0, deferred: 0, queued: 0, requested: false, retry_at: null, error: null, events: [] };
 let pending = null, publishing = null;
 async function publish(snapshot) {
   await writeFile(`${output}.tmp`, snapshot);
@@ -45,6 +45,9 @@ socket.addEventListener('message', ({ data }) => {
   if (status.events.length < 64) status.events.push({ type: event.type, stopped: event.stopped });
   if (event.type === 'attached') status.attached = true;
   if (event.type === 'started') status.started++;
+  if (event.type === 'activity' && event.state?.retry_at != null && event.state.stage === 'queued') {
+    status.retry_at = event.state.retry_at;
+  }
   if (event.type === 'error' || event.type === 'failed') return finish(event.message || 'chat rejected continuation');
   if (event.type === 'done' && event.stopped === 'work_queued') status.queued++;
   if (event.type === 'done' && event.stopped === 'work_deferred') {
@@ -55,5 +58,8 @@ socket.addEventListener('message', ({ data }) => {
     }
   }
   save().catch(error => finish(String(error)));
+  if (mode === 'retry' && event.type === 'done' && event.stopped === 'blocked') {
+    return finish(status.retry_at == null ? 'no scheduled-retry activity was received' : null);
+  }
   if (status.deferred >= 2) finish(null);
 });
