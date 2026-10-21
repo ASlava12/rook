@@ -1,7 +1,7 @@
 # Rook
 
-[Rook 0.21.1](docs/releases/0.21.1.md): available execution capacity during retry
-waits, Unicode skill previews and macOS command cleanup.
+[Rook 0.21.2](docs/releases/0.21.2.md): independent language-server startup and
+release-tag validation before installation or self-update.
 
 [Domain network policy with OS containment](docs/domain-network-policy.md).
 
