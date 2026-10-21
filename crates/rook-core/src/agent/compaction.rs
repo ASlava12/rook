@@ -543,6 +543,9 @@ impl<'a> AgentLoop<'a> {
             .label("compaction usage")
             .usage(completed.response.usage.input_tokens, completed.response.usage.output_tokens),
         )?;
+        if !completed.completion_confirmed {
+            return Err(CoreError::Other("the compaction stream ended without confirmed completion; use the saved source log instead of its partial summary".into()));
+        }
         let said = completed.response.message.content;
         let summary = if said.trim().is_empty() { thought } else { said };
         match summary.trim().is_empty() {

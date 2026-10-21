@@ -175,9 +175,14 @@ impl rook_llm::Provider for Summarizer {
         if self.pending {
             return Ok(Box::pin(futures_util::stream::pending()));
         }
-        Ok(Box::pin(futures_util::stream::iter(vec![Ok(rook_llm::Delta::Text(
-            "goal and unresolved work retained".into(),
-        ))])))
+        Ok(Box::pin(futures_util::stream::iter(vec![
+            Ok(rook_llm::Delta::Text("goal and unresolved work retained".into())),
+            Ok(rook_llm::Delta::Done {
+                stop_reason: rook_llm::StopReason::EndTurn,
+                usage: Default::default(),
+                model: "fixture".into(),
+            }),
+        ])))
     }
 }
 fn seed(rook: &Rook, session: u128) {
@@ -225,6 +230,9 @@ async fn explicit_summary_output_budget_uses_the_summarizers_window_and_default_
         let requests = Arc::new(Mutex::new(Vec::new()));
         let model = Arc::new(Summarizer { pending: false, requests: requests.clone() });
         AgentLoop::new(&rook, model, session).compact_now().await;
+        assert!(
+            rook.last_compaction(session).unwrap().1.unwrap().contains("goal and unresolved work retained")
+        );
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].max_output_tokens, budget.unwrap_or(2048));

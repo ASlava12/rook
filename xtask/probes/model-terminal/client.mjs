@@ -10,7 +10,7 @@ const finish = error => {
   setTimeout(() => process.exit(error ? 1 : 0), 20);
 };
 const timer = setTimeout(() => finish('owned chat timeout'), 45_000);
-socket.addEventListener('open', () => socket.send(JSON.stringify({type:'prompt', session:null, text:marker, id:marker, options:{}})));
+socket.addEventListener('open', () => socket.send(JSON.stringify({type:'prompt', session:null, text:marker, id:marker, options:marker.endsWith('FINAL') ? {output:'final.txt'} : {}})));
 socket.addEventListener('error', () => finish('owned websocket failed'));
 socket.addEventListener('message', ({data}) => {
   if (++status.frames > 256 || data.length > 1024*1024) return finish('owned frame limit');

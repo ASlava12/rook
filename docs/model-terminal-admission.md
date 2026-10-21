@@ -18,6 +18,13 @@ confirmation, rather than silently reporting a successful `end_turn` or asking
 the completion classifier to authorize an unconfirmed answer. Existing managed
 retry admission and session controls continue to apply.
 
+The limit-triggered final-answer path also refuses unconfirmed output before
+the explicit output artifact can be written. Its partial text and reported
+usage remain saved; effects from earlier confirmed steps are retained.
+Compaction records its reported usage before refusing an unconfirmed summary
+and uses the existing explicit source-log fallback instead of marking partial
+model text as a successful summary. The underlying history is not deleted.
+
 This uses existing stream evidence. A recognized finish reason without a later
 `[DONE]` sentinel remains sufficient where the adapter already accepts it.
 Legacy/custom streams retain their explicit `Done` contract; a stream with no
@@ -42,6 +49,7 @@ reported usage while leaving that file absent. These checks establish protocol
 admission, not live-model task quality.
 
 The [owned daemon probe](../xtask/probes/model-terminal/README.md) repeats the
-tool and partial-text failures through ordinary chat sockets using an extracted
-package. It also checks stored incomplete receipts and binds the result to the
-daemon's SHA256; run it when this admission boundary changes.
+tool, partial-text and forced-final-answer failures through ordinary chat sockets
+using an extracted package. Its twelve checks also verify stored incomplete
+receipts and bind the result to the daemon's SHA256. Native HTTP tests separately
+cover compaction fallback; run these when the admission boundary changes.

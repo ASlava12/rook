@@ -148,6 +148,9 @@ alone do not suffice. An unconfirmed response retains visible text and reported
 usage with an incomplete receipt, but no executable calls or signed assistant
 envelope for replay; the turn fails before completion classification. See
 [terminal admission](model-terminal-admission.md) for the contract and checks.
+The same evidence gates output artifacts from limit-triggered final answers and
+successful compaction summaries. Unconfirmed compaction uses the existing source-
+log fallback after retaining reported usage.
 
 Main/checking/delegated streams and limit-triggered final answers also pass through
 the core repetition guard. Text and narrative reasoning are watched separately,
