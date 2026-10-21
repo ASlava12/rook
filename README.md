@@ -1,7 +1,7 @@
 # Rook
 
-[Rook 0.21.2](docs/releases/0.21.2.md): independent language-server startup and
-release-tag validation before installation or self-update.
+[Rook 0.21.3](docs/releases/0.21.3.md): concurrent language-server installs in one
+daemon share the operation and retain each session's result.
 
 [Domain network policy with OS containment](docs/domain-network-policy.md).
 
