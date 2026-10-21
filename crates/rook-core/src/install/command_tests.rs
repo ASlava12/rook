@@ -1,4 +1,6 @@
 //! A real descendant must stop writing when an installer command is cancelled.
+#![cfg(test)]
+
 use std::{path::PathBuf, time::Duration};
 use tokio::io::AsyncReadExt;
 
