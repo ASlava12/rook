@@ -7,6 +7,19 @@ prompts. MCP initialization runs inside the cancellable turn, so a server that
 holds its handshake cannot block the connection's close/cancel reader. The
 installed daemon is not involved in this transport.
 
+JSON-RPC `result: null` remains a present result. Defaultable editor write,
+terminal wait and cleanup acknowledgements may use it instead of `{}`; it does
+not certify an exit code. A missing result or an explicit error remains a
+failed acknowledgement. File reads still require their text `content`, and
+scalar/array write acknowledgements are refused without retrying the mutation.
+Inspect the editor buffer before retrying an unacknowledged write.
+
+For the defaultable `session/list` request, omitted parameters and `null` use
+the same unfiltered request as `{}`. Non-null malformed requests remain errors;
+required session/workspace/prompt fields are not defaulted.
+The [owned native probe](../xtask/probes/acp-null/README.md) checks this exchange
+against an actual CLI with local scripted replies and isolated editor buffers.
+
 Session capabilities advertise `list`, `resume` and `close`. `session/list` accepts an
 optional absolute `cwd` filter and a returned `cursor`. Each page returns at
 most 64 sessions and scans at most 512 metadata records, so a filtered empty

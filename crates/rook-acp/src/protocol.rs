@@ -16,10 +16,19 @@ pub struct Incoming {
     pub method: Option<String>,
     #[serde(default)]
     pub params: Option<serde_json::Value>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present_result")]
     pub result: Option<serde_json::Value>,
     #[serde(default)]
     pub error: Option<serde_json::Value>,
+}
+
+fn present_result<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // JSON-RPC null is a result, including an empty write acknowledgement.
+    // Option's normal deserializer would erase it along with an absent field.
+    serde_json::Value::deserialize(deserializer).map(Some)
 }
 
 #[derive(Serialize)]
@@ -354,4 +363,25 @@ pub fn usage_update(session: &str, used: usize, size: usize) -> serde_json::Valu
         "sessionId": session,
         "update": { "sessionUpdate": "usage_update", "used": used, "size": size }
     })
+}
+
+#[cfg(test)]
+mod incoming_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_null_results_survive_without_rewriting_other_payloads() {
+        for value in [serde_json::Value::Null, serde_json::json!({}), serde_json::json!(false)] {
+            let frame: Incoming = serde_json::from_value(serde_json::json!({"id":1,"result":value})).unwrap();
+            assert_eq!(frame.result, Some(value));
+        }
+        let missing: Incoming = serde_json::from_value(serde_json::json!({"id":1})).unwrap();
+        assert!(missing.result.is_none());
+        let error: Incoming = serde_json::from_value(serde_json::json!({
+            "id":1,"error":{"code":-32000,"message":"owned refusal"}
+        }))
+        .unwrap();
+        assert!(error.result.is_none());
+        assert_eq!(error.error.unwrap()["code"], -32000);
+    }
 }

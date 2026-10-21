@@ -17,8 +17,11 @@ struct List {
 }
 
 pub(crate) fn list(rook: &Rook, params: serde_json::Value) -> Result<serde_json::Value, Error> {
-    let request: List =
-        serde_json::from_value(params).map_err(|error| Error::invalid_params(error.to_string()))?;
+    let request: List = if params.is_null() {
+        List::default()
+    } else {
+        serde_json::from_value(params).map_err(|error| Error::invalid_params(error.to_string()))?
+    };
     if let Some(cwd) = &request.cwd
         && (cwd.len() > 4096 || !std::path::Path::new(cwd).is_absolute())
     {
