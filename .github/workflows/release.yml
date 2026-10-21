@@ -1,7 +1,7 @@
 name: release
 
-# A tag is the trigger, and the tag is the version: nothing here reads
-# `Cargo.toml`, so a release cannot disagree with what it was called.
+# A tag is the trigger and package version. Both binary package versions are
+# checked before upload so an archive label cannot hide a different version.
 on:
   push:
     tags: ['v*']
@@ -9,9 +9,15 @@ on:
   # artifacts, and publishes nothing. A release worth cutting is one somebody
   # has already downloaded and run.
   workflow_dispatch:
+    inputs:
+      source_tag:
+        description: 'Existing stable tag to rebuild without moving it; publishes nothing'
+        required: false
+        default: ''
+        type: string
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -21,6 +27,11 @@ jobs:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    env:
+      # Release binaries must not require a separately installed VC runtime.
+      # --target below keeps this flag out of host-side procedural macros.
+      RUSTFLAGS: ${{ matrix.target == 'x86_64-pc-windows-msvc' && '-C target-feature=+crt-static' || '' }}
+      PACKAGE_REF: ${{ inputs.source_tag || (github.ref_type == 'tag' && github.ref_name) || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -35,7 +46,20 @@ jobs:
           - { target: aarch64-apple-darwin, os: macos-latest }
           - { target: x86_64-apple-darwin, os: macos-latest }
     steps:
+      - name: validate rebuild tag
+        shell: bash
+        env:
+          SOURCE_TAG: ${{ inputs.source_tag }}
+        run: |
+          if [ -n "$SOURCE_TAG" ]; then
+            if [[ ! "$SOURCE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo 'source_tag must name an existing stable vX.Y.Z tag'
+              exit 1
+            fi
+          fi
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_tag && format('refs/tags/{0}', inputs.source_tag) || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -59,6 +83,41 @@ jobs:
             cargo build --release --workspace --target ${{ matrix.target }}
           fi
 
+      - name: verify Windows runtime linkage
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $dumpbin = & $vswhere -latest -products '*' -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
+          if (-not $dumpbin) { throw 'dumpbin was not found in the installed MSVC toolchain' }
+          foreach ($name in @('rook', 'rookd')) {
+            $binary = "target/${{ matrix.target }}/release/$name.exe"
+            $dependencies = & $dumpbin /DEPENDENTS $binary
+            if ($LASTEXITCODE -ne 0) { throw "cannot inspect $binary" }
+            $dependencies
+            if (($dependencies -join "`n") -match '(?i)\b(vcruntime[0-9_]*|msvcp[0-9_]*|msvcr[0-9_]*|ucrtbase|api-ms-win-crt-[a-z0-9-]+)\.dll\b') {
+              throw "$binary still imports a dynamic C runtime"
+            }
+            & $binary --version
+            if ($LASTEXITCODE -ne 0) { throw "$binary cannot run" }
+          }
+
+      - name: verify Linux runtime linkage
+        if: contains(matrix.target, 'linux')
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in rook rookd; do
+            binary="target/${{ matrix.target }}/release/$name"
+            headers="$(readelf -l "$binary")"
+            dynamic="$(readelf -d "$binary")"
+            if [[ "$headers" == *INTERP* || "$dynamic" == *'(NEEDED)'* ]]; then
+              echo "$binary still requires a dynamic loader or shared library"
+              exit 1
+            fi
+          done
+
       # The layout the binaries themselves look for: `share/rook/skills` beside
       # `bin`, which is the second place `builtin_skills_dir` looks. A release
       # without it is an agent with no built-in skills, and nothing in a dev
@@ -71,12 +130,22 @@ jobs:
           # `if` rather than a `&&` chain, because a chain whose test is false
           # returns non-zero and `set -e` ends the step on it — which is the
           # ordinary case here, not the exceptional one.
-          if [ "${GITHUB_REF_NAME}" != "${GITHUB_REF_NAME#v}" ]; then
-            version="${GITHUB_REF_NAME#v}"
+          if [ "${PACKAGE_REF}" != "${PACKAGE_REF#v}" ]; then
+            version="${PACKAGE_REF#v}"
+            for package in rook-cli rookd; do
+              actual="$(cargo pkgid -p "$package")"
+              actual="${actual##*#}"
+              actual="${actual##*@}"
+              if [ "$actual" != "$version" ]; then
+                echo "$package version $actual does not match tag $PACKAGE_REF"
+                exit 1
+              fi
+            done
           else
             version="$(git rev-parse --short HEAD)"
           fi
           name="rook-${version}-${{ matrix.target }}"
+          echo "Packaging $(git rev-parse HEAD) as $name"
           mkdir -p "dist/$name/bin" "dist/$name/share/rook"
           from="target/${{ matrix.target }}/release"
           for binary in rook rookd; do
@@ -88,6 +157,13 @@ jobs:
           done
           cp -R skills "dist/$name/share/rook/skills"
           cp README.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
+          # Rebuilding a tag with a revised recipe keeps both identities:
+          # checkout HEAD is the source; GITHUB_SHA identifies this recipe.
+          printf 'source_commit=%s\nrecipe_commit=%s\nversion=%s\ntarget=%s\nrustflags=%s\nrustc=%s\nrun_url=%s\n' \
+            "$(git rev-parse HEAD)" "$GITHUB_SHA" "$version" "${{ matrix.target }}" \
+            "$RUSTFLAGS" "$(rustc --version)" \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            > "dist/$name/BUILD-INFO.txt"
           cd dist
           if [ "${{ runner.os }}" = "Windows" ]; then
             7z a -tzip "$name.zip" "$name" > /dev/null
@@ -116,9 +192,11 @@ jobs:
     name: publish
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     # A dry run builds everything and publishes nothing: the point of it is to
     # find a packaging mistake before a tag exists that has to be deleted.
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
