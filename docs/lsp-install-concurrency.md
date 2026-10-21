@@ -39,5 +39,10 @@ handling. No upstream code is copied or reference pointer advanced.
 Owned HTTP tests check one physical download, independent caches, caller
 cancellation, retry after failure/success, separate source/proxy operations and
 64 admitted operations plus a refused new destination. Test payloads are never
-executed. These API-level checks do not establish daemon background-install
-receipt behavior; that native entry-point check remains required before release.
+executed. The [owned daemon probe](../xtask/probes/lsp-install/README.md) separately
+checks the background-install entry point and durable receipts through two
+ordinary chats. Both workspace sessions finish against one verified local
+download, with each caller's background receipt retired. The published 0.21.1
+baseline makes two downloads and one caller fails with a Windows sharing error;
+the corrected debug daemon passes all ten checks. Downloaded release-package
+verification remains required before publication.

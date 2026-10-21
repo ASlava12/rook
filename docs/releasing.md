@@ -51,6 +51,10 @@ CLI when browser behavior changes, alongside the managed-work probe.
 When language-server startup changes, run the
 [owned daemon LSP probe](../xtask/probes/lsp-startup/README.md) against the extracted
 daemon as well. It checks shared-pool behavior through ordinary chat sockets.
+When cache-install ownership changes, run the
+[owned background-install probe](../xtask/probes/lsp-install/README.md) on the
+extracted daemon. Two ordinary workspace chats must share the physical download
+while retaining their own finished background receipts; require all ten flags.
 When release-tag validation changes, run the
 [owned CLI metadata probe](../xtask/probes/release-metadata/README.md) on the
 extracted CLI. Its isolated refusals must precede all asset-download requests.
