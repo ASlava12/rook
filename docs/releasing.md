@@ -54,6 +54,10 @@ daemon as well. It checks shared-pool behavior through ordinary chat sockets.
 When release-tag validation changes, run the
 [owned CLI metadata probe](../xtask/probes/release-metadata/README.md) on the
 extracted CLI. Its isolated refusals must precede all asset-download requests.
+When model-terminal admission changes, run the
+[owned daemon terminal probe](../xtask/probes/model-terminal/README.md) against
+the extracted daemon. Both incomplete chats must stop without tool effects or
+further model requests while preserving partial text and reported usage.
 
 After the source gates and downloaded-draft checks pass, publish that same
 draft, without rebuilding or replacing its tested archives:
