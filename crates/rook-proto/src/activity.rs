@@ -19,6 +19,9 @@ pub struct Snapshot {
     pub generation: String,
     pub stage: Stage,
     pub operation: Option<String>,
+    /// Expected scheduler retry, not evidence of a physical model request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_at: Option<u64>,
     pub last_progress_at: i64,
     pub observed_at: i64,
     pub idle_secs: u64,
@@ -44,6 +47,16 @@ impl Snapshot {
             Stage::Approval => "waiting for approval",
             Stage::Question => "waiting for an answer",
             Stage::Finished => "finished",
+        };
+        let stage = if let Some(at) = self.retry_at.filter(|_| self.stage == Stage::Queued) {
+            let observed = u64::try_from(self.observed_at).unwrap_or(0);
+            if at > observed {
+                format!("waiting to retry in {}s (at {at})", at - observed)
+            } else {
+                format!("retry overdue by {}s (at {at})", observed - at)
+            }
+        } else {
+            stage.into()
         };
         format!(
             "{}: {owner}; {stage}{}; no observed progress for {}s (notice after {}s); last progress at {}{}",

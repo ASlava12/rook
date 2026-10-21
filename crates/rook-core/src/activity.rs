@@ -15,6 +15,7 @@ pub struct Tracker {
     last_progress: Instant,
     active_stage: Stage,
     waiting: bool,
+    retry_due: Option<Instant>,
 }
 
 impl Tracker {
@@ -27,6 +28,7 @@ impl Tracker {
                 generation: rook_store::format_session_id(rook_store::new_session_id()),
                 stage: Stage::Queued,
                 operation: None,
+                retry_at: None,
                 last_progress_at: now,
                 observed_at: now,
                 idle_secs: 0,
@@ -38,10 +40,13 @@ impl Tracker {
             last_progress: Instant::now(),
             active_stage: Stage::Queued,
             waiting: false,
+            retry_due: None,
         }
     }
 
     fn progressed(&mut self, stage: Stage) {
+        self.state.retry_at = None;
+        self.retry_due = None;
         self.last_progress = Instant::now();
         self.state.last_progress_at = rook_store::now_unix();
         self.state.stalled = false;
@@ -56,6 +61,27 @@ impl Tracker {
     /// of when an attached view receives its display events.
     pub fn observe_phase(&mut self, stage: Stage) {
         self.progressed(stage);
+    }
+
+    /// Scheduling is status, not fresh progress. Repeated observation of the
+    /// same deadline must not postpone overdue notices or reset idle time.
+    pub fn retry_wait(&mut self, at: u64) {
+        if self.state.retry_at == Some(at) {
+            return;
+        }
+        let now = u64::try_from(rook_store::now_unix()).unwrap_or(0);
+        self.retry_due = Instant::now().checked_add(std::time::Duration::from_secs(at.saturating_sub(now)));
+        self.state.retry_at = Some(at);
+        self.state.stage = Stage::Queued;
+        self.active_stage = Stage::Queued;
+        self.state.operation = None;
+        self.state.stalled = false;
+    }
+
+    pub fn clear_retry(&mut self) -> bool {
+        let changed = self.state.retry_at.take().is_some();
+        self.retry_due = None;
+        changed
     }
 
     /// Periodic waiting lines, elapsed-time tool updates and control receipts
@@ -84,7 +110,7 @@ impl Tracker {
             }
             ChatEvent::ToolDone { .. } => self.progressed(Stage::Model),
             ChatEvent::Agent { receipt: None, admission: None, extension_ui: None, text }
-                if !text.is_empty() =>
+                if !text.is_empty() && self.state.retry_at.is_none() =>
             {
                 self.progressed(Stage::Tool)
             }
@@ -117,9 +143,12 @@ impl Tracker {
             self.state.stalled = false;
             return false;
         }
+        let unexpected_idle = self
+            .retry_due
+            .map_or(self.state.idle_secs, |due| Instant::now().saturating_duration_since(due).as_secs());
         if self.state.stage != Stage::Finished
             && self.state.threshold_secs > 0
-            && self.state.idle_secs >= self.state.threshold_secs
+            && unexpected_idle >= self.state.threshold_secs
             && !self.state.stalled
         {
             self.state.stalled = true;
@@ -193,6 +222,42 @@ pub(crate) fn load(store: &Store, session: u128) -> Result<Option<Snapshot>> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[tokio::test(start_paused = true)]
+    async fn scheduled_retry_waits_preserve_idle_evidence_and_only_notice_unexpected_delay() {
+        let mut tracker = Tracker::new(1, 30);
+        tracker.observe_phase(Stage::Model);
+        tokio::time::advance(Duration::from_secs(31)).await;
+        let at = u64::try_from(rook_store::now_unix()).unwrap() + 1800;
+        tracker.retry_wait(at);
+        assert_eq!(tracker.snapshot(true).stage, Stage::Queued);
+        assert_eq!(tracker.snapshot(true).retry_at, Some(at));
+        assert_eq!(tracker.snapshot(true).idle_secs, 31, "a scheduler wait is not progress");
+        assert!(tracker.snapshot(true).describe().contains("waiting to retry"));
+        tracker.observe(&ChatEvent::Agent {
+            receipt: None,
+            admission: None,
+            extension_ui: None,
+            text: "Goal saved; retry in 1800s".into(),
+        });
+        assert_eq!(tracker.snapshot(true).retry_at, Some(at));
+        assert_eq!(tracker.snapshot(true).idle_secs, 31, "the retry announcement is status only");
+        assert!(!tracker.check(false, false));
+        tokio::time::advance(Duration::from_secs(1829)).await;
+        assert!(!tracker.check(false, false), "the configured wait is excluded from inactivity");
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert!(tracker.check(false, false), "an overdue scheduler still needs a notice");
+        tracker.retry_wait(at);
+        assert!(tracker.snapshot(true).stalled, "the same deadline cannot rearm inactivity");
+        tracker.observe_phase(Stage::Model);
+        assert!(tracker.snapshot(true).retry_at.is_none());
+        assert_eq!(tracker.snapshot(true).idle_secs, 0);
+        assert!(!tracker.check(false, false));
+        let mut legacy = serde_json::to_value(tracker.snapshot(true)).unwrap();
+        legacy.as_object_mut().unwrap().remove("retry_at");
+        let legacy: Snapshot = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.retry_at.is_none());
+    }
 
     #[tokio::test(start_paused = true)]
     async fn waiting_heartbeats_do_not_hide_a_stall_and_real_tokens_rearm_one_notice() {

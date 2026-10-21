@@ -148,6 +148,28 @@ impl Observation {
         }
     }
 
+    pub(crate) fn retry_wait(&self, at: u64) -> Snapshot {
+        let snapshot = {
+            let mut tracker = self.tracker.lock().unwrap_or_else(|e| e.into_inner());
+            tracker.retry_wait(at);
+            tracker.snapshot(self.running.load(std::sync::atomic::Ordering::Acquire))
+        };
+        self.save(&snapshot);
+        snapshot
+    }
+
+    pub(crate) fn clear_retry(&self) -> Option<Snapshot> {
+        let snapshot = {
+            let mut tracker = self.tracker.lock().unwrap_or_else(|e| e.into_inner());
+            if !tracker.clear_retry() {
+                return None;
+            }
+            tracker.snapshot(self.running.load(std::sync::atomic::Ordering::Acquire))
+        };
+        self.save(&snapshot);
+        Some(snapshot)
+    }
+
     pub(super) fn finish(&self) {
         self.running.store(false, std::sync::atomic::Ordering::Release);
         self.save(&self.snapshot(false));
@@ -278,6 +300,24 @@ mod tests {
         assert!(observation.tracker.lock().unwrap().check(false, false));
         assert_eq!(observation.snapshot(true).notifications, 3);
         assert!(!serde_json::to_string(&observation.snapshot(true)).unwrap().contains("PRIVATE"));
+        let at = u64::try_from(rook_store::now_unix()).unwrap() + 1800;
+        let idle = observation.snapshot(true).idle_secs;
+        let scheduled = observation.retry_wait(at);
+        assert_eq!(scheduled.stage, Stage::Queued);
+        assert_eq!(scheduled.retry_at, Some(at));
+        assert_eq!(scheduled.idle_secs, idle, "retry status does not invent progress");
+        let saved = rook.diagnostics(session, false).unwrap().activity.unwrap();
+        assert_eq!(saved.retry_at, Some(at));
+        assert_eq!(saved.owner_live, None, "a stored retry deadline cannot establish ownership");
+        tokio::time::advance(Duration::from_secs(600)).await;
+        assert!(!observation.tracker.lock().unwrap().check(false, false));
+        let ready = observation.clear_retry().unwrap();
+        assert!(ready.retry_at.is_none());
+        assert!(ready.idle_secs >= idle + 600);
+        assert!(observation.clear_retry().is_none());
+        Observer::observe(&*observation, Event::ModelStarted { session });
+        assert_eq!(observation.snapshot(true).stage, Stage::Model);
+        assert_eq!(observation.snapshot(true).idle_secs, 0);
     }
 
     #[tokio::test(start_paused = true)]

@@ -91,6 +91,28 @@ test('inactivity notices render as observations and notify once per episode acro
   document.hidden = false;
 });
 
+test('scheduled retries show their deadline without reporting a model stall or notifying', () => {
+  const notices = [];
+  globalThis.Notification = class {
+    static permission = 'granted';
+    constructor(title) { notices.push(title); }
+  };
+  window.Notification = globalThis.Notification;
+  document.hidden = true;
+  const socket = start();
+  socket.receive({ type: 'activity', state: {
+    session: 'scheduled-case', generation: 'retry', stage: 'queued',
+    retry_at: Math.floor(Date.now() / 1000) + 1800,
+    idle_secs: 1801, threshold_secs: 1800, last_progress_at: 1,
+    notifications: 0, stalled: false, owner_live: true
+  } });
+  assert.match(stream.textContent, /scheduled-case: waiting to retry at/);
+  assert.doesNotMatch(stream.textContent, /scheduled-case: queued|scheduled-case: model/);
+  assert.match(stream.textContent, /no observed progress for 1801s/);
+  assert.equal(notices.length, 0, 'an expected retry wait is not a model inactivity notice');
+  document.hidden = false;
+});
+
 test('Done before a pending frame preserves a complete split fence without a duplicate or source attribute', () => {
   const socket = start(), reply = 'Paragraph\n\n```sql\nSELECT "🦉";\n```\n\nFinal';
   for (const part of reply.split('')) text(socket, part);

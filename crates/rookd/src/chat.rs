@@ -1976,6 +1976,9 @@ async fn goal_turn(
                 return;
             }
             if announced_retry != Some(at) {
+                if let Some(activity) = &connection.activity {
+                    let _ = outbound.send(ChatEvent::Activity { state: activity.retry_wait(at) });
+                }
                 let _ = outbound.send(ChatEvent::Agent {
                     admission: None,
                     extension_ui: None,
@@ -1987,6 +1990,12 @@ async fn goal_turn(
             drop(rook);
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             continue;
+        }
+        announced_retry = None;
+        if let Some(activity) = &connection.activity
+            && let Some(state) = activity.clear_retry()
+        {
+            let _ = outbound.send(ChatEvent::Activity { state });
         }
         let result = managed::advance(
             &rook,

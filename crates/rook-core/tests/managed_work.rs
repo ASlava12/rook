@@ -1757,10 +1757,10 @@ fn only_fresh_guidance_or_a_new_edit_wakes_an_ordinary_retry_wait() {
 
 #[test]
 fn fresh_guidance_does_not_resume_a_paused_blocked_or_cancelled_goal() {
-    let workspace = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
-    let rook = engine(workspace.path(), store.path());
     for status in [Status::Paused, Status::Blocked, Status::Cancelled, Status::Limited] {
+        let workspace = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let rook = engine(workspace.path(), store.path());
         let run = start(&rook);
         work::update(&rook, &run.id, |saved| {
             saved.run.status = status;

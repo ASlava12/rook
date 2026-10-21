@@ -350,7 +350,8 @@ export function connect() {
       case 'reasoning': say('think', e.text); break;
       case 'activity': {
         const a = e.state;
-        const text = `${a.session}: ${a.stage}${a.operation ? ` · ${a.operation}` : ''}; no observed progress for ${a.idle_secs}s (notice after ${a.threshold_secs}s)`;
+        const phase = a.retry_at != null && a.stage === 'queued' ? `waiting to retry at ${new Date(Number(a.retry_at) * 1000).toLocaleString()}` : a.stage;
+        const text = `${a.session}: ${phase}${a.operation ? ` · ${a.operation}` : ''}; no observed progress for ${a.idle_secs}s (notice after ${a.threshold_secs}s)`;
         say(a.stalled ? 'err' : 'stat', text);
         const notice = `${a.session}:${a.generation}:${a.last_progress_at}:${a.notifications}`;
         if (a.stalled && a.owner_live && state.chat.activityNotice !== notice) {

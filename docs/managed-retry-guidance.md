@@ -16,12 +16,23 @@ their state. An explicit `defer_work` deadline is preserved even when guidance
 is queued for the next admitted stage. Existing generation and unknown-effect
 recovery checks still precede work.
 
-The session investigation also exposed stale `model` activity while the scheduler
-waits for a retry. That observation/reporting fix is separate and remains pending;
-the wake-up change does not claim to correct its display.
+Live conversation goals now report an expected retry through the existing
+`queued` activity phase and optional `retry_at` timestamp. CLI, TUI and browser
+views describe the scheduled retry rather than an active model request. The
+observation does not schedule work or establish ownership after a daemon restart.
+Older saved activity records remain readable without the optional field.
+
+Scheduling and its status announcement preserve the last physical progress time.
+The expected wait is excluded from inactivity notices; a scheduler that remains
+overdue for the configured inactivity threshold can still trigger a notice.
+Starting the next stage clears the schedule, and actual model observations set
+the model phase. Repeating the same deadline cannot postpone overdue detection.
 
 Regressions cover an actual provider outage with a thirty-minute deadline,
 same-session continuation after reopening the store, idempotent submissions and
 edits, protected goal states and a real deferred-work checkpoint. Their result
-is pending for the new revision; the preceding browser/cycle revision passed the
-complete local workspace test preflight and the Linux CI gate.
+is pending for the new revision, together with controlled-clock activity and
+daemon persistence checks. All 15 browser chat rendering tests passed, including
+the scheduled-retry display without a false model-stall notification. The
+preceding browser/cycle revision passed the complete local workspace preflight
+and the Linux CI gate.

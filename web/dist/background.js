@@ -20,9 +20,10 @@ export function backgroundPanel(session) {
       rows.replaceChildren(...nodes.map((node, index) => {
         const entry = page.entries.find(e => e.session === node.id);
         const activity = entry?.activity;
+        const phase = activity?.retry_at != null && activity.stage === 'queued' ? `waiting to retry at ${new Date(Number(activity.retry_at) * 1000).toLocaleString()}` : activity?.stage;
         const owner = entry?.owner_live == null ? 'Executor unverified · saved state'
           : entry.owner_live ? 'Live executor' : 'No observed executor';
-        const summary = owner + (activity ? ` · ${activity.stage} · idle ${activity.idle_secs}s${activity.stalled ? ' · stalled' : ''}` : '')
+        const summary = owner + (activity ? ` · ${phase} · idle ${activity.idle_secs}s${activity.stalled ? ' · stalled' : ''}` : '')
           + (entry?.managed_status ? ` · saved goal ${entry.managed_status}` : '');
         return el('article', { class: 'entry', style: `margin-left:${Math.min(index, tree.ancestors.length + 1, 8)}rem` },
           el('div', { class: 'hd' }, `${node.id === tree.selected.id ? 'Selected: ' : ''}${node.title || '(untitled)'}${node.title_truncated ? '…' : ''}${node.delegated ? ' · delegated task' : ''}`),
