@@ -701,6 +701,8 @@ check covered. clangd ships a zip with the tree its binary needs, kept whole.
 Release tags used as cache directories must be single portable names: up to 255
 ASCII letters, digits, `.`, `_`, `+` or `-`, excluding `.`/`..`, trailing dots and
 Windows device names. Other names are refused before downloading or writing files.
+Self-update applies the same check before preparing or cleaning its staging tree,
+including when applying a previously saved update check.
 The agent notices too: a language with files here and no server is offered once
 per session, and the stance decides what follows — a person chooses at `assist`,
 `autonomous` fetches into the state directory, `free` uses the machine's own

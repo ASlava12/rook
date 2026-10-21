@@ -175,6 +175,9 @@ pub async fn check(proxy: &rook_llm::Proxy) -> Result<Check, String> {
         serde_json::from_slice(&body).map_err(|e| format!("{url} did not answer with a release: {e}"))?;
 
     let tag = release["tag_name"].as_str().unwrap_or_default().to_string();
+    if !install::directory_tag(&tag) {
+        return Err("release tag is not a single portable directory name — refused".into());
+    }
     let latest = tag.strip_prefix('v').unwrap_or(&tag).to_string();
     let running = running().to_string();
     // Compared as versions, not as text: "0.10.0" sorts before "0.9.0" as a
@@ -212,6 +215,11 @@ pub async fn check(proxy: &rook_llm::Proxy) -> Result<Check, String> {
 
 /// Fetch what the check found and put it in place.
 pub async fn apply(check: &Check, layout: &Layout, proxy: &rook_llm::Proxy) -> Result<Applied, String> {
+    // Check again at the mutation boundary: callers can retain or construct
+    // a Check without going through the current release-API parser.
+    if !install::directory_tag(&check.tag) {
+        return Err("release tag is not a single portable directory name — refused".into());
+    }
     let Some(asset) = &check.asset else {
         return Err(format!(
             "release {} has nothing named for {} — nothing was fetched. {BUILD_IT_INSTEAD}",

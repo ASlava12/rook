@@ -106,6 +106,73 @@ async fn alone() -> tokio::sync::MutexGuard<'static, ()> {
 }
 
 #[tokio::test]
+async fn the_release_api_cannot_supply_a_path_as_an_update_tag() {
+    let _alone = alone().await;
+    let previous = std::env::var_os("ROOK_RELEASE_API");
+    let target = upgrade::target();
+    let (name, archive) = release_archive("99.0.0", &target, b"owned fixture", "shipped");
+    let archive = Arc::new(archive);
+    for tag in ["../../sentinel", r"..\..\sentinel", "/absolute", "v99:stream", "CON"] {
+        let api = github(tag, &name, archive.clone(), sha256_of(&archive)).await;
+        unsafe { std::env::set_var("ROOK_RELEASE_API", &api) };
+        let result = upgrade::check(&Default::default()).await;
+        unsafe {
+            match &previous {
+                Some(value) => std::env::set_var("ROOK_RELEASE_API", value),
+                None => std::env::remove_var("ROOK_RELEASE_API"),
+            }
+        }
+        assert!(result.unwrap_err().contains("portable directory name"), "tag {tag:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_cached_update_check_cannot_delete_outside_its_staging_directory() {
+    let _alone = alone().await;
+    let owned = tempfile::tempdir().unwrap();
+    let home = owned.path().join("home");
+    std::fs::create_dir_all(home.join("update")).unwrap();
+    let sentinel = owned.path().join("sentinel");
+    std::fs::create_dir_all(&sentinel).unwrap();
+    std::fs::write(sentinel.join("keep.txt"), b"keep owned fixture").unwrap();
+    let previous_home = std::env::var_os("ROOK_HOME");
+    let previous_api = std::env::var_os("ROOK_RELEASE_API");
+    unsafe { std::env::set_var("ROOK_HOME", &home) };
+    let target = upgrade::target();
+    let (name, archive) = release_archive("99.0.0", &target, b"owned replacement", "shipped");
+    let archive = Arc::new(archive);
+    let api = github("v99.0.0", &name, archive.clone(), sha256_of(&archive)).await;
+    unsafe { std::env::set_var("ROOK_RELEASE_API", &api) };
+    let mut found = upgrade::check(&Default::default()).await.unwrap();
+    found.tag = "../../sentinel".into();
+    // Before exercising the old recursive cleanup, prove its resolved target
+    // stays strictly inside this test's owned temporary root.
+    let staging = home.join("update").join(&found.tag).canonicalize().unwrap();
+    let root = owned.path().canonicalize().unwrap();
+    assert!(staging.starts_with(&root) && staging != root);
+    assert_eq!(staging, sentinel.canonicalize().unwrap());
+    let bin = installed(&owned.path().join("installation"), "withdrawn");
+    let result = upgrade::apply(&found, &upgrade::Layout::beside(&bin), &Default::default()).await;
+    unsafe {
+        match previous_home {
+            Some(value) => std::env::set_var("ROOK_HOME", value),
+            None => std::env::remove_var("ROOK_HOME"),
+        }
+        match previous_api {
+            Some(value) => std::env::set_var("ROOK_RELEASE_API", value),
+            None => std::env::remove_var("ROOK_RELEASE_API"),
+        }
+    }
+    let deleted = !sentinel.join("keep.txt").exists();
+    assert!(result.is_err(), "unsafe cached tag must be refused; owned sentinel deleted: {deleted}");
+    assert_eq!(std::fs::read(sentinel.join("keep.txt")).unwrap(), b"keep owned fixture");
+    assert_eq!(
+        std::fs::read(bin.join(format!("rook{}", std::env::consts::EXE_SUFFIX))).unwrap(),
+        b"the old rook"
+    );
+}
+
+#[tokio::test]
 async fn a_newer_release_is_fetched_checked_and_put_in_place_keeping_what_it_replaced() {
     let _alone = alone().await;
     let home = tempfile::tempdir().unwrap();

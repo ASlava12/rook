@@ -491,7 +491,7 @@ impl Installer {
     }
 }
 
-fn directory_tag(tag: &str) -> bool {
+pub(crate) fn directory_tag(tag: &str) -> bool {
     if tag.is_empty()
         || tag.len() > 255
         || matches!(tag, "." | "..")
