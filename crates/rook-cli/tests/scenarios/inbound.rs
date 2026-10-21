@@ -250,11 +250,15 @@ fn authenticated_http_delivery_survives_restart_dispatches_one_ordinary_task_and
         std::fs::read_to_string(fixture.workspace.path().join("event-result")).unwrap(),
         "INBOUND_HTTP_42"
     );
+    let checked: rook_proto::work::Run = serde_json::from_value(fixture.json(&[
+        "task",
+        "show",
+        observed["run"]["id"].as_str().unwrap(),
+    ]))
+    .unwrap();
     assert!(
-        observed["work"]["recent"].as_array().unwrap().iter().any(|iteration| {
-            iteration["summary"].as_str().is_some_and(|summary| summary.starts_with("1 of 1 checks pass"))
-        }),
-        "the declared content check must actually run: {observed}"
+        checked.recent.iter().any(|iteration| iteration.summary.starts_with("1 of 1 checks pass")),
+        "the declared content check must actually run: {checked:?}"
     );
     let duplicate =
         runtime.block_on(send(&client, &restarted.address, "delivery-one", body, true)).json::<Value>();
