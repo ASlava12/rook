@@ -48,6 +48,12 @@ The [archive verifier](../xtask/probes/release-packages/README.md) can extract a
 check Windows host versions with `--host`. Run the
 [owned dialog probe](../xtask/probes/browser-dialogs/README.md) on the extracted
 CLI when browser behavior changes, alongside the managed-work probe.
+When language-server startup changes, run the
+[owned daemon LSP probe](../xtask/probes/lsp-startup/README.md) against the extracted
+daemon as well. It checks shared-pool behavior through ordinary chat sockets.
+When release-tag validation changes, run the
+[owned CLI metadata probe](../xtask/probes/release-metadata/README.md) on the
+extracted CLI. Its isolated refusals must precede all asset-download requests.
 
 After the source gates and downloaded-draft checks pass, publish that same
 draft, without rebuilding or replacing its tested archives:
