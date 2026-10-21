@@ -282,7 +282,7 @@ async fn answer_server() -> (String, tokio::sync::oneshot::Receiver<serde_json::
         let (mut socket, _) = listener.accept().await.unwrap();
         let mut raw = Vec::new();
         let mut scratch = [0; 8192];
-        loop {
+        let streaming = loop {
             let n = socket.read(&mut scratch).await.unwrap();
             assert!(n > 0 && raw.len() + n < 512 * 1024);
             raw.extend_from_slice(&scratch[..n]);
@@ -299,12 +299,29 @@ async fn answer_server() -> (String, tokio::sync::oneshot::Receiver<serde_json::
             if raw.len() < split + 4 + length {
                 continue;
             }
-            tx.send(serde_json::from_slice(&raw[split + 4..split + 4 + length]).unwrap()).unwrap();
-            break;
-        }
-        let body = r#"{"id":"r17","model":"opaque-alias","choices":[{"message":{"role":"assistant","content":"goal, unfinished work and saved source retained"},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":10}}"#;
+            let request: serde_json::Value =
+                serde_json::from_slice(&raw[split + 4..split + 4 + length]).unwrap();
+            let streaming = request["stream"] == true;
+            tx.send(request).unwrap();
+            break streaming;
+        };
+        let (mime, body) = if streaming {
+            (
+                "text/event-stream",
+                format!(
+                    "data: {}\n\ndata: [DONE]\n\n",
+                    serde_json::json!({
+                        "id":"r17", "model":"opaque-alias", "choices":[{"index":0,"delta":{
+                            "content":"goal, unfinished work and saved source retained"},"finish_reason":"stop"}],
+                        "usage":{"prompt_tokens":20,"completion_tokens":10}
+                    })
+                ),
+            )
+        } else {
+            ("application/json", r#"{"id":"r17","model":"opaque-alias","choices":[{"message":{"role":"assistant","content":"goal, unfinished work and saved source retained"},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":10}}"#.to_string())
+        };
         let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
         socket.write_all(response.as_bytes()).await.unwrap();

@@ -142,6 +142,13 @@ completion evidence prevent replay of a partial answer. Authentication, credit
 and context refusals remain terminal. Each physical attempt retains its own
 durable admission/ending receipt, and cancellation during backoff opens no request.
 
+The agent admits model-derived tool calls only after the stream's existing
+completion evidence confirms the response. Clean EOF and parseable arguments
+alone do not suffice. An unconfirmed response retains visible text and reported
+usage with an incomplete receipt, but no executable calls or signed assistant
+envelope for replay; the turn fails before completion classification. See
+[terminal admission](model-terminal-admission.md) for the contract and checks.
+
 Main/checking/delegated streams and limit-triggered final answers also pass through
 the core repetition guard. Text and narrative reasoning are watched separately,
 starting at 16,000 Unicode characters, with bounded tail sampling. At least five
