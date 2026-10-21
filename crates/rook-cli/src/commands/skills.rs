@@ -120,7 +120,7 @@ pub(crate) fn cmd_skills(source: &Source, cmd: SkillCmd, workspace: &Path, json:
                     vec![
                         o.name.clone(),
                         if installed.contains(&o.name) { "installed".into() } else { String::new() },
-                        o.description.chars().take(72).collect(),
+                        fmt::preview(&o.description, 72),
                     ]
                 })
                 .collect();
@@ -232,7 +232,7 @@ fn show_skills(catalog: &[SkillCard], all: bool, json: bool) -> Result<()> {
                 c.version.clone(),
                 c.source.clone(),
                 format!("~{}", c.body_tokens),
-                c.description.chars().take(60).collect(),
+                fmt::preview(&c.description, 60),
             ]
         })
         .collect();

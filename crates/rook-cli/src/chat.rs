@@ -1792,7 +1792,7 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
                         if c.applicable { "✓".into() } else { "·".into() },
                         c.name.clone(),
                         c.version.clone(),
-                        c.description.chars().take(60).collect(),
+                        fmt::preview(&c.description, 60),
                     ]
                 })
                 .collect();
