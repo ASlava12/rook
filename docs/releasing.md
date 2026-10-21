@@ -8,11 +8,14 @@ in `docs/releases/` consistent with the package version.
 The source must pass formatting, workspace/all-target clippy and workspace
 tests. Inspect the eight required platform CI jobs on the release revision;
 the optional model smoke is separate evidence, including its failures.
+The Linux CI job also runs the pure-Python archive verifier regressions.
 
 An annotated stable `vX.Y.Z` tag triggers `.github/workflows/release.yml`.
 Five target builds check binary runtime linkage, package the binaries and
 bundled skills, and create a **draft** GitHub release containing five archives
-and `SHA256SUMS`. A successful build does not publish that draft.
+and `SHA256SUMS`. Before draft creation, the collected archives pass the
+repo's Python verifier against the source skills and build identity. A
+successful build does not publish that draft.
 
 Manual workflow dispatch builds downloadable workflow artifacts only. Its
 optional `source_tag` rebuilds an existing stable tag without moving it.
@@ -24,6 +27,10 @@ Download the GitHub-hosted draft assets into an isolated verification directory:
 
 ```sh
 gh release download vX.Y.Z --dir /path/to/release-verification
+python3 xtask/probes/release-packages/verify.py /path/to/release-verification \
+  --skills /path/to/tagged-source/skills --version X.Y.Z \
+  --source-commit SOURCE_SHA --recipe-commit RECIPE_SHA \
+  --run-url https://github.com/OWNER/REPO/actions/runs/RUN_ID
 ```
 
 Verify all five archive checksums against `SHA256SUMS`, safe archive paths,
@@ -37,6 +44,10 @@ which targets ran natively and which received archive/linkage checks.
 Use the extracted binaries and isolated test state for runtime checks. The
 installer changes a user's installation and is not the artifact test runner.
 Retain the verified SHA256s and native probe results in the release evidence.
+The [archive verifier](../xtask/probes/release-packages/README.md) can extract and
+check Windows host versions with `--host`. Run the
+[owned dialog probe](../xtask/probes/browser-dialogs/README.md) on the extracted
+CLI when browser behavior changes, alongside the managed-work probe.
 
 After the source gates and downloaded-draft checks pass, publish that same
 draft, without rebuilding or replacing its tested archives:

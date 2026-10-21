@@ -37,7 +37,7 @@ rendering case retains idle evidence without a false model-stall notification.
 The clock fixture uses a margin around the whole-second wall-clock conversion.
 The preceding browser/cycle revision passed the complete local workspace
 preflight and all eight required platform CI jobs. Final candidate platform
-validation and downloaded-package checks remain required before publication.
+validation and downloaded-package checks were still pending at that preflight.
 
 The owned native probe passed all 19 checks using locally built `rook` and
 `rookd` 0.21.0. Its new conversation case establishes a thirty-minute ordinary
@@ -46,4 +46,9 @@ then delivers fresh guidance to the same session in less than 20 seconds without
 waiting for that deadline. Exactly two physical model requests occur: the
 injected error and the successful guided stage. Earlier checkpoint, process-loss,
 pause/cancel and batch-tail checks also pass. This is native Windows candidate
-evidence; the extracted release package must pass the probe separately.
+evidence; the extracted release package was checked separately below.
+
+The final 0.21.0 release passed all eight required platform jobs. The extracted
+GitHub-hosted Windows package passed these same 19 checks; every public download
+matches the tested draft. See the [publication record](releases/0.21.0-verification.md)
+for source/recipe identities and verification limits.

@@ -27,6 +27,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: archive verifier regressions
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 xtask/probes/release-packages/check.py
       - run: cargo xtask ci
         timeout-minutes: 45
 
