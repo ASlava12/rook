@@ -1,5 +1,42 @@
 //! Output formatting shared by the commands.
 
+use unicode_segmentation::UnicodeSegmentation;
+
+fn columns(text: &str) -> usize {
+    ratatui::text::Line::raw(text).width()
+}
+
+/// Keep a catalog description on one line and within its cell budget. A scalar
+/// boundary can still split an accent or an emoji sequence into another symbol.
+pub fn preview(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    // A column bound alone does not bound combining marks in one grapheme.
+    // Stop while copying rather than normalizing an entire long description.
+    const MAX_BYTES: usize = 4096;
+    let mut output = String::new();
+    let mut used = 0;
+    let graphemes =
+        text.split_whitespace().flat_map(|word| std::iter::once(" ").chain(word.graphemes(true))).skip(1);
+    for grapheme in graphemes {
+        let cells = columns(grapheme);
+        if cells > width.saturating_sub(used) || grapheme.len() > MAX_BYTES.saturating_sub(output.len()) {
+            while !output.is_empty()
+                && (columns(&output) >= width || output.len() > MAX_BYTES - '…'.len_utf8())
+            {
+                let boundary = output.grapheme_indices(true).next_back().map_or(0, |(at, _)| at);
+                output.truncate(boundary);
+            }
+            output.push('…');
+            return output;
+        }
+        output.push_str(grapheme);
+        used += cells;
+    }
+    output
+}
+
 pub fn bytes(n: u64) -> String {
     const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
     let mut v = n as f64;
@@ -51,11 +88,11 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 
 /// Render rows as an aligned table.
 pub fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
-    let mut widths: Vec<usize> = headers.iter().map(|h| h.chars().count()).collect();
+    let mut widths: Vec<usize> = headers.iter().map(|h| columns(h)).collect();
     for row in rows {
         for (i, cell) in row.iter().enumerate() {
             if i < widths.len() {
-                widths[i] = widths[i].max(cell.chars().count());
+                widths[i] = widths[i].max(columns(cell));
             }
         }
     }
@@ -85,7 +122,7 @@ pub fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
 }
 
 fn pad(s: &str, width: usize) -> String {
-    let len = s.chars().count();
+    let len = columns(s);
     if len >= width { s.to_string() } else { format!("{s}{}", " ".repeat(width - len)) }
 }
 

@@ -268,6 +268,10 @@ describing what you need finds a skill the catalog did not name.
 
 The `·` means blocked here; `--all` shows those and `why` explains them.
 
+List, search and chat `/skills` previews keep accents and emoji sequences intact,
+fit descriptions to terminal columns and mark shortened text with `…`.
+Descriptions occupy one line; JSON output retains their full original text.
+
 ## Versioning your skills
 
 A skill's `version:` field is what its author declares. Its *history* is what Rook
