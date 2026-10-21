@@ -9520,6 +9520,32 @@ async fn tool_cycles_do_not_reset_for_commands_or_presentation_argument_churn() 
 }
 
 #[tokio::test]
+async fn tool_cycles_do_not_treat_shell_undo_receipt_ids_as_command_progress() {
+    let mut config = Config::default();
+    config.shell_undo.enabled = true;
+    let f = fixture_with(config);
+    let session = f.rook.start_session("undo receipts are not command progress").unwrap();
+    let mut script: Vec<_> =
+        (0..5).map(|_| call("run_command", serde_json::json!({"command":"echo stable"}))).collect();
+    script.push(reply("no files changed"));
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    agent.allow_everything_not_denied();
+    let out = agent.run("inspect the command output once").await.unwrap();
+    let results: Vec<_> = f
+        .rook
+        .transcript(session, 0, 1000, 4000)
+        .unwrap()
+        .into_iter()
+        .filter(|entry| entry.kind == "tool-result" && entry.label == "run_command")
+        .map(|entry| entry.body.chars().take(512).collect::<String>())
+        .collect();
+    assert_eq!(out.stopped, "looping", "{out:?}; command results: {results:?}");
+    assert_eq!(out.tools_called.len(), 2);
+    assert!(results.iter().take(2).all(|result| result.contains("shell undo receipt:")));
+    assert_ne!(results[0], results[1], "the fixture must exercise different retained receipt IDs");
+}
+
+#[tokio::test]
 async fn tool_cycles_warn_then_stop_command_result_churn_and_unknown_tool_churn() {
     for unknown in [false, true] {
         let f = fixture();
@@ -9540,7 +9566,18 @@ async fn tool_cycles_warn_then_stop_command_result_churn_and_unknown_tool_churn(
         let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
         agent.allow_everything_not_denied();
         let out = agent.run("do real work").await.unwrap();
-        assert_eq!(out.stopped, "looping", "unknown={unknown}: {out:?}");
+        let results = if out.stopped != "looping" {
+            f.rook
+                .transcript(session, 0, 1000, 4000)
+                .unwrap()
+                .into_iter()
+                .filter(|entry| entry.kind == "tool-result")
+                .map(|entry| entry.body.chars().take(512).collect::<String>())
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        assert_eq!(out.stopped, "looping", "unknown={unknown}: {out:?}; command results: {results:?}");
         assert_eq!(out.steps, 20, "the critical threshold must actually be reached");
         assert_eq!(out.tools_called.len(), 20);
         let notes: Vec<_> = f

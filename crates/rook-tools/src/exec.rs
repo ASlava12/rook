@@ -529,12 +529,14 @@ impl Tool for RunCommand {
             }
             _ => "",
         };
-        let outcome = ToolOutcome {
+        let mut content = format!("exit {code}\n{combined}");
+        let command_result_bytes = content.len();
+        content.push_str(kept.as_ref().map(|(n, _, _)| n.as_str()).unwrap_or(""));
+        content.push_str(held);
+        content.push_str(left_running);
+        let mut outcome = ToolOutcome {
             images: Vec::new(),
-            content: format!(
-                "exit {code}\n{combined}{}{held}{left_running}",
-                kept.as_ref().map(|(n, _, _)| n.as_str()).unwrap_or("")
-            ),
+            content,
             is_error: code != 0,
             truncated,
             full_bytes: full,
@@ -543,6 +545,11 @@ impl Tool for RunCommand {
         .with("exit_code", code)
         .with("processes_stopped", processes_stopped)
         .with("isolation", contained);
+        // Only complete captured output can establish an unchanged command
+        // result. Later presentation notes and undo receipt ids are not output.
+        if drained && !truncated {
+            outcome = outcome.with("command_result_bytes", command_result_bytes);
+        }
         cleanup.armed = false;
         Ok(_input.report(match kept {
             Some((_, path, complete)) => {

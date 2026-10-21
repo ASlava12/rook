@@ -460,7 +460,15 @@ impl AgentLoop<'_> {
                 // liveness exempts reading those jobs, not spawning duplicates.
                 fingerprint(&("background command admitted", outcome.is_error))?
             } else {
-                fingerprint(&(&outcome.content, outcome.is_error, &outcome.images))?
+                let content = (name == "run_command" && !outcome.truncated)
+                    .then(|| {
+                        let bytes = outcome.meta.get("command_result_bytes")?.as_u64()?;
+                        let bytes = usize::try_from(bytes).ok().filter(|bytes| *bytes > 0)?;
+                        outcome.content.get(..bytes)
+                    })
+                    .flatten()
+                    .unwrap_or(&outcome.content);
+                fingerprint(&(content, outcome.is_error, &outcome.images))?
             };
             *self.tool_cycle_outcome.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
         }

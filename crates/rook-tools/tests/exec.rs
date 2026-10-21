@@ -43,6 +43,8 @@ async fn a_command_reports_its_exit_code_and_output() {
     assert!(!out.is_error);
     assert!(out.content.starts_with("exit 0\n"), "{}", out.content);
     assert!(out.content.contains("hello"));
+    let bytes = out.meta["command_result_bytes"].as_u64().unwrap() as usize;
+    assert_eq!(out.content.get(..bytes).unwrap().trim_end(), "exit 0\nhello");
 }
 
 #[cfg(unix)]
@@ -137,6 +139,10 @@ async fn output_larger_than_memory_would_allow_is_bounded_while_it_is_read() {
 
     assert!(out.content.len() < 20_000, "kept {} bytes for a 4 KiB cap", out.content.len());
     assert!(out.truncated);
+    assert!(
+        !out.meta.contains_key("command_result_bytes"),
+        "partial output cannot certify an unchanged result"
+    );
     assert_eq!(out.full_bytes, 4_000_000, "what the command actually produced is still reported");
     assert!(out.content.contains("elided"), "{}", &out.content[..120.min(out.content.len())]);
 }

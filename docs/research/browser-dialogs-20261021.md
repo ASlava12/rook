@@ -59,3 +59,20 @@ contexts remain pending in platform CI.
 The bundled browser QA guidance is updated to describe offered dialog actions
 and the existing console/network/viewport controls accurately. A resized
 viewport alone is not represented as mobile device emulation.
+
+The first integrated feature revision (`a805dec`) passed seven required platform
+jobs but failed the Windows command-result churn regression. That log did not
+retain individual command results, so its precise variance is unproven. The
+regression now includes bounded results on failure without changing its
+20-result threshold.
+
+A separate Windows reproduction established that shell undo receipt IDs made
+five identical commands with identical output appear to make progress. Complete,
+untruncated foreground command results now carry the UTF-8 byte boundary of
+their exit status and captured output. Cycle comparison uses that prefix before
+presentation diagnostics and appended undo receipts. Missing, invalid or partial
+boundaries fall back to comparing the whole result. Diagnostics remain visible,
+and cleanup, timeout and approval behavior is unchanged. The new engine
+regression failed before this correction and passed afterward with all 11
+selected tool-cycle engine regressions on Windows. Full-suite and final platform
+validation remain pending for the corrected revision.
