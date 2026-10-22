@@ -1,6 +1,49 @@
 use rook_store::{EventKind, Kind, NewEvent, ObjectId, SessionMeta, Store};
 
 #[test]
+fn reverse_event_metadata_is_admitted_before_an_oversized_label_is_decoded() {
+    let (_dir, store) = tmp_store();
+    let id = rook_store::new_session_id();
+    store.create_session(&SessionMeta::new(id, "bounded reverse", "/owned", 0)).unwrap();
+    for label in ["old".into(), "x".repeat(4096), "newest".into()] {
+        store
+            .append_event(id, NewEvent::new(EventKind::Note, Kind::Message, b"owned").label(&label))
+            .unwrap();
+    }
+    let newest = store.events_before_bounded(id, 3, 1, 256).unwrap();
+    assert_eq!(newest.len(), 1);
+    assert_eq!(newest[0].seq, 2, "a narrow tail need not load an older oversized record");
+    let unrestricted = store.events_before(id, 3, 3).unwrap();
+    assert!(unrestricted[1].record.label.len() > 256, "the fixture must exceed the byte bound");
+    let error = store.events_before_bounded(id, 3, 2, 256).unwrap_err().to_string();
+    assert!(error.contains("event #1") && error.contains("256-byte"), "{error}");
+    let admitted = store.events_before_bounded(id, 3, 3, 8192).unwrap();
+    assert_eq!(admitted.iter().map(|e| e.seq).collect::<Vec<_>>(), [0, 1, 2]);
+}
+
+#[test]
+fn reverse_event_metadata_windows_keep_the_exclusive_tail_and_empty_bounds() {
+    let (_dir, store) = tmp_store();
+    let id = rook_store::new_session_id();
+    store.create_session(&SessionMeta::new(id, "frozen tail", "/owned", 0)).unwrap();
+    for _ in 0..4 {
+        store.append_event(id, NewEvent::new(EventKind::AssistantMessage, Kind::Message, b"owned")).unwrap();
+    }
+    let window = store.events_before_bounded(id, 3, 2, 256).unwrap();
+    assert_eq!(
+        window.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        [1, 2],
+        "late events are outside the fixed window"
+    );
+    assert!(store.events_before_bounded(id, 0, 128, 0).unwrap().is_empty());
+    assert!(store.events_before_bounded(id, 3, 0, 0).unwrap().is_empty());
+    assert!(
+        store.events_before_bounded(id, 3, 1, 0).is_err(),
+        "zero metadata bytes must refuse a nonempty record"
+    );
+}
+
+#[test]
 fn session_metadata_admission_refuses_an_actual_oversized_saved_record() {
     let (_dir, store) = tmp_store();
     let id = rook_store::new_session_id();

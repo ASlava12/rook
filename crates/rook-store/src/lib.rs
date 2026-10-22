@@ -1132,6 +1132,18 @@ impl Store {
     /// Read the nearest earlier events without collecting an entire session.
     /// `before` is exclusive; returned events remain in chronological order.
     pub fn events_before(&self, session: u128, before: u64, limit: usize) -> Result<Vec<Event>> {
+        self.events_before_bounded(session, before, limit, usize::MAX)
+    }
+
+    /// Read an exclusive reverse window, admitting metadata before decoding
+    /// labels. Returned events remain in chronological order.
+    pub fn events_before_bounded(
+        &self,
+        session: u128,
+        before: u64,
+        limit: usize,
+        record_bytes: usize,
+    ) -> Result<Vec<Event>> {
         if before == 0 || limit == 0 {
             return Ok(Vec::new());
         }
@@ -1144,6 +1156,11 @@ impl Store {
             let (k, v) = entry?;
             let Some((sid, seq)) = schema::parse_event_key(k.value()) else { continue };
             if sid == session {
+                if v.value().len() > record_bytes {
+                    return Err(StoreError::Encoding(format!(
+                        "event #{seq} metadata exceeds the {record_bytes}-byte reader bound"
+                    )));
+                }
                 out.push(Event { session: sid, seq, record: postcard::from_bytes(v.value())? });
             }
         }
