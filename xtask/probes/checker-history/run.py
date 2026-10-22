@@ -5,6 +5,7 @@ import http.server
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import threading
@@ -27,7 +28,8 @@ def fingerprint():
 digest = fingerprint()
 steps = 80
 seen = {'main': 0, 'checker': 0, 'auxiliary': 0, 'coverage': None,
-        'old_proof_recalled': False, 'initial_excerpt_has_old_proof': False, 'max_request_bytes': 0}
+        'old_proof_recalled': False, 'initial_excerpt_has_old_proof': False,
+        'suggested_recall': None, 'max_request_bytes': 0}
 errors = []
 lock = threading.Lock()
 
@@ -44,6 +46,9 @@ def coverage_in(value, depth=0):
     elif isinstance(value, list):
         children = value
     elif isinstance(value, str):
+        hint = re.search(r'session_recall (\{"session":"[^"]+","around":\d+\})', value)
+        if hint and seen['suggested_recall'] is None:
+            seen['suggested_recall'] = json.loads(hint[1])
         children = []
         start = 0
         for _ in range(256):
@@ -107,8 +112,8 @@ class Model(http.server.BaseHTTPRequestHandler):
                     seen['initial_excerpt_has_old_proof'] = 'OWNED_OLD_PROOF' in str(messages)
                 if coverage and seen['coverage'] is None:
                     seen['coverage'] = coverage
-                if index == 1 and coverage:
-                    call = ('session_recall', {'session': coverage['session'], 'around': coverage['from']})
+                if index == 1 and coverage and seen['suggested_recall']:
+                    call = ('session_recall', seen['suggested_recall'])
                 if index > 1:
                     seen['old_proof_recalled'] = any(m.get('role') == 'tool'
                         and 'OWNED_OLD_PROOF' in str(m.get('content', '')) for m in messages)
@@ -203,7 +208,8 @@ url='http://127.0.0.1:{server.server_port}/v1'
                 and coverage.get('metadata_steps', 1025) <= 1024,
             'older_range_explicit': coverage.get('unread_before_exclusive') is not None,
             'old_proof_readable_by_checker': seen['old_proof_recalled']
-                and not seen['initial_excerpt_has_old_proof'],
+                and not seen['initial_excerpt_has_old_proof']
+                and seen['suggested_recall'] == {'session': coverage.get('session'), 'around': coverage.get('from')},
             'owned_workspace_unchanged': sentinel.read_bytes() == b'owned unchanged'
                 and set(workspace.iterdir()) == {sentinel},
             'bounded_capture_and_local_requests': bounded and not errors,

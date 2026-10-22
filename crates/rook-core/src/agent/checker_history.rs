@@ -58,12 +58,13 @@ impl Excerpt {
             "payload_raw_byte_limit":PAYLOAD_BYTES, "payload_stored_byte_limit":PAYLOAD_BYTES,
             "issues":self.issues
         });
-        let around = self.unread_before.map(|before| before.saturating_sub(1)).unwrap_or(floor);
+        // Recall cursors move forwards. Starting at the newest omitted event
+        // would strand earlier proof behind the first returned page.
         format!(
             "\n\nSaved-stage acquisition is bounded. The renderer may elide additional older entries. \
              Missing or shortened evidence does not establish that an action never happened and does not \
              narrow the goal or its constraints. The original journal is unchanged. Inspect older or \
-             unavailable evidence with session_recall {{\"session\":\"{session}\",\"around\":{around}}}, \
+             unavailable evidence with session_recall {{\"session\":\"{session}\",\"around\":{floor}}}, \
              following its returned cursors as needed. Each displayed event's own sequence anchors \
              inspection of its saved text and attachment metadata. Recall pages can also shorten \
              payloads; the original journal remains available through history entry navigation.\n{}",
@@ -284,7 +285,12 @@ mod tests {
         assert_eq!(excerpt.body_reads, 1);
         assert!(excerpt.issues.is_empty());
         assert!(excerpt.unread_before.is_some());
-        assert!(excerpt.notice(session, first).contains("unread_before_exclusive"));
+        let notice = excerpt.notice(session, first);
+        assert!(notice.contains("unread_before_exclusive"));
+        assert!(
+            notice.contains(&format!("\"around\":{first}}}")),
+            "forward-only recall must start at the oldest omitted stage event: {notice}"
+        );
         let saved = rook.transcript_entry(session, first, 0).unwrap();
         assert_eq!(saved.entry.body, "old proof remains saved");
     }
