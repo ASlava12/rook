@@ -18,9 +18,10 @@ An applicable explicitly installed payload retains its PATH-probe bypass.
 ask for it. `for_workspace()` admits metadata before process creation;
 `missing_here()` uses that same scoped automatic discovery when checking what
 installation would be for, while retaining explicit configured languages. Applicable PATH probes retain their ten-second status/cleanup
-contract. No parallelism, timeout, configuration, storage schema or dependency
-changes. This avoids irrelevant probes rather than introducing a total startup
-deadline; applicable discovery remains sequential.
+contract and use a [four-worker discovery pool](lsp-discovery-pool.md). Known
+result order remains stable while physical starts may overlap. No timeout,
+configuration, storage schema or dependency changes; the pool is per discovery
+call and does not introduce a total startup deadline.
 
 The [owned actual CLI fixture](../xtask/probes/lsp-workspace-detection/README.md)
 checks six workspaces with all five known server commands and all sixteen

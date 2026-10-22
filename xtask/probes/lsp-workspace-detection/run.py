@@ -82,7 +82,9 @@ try:
             'correct_result':(result.returncode==0 and result.stdout.decode().strip()==offered) if offered is not None else
                 (result.returncode!=0 and b'no language server applies' in result.stderr),
             'workspace_unchanged':snapshot(workspace)==before})
-    checks={case['name']+'_probes_only_applicable_paths':[row[0] for row in case['calls']]==case['expected_calls'] for case in report['cases']}
+    # Physical starts may overlap. Sorting retains exact multiplicity, while
+    # correct_results independently requires the original language output order.
+    checks={case['name']+'_probes_only_applicable_paths':sorted(row[0] for row in case['calls'])==sorted(case['expected_calls']) for case in report['cases']}
     checks.update(correct_results=all(c['correct_result'] for c in report['cases']),
         stdin_closed=all(row[1]=='true' for c in report['cases'] for row in c['calls']),
         only_version_requests=all(row[2]=='true' for c in report['cases'] for row in c['calls']),

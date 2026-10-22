@@ -17,7 +17,8 @@ invocation records its command, stdin EOF and exact `--version` arguments.
 Require all twelve conditions: six exact applicable-call sets, unchanged offered
 language/refusal results, closed stdin, exact version requests, no model HTTP,
 unchanged workspace files and unchanged CLI SHA256. Mixed results preserve known
-order and explicit config does not execute a PATH probe. An owned HTTP observer
+order; physical calls are compared with their exact multiplicity independently
+of start order. Explicit config does not execute a PATH probe. An owned HTTP observer
 records unexpected model requests. Timing is retained without a speed gate.
 
 The published 0.21.10 negative control must fail four call-admission conditions
