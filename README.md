@@ -1,7 +1,7 @@
 # Rook
 
-[Rook 0.21.7](docs/releases/0.21.7.md): concurrent retries use bounded positive jitter;
-transcript and recall readers admit metadata before decoding it.
+[Rook 0.21.8](docs/releases/0.21.8.md): provider retry waits show their deadline without inventing progress;
+CLI, TUI, ACP and browser views share scoped status.
 
 [Domain network policy with OS containment](docs/domain-network-policy.md).
 
