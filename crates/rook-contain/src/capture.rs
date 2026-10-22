@@ -2,7 +2,7 @@
 
 use std::{
     io::{self, Read},
-    process::{Child, Command, Output, Stdio},
+    process::{Child, Command, ExitStatus, Output, Stdio},
     time::{Duration, Instant},
 };
 
@@ -12,6 +12,14 @@ struct Owned {
     finished: bool,
 }
 
+impl Owned {
+    fn start(command: &mut Command) -> io::Result<Self> {
+        let child = crate::on_its_own(command).spawn()?;
+        let group = crate::Group::holding(Some(child.id()));
+        Ok(Self { child, group, finished: false })
+    }
+}
+
 impl Drop for Owned {
     fn drop(&mut self) {
         if self.finished {
@@ -19,11 +27,37 @@ impl Drop for Owned {
         }
         self.group.end();
         let _ = self.child.kill();
-        // Never replace a bounded capture with an unbounded wait to reap it.
+        // Never replace a bounded probe with an unbounded wait to reap it.
         let until = Instant::now() + Duration::from_secs(1);
         while matches!(self.child.try_wait(), Ok(None)) && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+}
+
+/// Ask whether a short command exits within its post-spawn patience.
+///
+/// `Some` retains the observed exit status; `None` means the direct child was
+/// still running when patience expired. Standard input is null; output is discarded.
+/// Every outcome requests owned-group/direct-child cleanup, including a normal
+/// parent exit that left descendants. Reaping polls for at most one additional
+/// second. Process creation/signalling is synchronous, Darwin group cleanup
+/// retains its five-second grace and [`crate::Group`]'s ownership limits apply.
+pub fn probed_within(command: &mut Command, patience: Duration) -> io::Result<Option<ExitStatus>> {
+    let mut owned = Owned::start(command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()))?;
+    let deadline = Instant::now().checked_add(patience).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "probe patience exceeds the monotonic clock")
+    })?;
+    loop {
+        // Inspect status before the clock: an overdue observer must retain a
+        // completed shim's refusal rather than call it a still-running server.
+        if let Some(status) = owned.child.try_wait()? {
+            return Ok(Some(status));
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now())));
     }
 }
 
@@ -37,13 +71,7 @@ impl Drop for Owned {
 /// Darwin group cleanup can additionally spend its existing five-second grace.
 /// Job attachment and detached descendants retain [`crate::Group`]'s limits.
 pub fn captured_within(command: &mut Command, patience: Duration, maximum: usize) -> io::Result<Output> {
-    let child = crate::on_its_own(command)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let group = crate::Group::holding(Some(child.id()));
-    let mut owned = Owned { child, group, finished: false };
+    let mut owned = Owned::start(command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()))?;
     let deadline = Instant::now().checked_add(patience).ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "probe patience exceeds the monotonic clock")
     })?;
@@ -183,11 +211,42 @@ mod tests {
     #[test]
     #[allow(
         clippy::zombie_processes,
-        reason = "the fixture deliberately exits before its pipe holder; the outer capture owns their group"
+        reason = "the fixture deliberately exits before its pipe/socket holder; the outer probe owns their group"
     )]
     fn fixture_child() {
         let Ok(mode) = std::env::var("ROOK_OWNED_CAPTURE_TEST") else { return };
         match mode.as_str() {
+            "refused" => std::process::exit(7),
+            "pending" => {
+                std::fs::write(std::env::var("ROOK_OWNED_CAPTURE_MARKER").unwrap(), b"ready").unwrap();
+                std::thread::sleep(Duration::from_secs(30));
+            }
+            "socket-holder" => {
+                let mut socket =
+                    std::net::TcpStream::connect(std::env::var("ROOK_OWNED_CAPTURE_ENDPOINT").unwrap())
+                        .unwrap();
+                socket.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+                socket.write_all(b"ready").unwrap();
+                let mut ack = [0];
+                socket.read_exact(&mut ack).unwrap();
+                std::fs::write(std::env::var("ROOK_OWNED_CAPTURE_MARKER").unwrap(), b"ready").unwrap();
+                let _ = socket.read(&mut ack);
+            }
+            "probe-parent" => {
+                let mut holder = command("socket-holder");
+                let _holder = crate::quietly(&mut holder)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap();
+                let marker = std::env::var("ROOK_OWNED_CAPTURE_MARKER").unwrap();
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !std::path::Path::new(&marker).is_file() {
+                    assert!(Instant::now() < deadline);
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
             "pipe-holder" => std::thread::sleep(Duration::from_secs(30)),
             "parent" => {
                 let mut child = command("pipe-holder");
@@ -215,6 +274,84 @@ mod tests {
             _ => panic!("unknown owned fixture mode"),
         }
         std::process::exit(0);
+    }
+
+    #[test]
+    fn status_probes_retain_success_and_refusal_without_using_cleanup_as_a_verdict() {
+        let accepted = probed_within(&mut command("normal"), Duration::from_secs(15)).unwrap().unwrap();
+        assert!(accepted.success());
+        let refused = probed_within(&mut command("refused"), Duration::from_secs(15)).unwrap().unwrap();
+        assert_eq!(refused.code(), Some(7));
+    }
+
+    #[test]
+    fn status_probe_timeout_is_distinct_from_a_command_refusal() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("started");
+        let mut pending = command("pending");
+        pending.env("ROOK_OWNED_CAPTURE_MARKER", &marker);
+        let started = Instant::now();
+        assert!(probed_within(&mut pending, Duration::from_secs(5)).unwrap().is_none());
+        assert!(marker.is_file(), "the fixture must actually start before timeout");
+        assert!(started.elapsed() < Duration::from_secs(20));
+    }
+
+    #[test]
+    fn status_probe_spawn_failure_remains_an_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let error = probed_within(&mut Command::new(directory.path().join("absent")), Duration::from_secs(5))
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn a_successful_status_probe_retires_its_owned_descendant_connection() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("connected");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        let observer = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    _ => {
+                        let _ = sent.send((false, "no owned connection accepted".to_string()));
+                        return;
+                    }
+                }
+            };
+            // Windows accepts the listener's nonblocking mode with the socket.
+            // This observer waits for EOF under its own finite read deadline.
+            stream.set_nonblocking(false).unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+            let mut hello = [0; 5];
+            stream.read_exact(&mut hello).unwrap();
+            assert_eq!(&hello, b"ready");
+            stream.write_all(b"!").unwrap();
+            let ending = stream.read(&mut [0]);
+            let detail = format!("{ending:?}");
+            let retired = match ending {
+                Ok(0) => true,
+                Err(error) => error.kind() == io::ErrorKind::ConnectionReset,
+                _ => false,
+            };
+            let _ = sent.send((retired, detail));
+        });
+        let mut parent = command("probe-parent");
+        parent
+            .env("ROOK_OWNED_CAPTURE_MARKER", &marker)
+            .env("ROOK_OWNED_CAPTURE_ENDPOINT", address.to_string());
+        assert!(probed_within(&mut parent, Duration::from_secs(15)).unwrap().unwrap().success());
+        assert!(marker.is_file(), "a real descendant held the connection before its parent exited");
+        let (retired, detail) = received.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(retired, "owned connection did not report retirement: {detail}");
+        observer.join().unwrap();
     }
 
     #[test]

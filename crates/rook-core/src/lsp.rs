@@ -100,49 +100,16 @@ fn installed(command: &str) -> Option<String> {
 /// was the whole of what it learned. Bounded, because an unknown binary asked
 /// a question may not answer it.
 fn starts(command: &str) -> bool {
-    let Ok(mut child) = rook_contain::quietly(&mut std::process::Command::new(command))
-        .arg("--version")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    else {
-        return false;
-    };
-    // Generous, because it only tells a version check from a server that
-    // started serving instead: a real server answers in milliseconds, and so
-    // does a shim that exits — but under a full `cargo xtask ci` a shell had
-    // not exited in three seconds, and the shim was offered as a server.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            // The deadline has passed, which is not the same as the process
-            // having outlived it: this loop asks the clock on every turn, so a
-            // thread that did not get scheduled reads a deadline long gone and
-            // would answer "still running" about something that exited in
-            // milliseconds. It measured the observer rather than the observed,
-            // and under a full `cargo xtask ci` beside another build it read a
-            // shim that exits as a server.
-            //
-            // So the last word is the status rather than the timer. Killing a
-            // process that has already exited changes nothing, and `wait` then
-            // hands back what it really did.
-            _ => {
-                let _ = child.kill();
-                return match child.wait() {
-                    // No exit code is our own signal: it was still running,
-                    // which is a server that started serving rather than a
-                    // version check, and that is as good an answer.
-                    Ok(status) => status.code().is_none_or(|code| code == 0),
-                    Err(_) => true,
-                };
-            }
-        }
-    }
+    let mut probe = std::process::Command::new(command);
+    probe.arg("--version");
+    // A zero exit is a version reply. A command still running after ten
+    // seconds may instead be serving; retain that admission on every platform.
+    // Cleanup must not supply the verdict: killing on Windows yields a numeric
+    // failure, while Unix reports a signal. Spawn/status errors are not proof
+    // of a usable server. Installed payloads continue to bypass this probe.
+    rook_contain::probed_within(&mut probe, std::time::Duration::from_secs(10))
+        .map(|status| status.is_none_or(|status| status.success()))
+        .unwrap_or(false)
 }
 
 /// Whether `command` would start from PATH.

@@ -110,6 +110,10 @@ workspace/binary.
 When language-server startup changes, run the
 [owned daemon LSP probe](../xtask/probes/lsp-startup/README.md) against the extracted
 daemon as well. It checks shared-pool behavior through ordinary chat sockets.
+When PATH language-server discovery changes, also run the
+[owned LSP detection fixture](../xtask/probes/lsp-detection/README.md) on the
+extracted host CLI. Require all eleven flags, including the still-running
+admission and descendant retirement after both successful and refused parents.
 When cache-install ownership changes, run the
 [owned background-install probe](../xtask/probes/lsp-install/README.md) on the
 extracted daemon. Two ordinary workspace chats must share the physical download
