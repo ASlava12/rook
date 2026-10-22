@@ -165,6 +165,13 @@ ordinary CLI/WebSocket completion, exact image bytes, both cache TTLs and
 unchanged original saved input. The helper only seeds/verifies private data;
 the requested binary pair performs all provider requests.
 
+When release-asset transport changes, run the
+[owned CLI recovery fixture](../xtask/probes/asset-download-recovery/README.md)
+on the extracted host pair. Require all twelve conditions, including ordinary
+same-version force update, exact resumed/restarted payloads, bounded attempts,
+refused invalid ranges/digests, complete installation-tree preservation on
+refusal and retained previous files. The provided pair must remain unchanged.
+
 After the source gates and downloaded-draft checks pass, publish that same
 draft, without rebuilding or replacing its tested archives:
 

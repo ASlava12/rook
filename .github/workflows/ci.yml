@@ -82,6 +82,9 @@ jobs:
         run: |
           rustfmt --edition 2024 --check xtask/probes/anthropic-image-only/seed.rs
           python3 xtask/probes/anthropic-image-only/run.py --bin-dir target/debug --build-target target --output "$RUNNER_TEMP/rook-anthropic-image-only.json"
+      - name: release asset body recovery
+        shell: bash
+        run: python3 xtask/probes/asset-download-recovery/run.py --bin-dir target/debug --tmp-root "$RUNNER_TEMP" --output "$RUNNER_TEMP/rook-asset-download-recovery.json"
       - name: bounded environment probes
         shell: bash
         run: python3 xtask/probes/environment-startup/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-environment-probes.json"

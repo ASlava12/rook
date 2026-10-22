@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 #[cfg(all(test, any(unix, windows)))]
 mod command_tests;
 mod concurrent;
+mod download;
 mod ownership;
 
 use sha2::Digest;
@@ -552,55 +553,23 @@ pub(crate) fn directory_tag(tag: &str) -> bool {
 /// One function rather than one per caller: where a download may be redirected
 /// to is a security answer, and two copies of it drift into two answers.
 pub(crate) async fn fetch_asset(client: &reqwest::Client, release: &Asset) -> Result<Vec<u8>, String> {
-    let mut at = release.url.clone();
-    let origin = host_of(&at);
-    let mut landed = None;
-    for _ in 0..MOST_HOPS {
-        let hop = client.get(&at).send().await.map_err(|e| format!("could not fetch {at}: {e}"))?;
-        let Some(to) = hop.headers().get(reqwest::header::LOCATION).and_then(|v| v.to_str().ok()) else {
-            landed = Some(hop);
-            break;
-        };
-        let to = to.to_string();
-        let host = host_of(&to);
-        // Where GitHub keeps release files, and nowhere else.
-        let known = host == origin
-            || host == "objects.githubusercontent.com"
-            || host == "release-assets.githubusercontent.com";
-        if !known {
-            return Err(format!("{at} redirects to {to}, which is not where a release is kept"));
-        }
-        at = to;
-    }
-    let Some(response) = landed else {
-        return Err(format!("{} redirected more than {MOST_HOPS} times", release.url));
-    };
-    if !response.status().is_success() {
-        return Err(format!("{at} answered {}", response.status()));
-    }
-    let (bytes, sha256) = read_bounded(response, MOST_ASSET_BYTES).await?;
-    if sha256 != release.sha256 {
-        return Err(format!(
-            "the download does not match the digest the release lists: got sha256 {sha256}, \
-             the release says {} — nothing was installed",
-            release.sha256
-        ));
-    }
-    if release.size != 0 && bytes.len() as u64 != release.size {
-        return Err(format!(
-            "the download is {} bytes and the release says {} — nothing was installed",
-            bytes.len(),
-            release.size
-        ));
-    }
-    Ok(bytes)
+    download::fetch_asset(client, release).await
 }
 
 /// The HTTP client a release fetch uses: no automatic redirects, because where
 /// one may go is decided here, and a user agent that says which rook asked.
 pub(crate) fn release_client(api: &str, proxy: &rook_llm::Proxy) -> Result<reqwest::Client, String> {
     rook_llm::init_tls();
+    // Range offsets and digests describe exact published bytes, not decoded HTTP bodies.
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(reqwest::header::ACCEPT_ENCODING, reqwest::header::HeaderValue::from_static("identity"));
     let client = reqwest::Client::builder()
+        .default_headers(headers)
+        .no_gzip()
+        .no_brotli()
+        .no_zstd()
+        .no_deflate()
+        .retry(reqwest::retry::never())
         .timeout(std::time::Duration::from_secs(600))
         .connect_timeout(std::time::Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::none())
@@ -746,11 +715,11 @@ pub(crate) async fn read_bounded(
         match response.chunk().await {
             Ok(None) => return Ok((body, hex::encode(hasher.finalize()))),
             Ok(Some(chunk)) => {
-                hasher.update(&chunk);
-                body.extend_from_slice(&chunk);
-                if body.len() > most {
+                if chunk.len() > most.saturating_sub(body.len()) {
                     return Err(format!("more than {most} bytes arrived and it was still coming — refused"));
                 }
+                hasher.update(&chunk);
+                body.extend_from_slice(&chunk);
             }
             Err(e) => return Err(format!("the download stopped partway: {e}")),
         }
@@ -896,6 +865,9 @@ pub(crate) fn executable(path: &Path) -> Result<(), String> {
 pub(crate) fn host_of(url: &str) -> String {
     url.split("://").nth(1).unwrap_or(url).split('/').next().unwrap_or("").to_ascii_lowercase()
 }
+
+#[cfg(test)]
+mod download_tests;
 
 #[cfg(test)]
 mod tests {
