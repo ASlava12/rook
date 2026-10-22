@@ -368,6 +368,20 @@ fn a_workspace_no_server_covers_is_offered_none() {
     assert!(rook_core::lsp::for_workspace(&config, dir.path()).is_empty(), "and so the tools are not");
 }
 
+#[test]
+fn custom_extensions_do_not_make_an_explicit_language_eligible_for_automatic_installation() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("main.py"), "print(1)\n").unwrap();
+    let mut explicit = python();
+    explicit.extensions = vec!["txt".into()];
+    let config = rook_core::Config { lsp: vec![explicit], ..Default::default() };
+    assert!(rook_core::lsp::for_workspace(&config, dir.path()).is_empty());
+    assert!(
+        rook_core::lsp::missing_here(&config, dir.path()).is_empty(),
+        "custom extension selection must not invite an automatic replacement"
+    );
+}
+
 fn python() -> ServerConfig {
     ServerConfig {
         language: "python".into(),

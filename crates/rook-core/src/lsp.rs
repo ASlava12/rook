@@ -37,7 +37,11 @@ const KNOWN: [(&str, &str, &[&str], &[&str]); 5] = [
 /// Known languages with files here and no server for them: what an install
 /// would be for. Each is the command that would serve it.
 pub fn missing_here(config: &crate::Config, root: &Path) -> Vec<(&'static str, &'static str)> {
-    let served: Vec<String> = for_workspace(config, root).into_iter().map(|c| c.language).collect();
+    // An explicit language remains configured even when its custom extensions
+    // exclude files found here. Do not offer automatic installation over that
+    // choice; only automatic discovery needs workspace-scoped process admission.
+    let configured = if config.lsp.is_empty() { for_workspace(config, root) } else { configured(config) };
+    let served: Vec<String> = configured.into_iter().map(|c| c.language).collect();
     let candidates: Vec<ServerConfig> = KNOWN
         .iter()
         .filter(|(language, _, _, _)| !served.iter().any(|s| s == language))

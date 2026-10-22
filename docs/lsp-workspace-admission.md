@@ -10,12 +10,14 @@ no-follow-link behavior. It is an applicability hint, not a complete filesystem
 index. Known language order, command arguments and extension sets remain fixed.
 Explicit nonempty `[[lsp]]` configuration still replaces automatic discovery;
 disabled entries remain disabled and explicit commands are not version-probed.
+A configured language with custom extensions is not offered for automatic
+installation merely because other extensions are present.
 An applicable explicitly installed payload retains its PATH-probe bypass.
 
 `detected()` and `configured()` retain full inventory behavior for callers that
 ask for it. `for_workspace()` admits metadata before process creation;
-`missing_here()` uses that same scoped discovery when checking what installation
-would be for. Applicable PATH probes retain their ten-second status/cleanup
+`missing_here()` uses that same scoped automatic discovery when checking what
+installation would be for, while retaining explicit configured languages. Applicable PATH probes retain their ten-second status/cleanup
 contract. No parallelism, timeout, configuration, storage schema or dependency
 changes. This avoids irrelevant probes rather than introducing a total startup
 deadline; applicable discovery remains sequential.
