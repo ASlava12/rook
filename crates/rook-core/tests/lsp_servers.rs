@@ -424,6 +424,19 @@ fn a_server_we_installed_is_not_asked_to_prove_itself() {
     assert!(python.is_some(), "an installed server is offered whatever it says to --version: {found:?}");
     assert_eq!(python.unwrap().command, binary.to_string_lossy());
 
+    let workspace = home.path().join("python-project");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::write(workspace.join("main.py"), "print(1)\n").unwrap();
+    let config = rook_core::Config::default();
+    let scoped = rook_core::lsp::for_workspace(&config, &workspace);
+    assert_eq!(scoped.len(), 1, "workspace selection retains the installed payload bypass");
+    assert_eq!(scoped[0].language, "python");
+    assert_eq!(scoped[0].command, binary.to_string_lossy());
+    assert!(
+        rook_core::lsp::missing_here(&config, &workspace).is_empty(),
+        "scoped installation detection must not offer the installed Python server again"
+    );
+
     match previous {
         Some(was) => unsafe { std::env::set_var("ROOK_HOME", was) },
         None => unsafe { std::env::remove_var("ROOK_HOME") },

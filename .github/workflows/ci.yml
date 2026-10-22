@@ -42,6 +42,9 @@ jobs:
       - name: owned PATH language-server detection
         shell: bash
         run: python3 xtask/probes/lsp-detection/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-lsp-detection.json"
+      - name: workspace admission before language-server probes
+        shell: bash
+        run: python3 xtask/probes/lsp-workspace-detection/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-lsp-workspace-detection.json"
       - name: exact remote skill-source identity
         shell: bash
         run: python3 xtask/probes/catalog-source-identity/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-catalog-identity.json"

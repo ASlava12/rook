@@ -37,7 +37,7 @@ const KNOWN: [(&str, &str, &[&str], &[&str]); 5] = [
 /// Known languages with files here and no server for them: what an install
 /// would be for. Each is the command that would serve it.
 pub fn missing_here(config: &crate::Config, root: &Path) -> Vec<(&'static str, &'static str)> {
-    let served: Vec<String> = configured(config).into_iter().map(|c| c.language).collect();
+    let served: Vec<String> = for_workspace(config, root).into_iter().map(|c| c.language).collect();
     let candidates: Vec<ServerConfig> = KNOWN
         .iter()
         .filter(|(language, _, _, _)| !served.iter().any(|s| s == language))
@@ -58,29 +58,36 @@ pub fn missing_here(config: &crate::Config, root: &Path) -> Vec<(&'static str, &
 }
 
 pub fn detected() -> Vec<ServerConfig> {
+    discover(known())
+}
+
+/// Metadata alone lets the bounded workspace scan precede process discovery.
+fn known() -> Vec<ServerConfig> {
     KNOWN
         .iter()
-        .filter_map(|(language, command, args, extensions)| {
-            // What `rook lsp install` fetched wins over PATH: it is the one the
-            // user asked for by name, and it has a digest on record — which is
-            // also why it is not asked to prove itself. The `--version` probe
-            // exists for PATH, where rustup leaves a `rust-analyzer` shim that
-            // is not one; asked of our own file it threw away a working server,
-            // because `pyright-langserver --version` refuses to run without
-            // `--stdio` and answers with an error. Installed, and then offered
-            // to be installed again every session.
-            let command = match installed(command) {
-                Some(ours) => ours,
-                None => on_path(command).then(|| (*command).to_string()).filter(|c| starts(c))?,
-            };
-            Some((language, command, args, extensions))
-        })
         .map(|(language, command, args, extensions)| ServerConfig {
             language: (*language).into(),
-            command,
+            command: (*command).into(),
             args: args.iter().map(|a| (*a).into()).collect(),
             extensions: extensions.iter().map(|e| (*e).into()).collect(),
             ..Default::default()
+        })
+        .collect()
+}
+
+fn discover(candidates: Vec<ServerConfig>) -> Vec<ServerConfig> {
+    candidates
+        .into_iter()
+        .filter_map(|mut server| {
+            // An explicitly installed payload wins over PATH and retains its
+            // probe bypass: its real invocation may require `--stdio`, making
+            // a refused `--version` an invalid reason to offer installation again.
+            if let Some(ours) = installed(&server.command) {
+                server.command = ours;
+            } else if !on_path(&server.command) || !starts(&server.command) {
+                return None;
+            }
+            Some(server)
         })
         .collect()
 }
@@ -148,12 +155,15 @@ pub fn configured(config: &crate::Config) -> Vec<ServerConfig> {
 /// does not contain costs the prompt its four tool schemas and buys nothing —
 /// and when none of them qualify, the tools are not advertised at all.
 pub fn for_workspace(config: &crate::Config, root: &Path) -> Vec<ServerConfig> {
-    let configured = configured(config);
-    if configured.is_empty() {
-        return configured;
-    }
-    let wanted = present(&configured, root);
-    configured.into_iter().filter(|c| wanted.contains(&c.language)).collect()
+    let automatic = config.lsp.is_empty();
+    let candidates = if automatic { known() } else { config.lsp.clone() };
+    let enabled: Vec<_> = candidates.into_iter().filter(|c| c.enabled).collect();
+    let wanted = present(&enabled, root);
+    let applicable = enabled.into_iter().filter(|c| wanted.contains(&c.language)).collect();
+    // An irrelevant PATH shim must never delay opening a workspace. Keep full
+    // inventory discovery available to callers of `detected`/`configured`, but
+    // admit only languages with files here before executing any version probe.
+    if automatic { discover(applicable) } else { applicable }
 }
 
 /// Which of `servers` have a file to work on under `root`, by language.
