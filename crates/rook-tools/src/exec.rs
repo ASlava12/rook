@@ -8,6 +8,8 @@ use rook_llm::ToolSpec;
 
 use crate::{Result, Tool, ToolContext, ToolError, ToolOutcome, arg_str};
 
+mod cargo_output;
+
 pub struct RunCommand;
 
 #[async_trait]
@@ -28,6 +30,10 @@ impl Tool for RunCommand {
                     "command": { "type": "string" },
                     "cwd": { "type": "string", "description": "Working directory, relative to the workspace." },
                     "timeout_secs": { "type": "integer" },
+                    "output": {
+                        "type": "string", "enum": ["auto", "raw"],
+                        "description": "auto condenses routine local foreground Cargo build progress when an original output capture is available; raw keeps it in the reply. Other command output remains unchanged."
+                    },
                     "background": {
                         "type": "boolean",
                         "description": "Leave it running and answer at once with a job id."
@@ -45,6 +51,17 @@ impl Tool for RunCommand {
 
     async fn call(&self, ctx: &ToolContext, args: &serde_json::Value) -> Result<ToolOutcome> {
         let command = arg_str(args, self.name(), "command")?;
+        let raw_output = match args.get("output") {
+            None => false,
+            Some(serde_json::Value::String(mode)) if mode == "auto" => false,
+            Some(serde_json::Value::String(mode)) if mode == "raw" => true,
+            _ => {
+                return Err(ToolError::Invalid {
+                    tool: self.name().into(),
+                    message: "output must be auto or raw".into(),
+                });
+            }
+        };
         if ctx.isolation.network_policy.enabled
             && (args.get("background").and_then(|v| v.as_bool()).unwrap_or(false)
                 || ctx.terminals.is_some()
@@ -313,8 +330,11 @@ impl Tool for RunCommand {
         // anything, not which pipe it came down.
         let started = std::time::Instant::now();
         let heard: std::sync::Arc<std::sync::atomic::AtomicU64> = Default::default();
-        let mut out = Ends::new(keep, spill.clone(), heard.clone(), started, ctx.output_activity.clone());
-        let mut err = Ends::new(keep, spill.clone(), heard.clone(), started, ctx.output_activity.clone());
+        let filtering = !raw_output && spill.is_some() && cargo_output::eligible(&command);
+        let mut out =
+            Ends::new(keep, spill.clone(), heard.clone(), started, ctx.output_activity.clone(), filtering);
+        let mut err =
+            Ends::new(keep, spill.clone(), heard.clone(), started, ctx.output_activity.clone(), filtering);
         // Together, not one after the other: a pipe holds about 64 KiB, and a
         // command that fills stderr while stdout is being drained blocks on the
         // write — so it never finishes stdout and the drain never ends. Any
@@ -431,6 +451,9 @@ impl Tool for RunCommand {
             _ => PIPES_AFTER_EXIT,
         };
         let drained = tokio::time::timeout(grace, capture!()).await.is_ok();
+        out.finish_filter();
+        err.finish_filter();
+        let removed = out.removed().plus(err.removed());
         // Where the group can be asked, its answer; elsewhere the wait is all
         // there is, which is what it was everywhere before this.
         let orphaned = ended == Ended::Exited && still.unwrap_or(!drained);
@@ -447,9 +470,10 @@ impl Tool for RunCommand {
             let silent_for = quiet_for(&heard, started);
             // A command that ran until the timeout is the one whose output is
             // most worth having, and the ends of it are the least of it.
-            let printed = joined(&out, &err);
+            let mut printed = joined(&out, &err);
             let full_bytes = out.seen + err.seen;
-            let truncated = full_bytes > printed.len();
+            let truncated = removed.bytes > 0 || full_bytes > printed.len();
+            printed.push_str(&removed.note());
             let kept = settle(spill, truncated);
             let mut outcome = ToolOutcome::error(format!(
                 "{}{}",
@@ -467,6 +491,7 @@ impl Tool for RunCommand {
             );
             outcome.full_bytes = full_bytes;
             outcome.truncated = truncated;
+            outcome = removed.annotate(outcome);
             return Ok(_input.report(match kept {
                 Some((_, path, _)) => outcome.with("output_file", path).with("output_complete", false),
                 None => outcome,
@@ -483,10 +508,11 @@ impl Tool for RunCommand {
         let code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
         let full = out.seen + err.seen;
         let mut combined = joined(&out, &err);
-        let truncated = full > combined.len().min(ctx.max_output_bytes);
+        let truncated = removed.bytes > 0 || full > combined.len().min(ctx.max_output_bytes);
         if truncated {
             combined = crate::elide_middle(&combined, ctx.max_output_bytes);
         }
+        combined.push_str(&removed.note());
 
         let kept = settle(spill, truncated);
 
@@ -546,6 +572,7 @@ impl Tool for RunCommand {
         .with("exit_code", code)
         .with("processes_stopped", processes_stopped)
         .with("isolation", contained);
+        outcome = removed.annotate(outcome);
         // Only complete captured output can establish an unchanged command
         // result. Later presentation notes and undo receipt ids are not output.
         if drained && !truncated {
@@ -1225,7 +1252,9 @@ struct Ends {
     head: Vec<u8>,
     tail: std::collections::VecDeque<u8>,
     seen: usize,
+    shown: usize,
     cap: usize,
+    filter: Option<cargo_output::Filter>,
     /// Shared with the other stream, so the file holds both in the order they
     /// arrived — which is the order a terminal would have shown them.
     spill: Option<std::sync::Arc<std::sync::Mutex<Spill>>>,
@@ -1247,8 +1276,45 @@ impl Ends {
         heard: std::sync::Arc<std::sync::atomic::AtomicU64>,
         started: std::time::Instant,
         activity: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+        filtering: bool,
     ) -> Self {
-        Self { head: Vec::new(), tail: Default::default(), seen: 0, cap, spill, heard, started, activity }
+        Self {
+            head: Vec::new(),
+            tail: Default::default(),
+            seen: 0,
+            shown: 0,
+            cap,
+            filter: filtering.then(cargo_output::Filter::default),
+            spill,
+            heard,
+            started,
+            activity,
+        }
+    }
+
+    fn keep(&mut self, bytes: &[u8]) {
+        self.shown = self.shown.saturating_add(bytes.len());
+        for &byte in bytes {
+            if self.head.len() < self.cap {
+                self.head.push(byte);
+            } else {
+                self.tail.push_back(byte);
+                if self.tail.len() > self.cap {
+                    self.tail.pop_front();
+                }
+            }
+        }
+    }
+
+    fn finish_filter(&mut self) {
+        if let Some(mut filter) = self.filter.take() {
+            filter.finish(|bytes| self.keep(bytes));
+            self.filter = Some(filter);
+        }
+    }
+
+    fn removed(&self) -> cargo_output::Removed {
+        self.filter.as_ref().map(|filter| filter.removed).unwrap_or_default()
     }
 
     async fn drain(&mut self, reader: &mut (impl tokio::io::AsyncRead + Unpin)) {
@@ -1271,15 +1337,11 @@ impl Ends {
                 );
             }
             self.heard.store(self.started.elapsed().as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
-            for &byte in &chunk[..n] {
-                if self.head.len() < self.cap {
-                    self.head.push(byte);
-                    continue;
-                }
-                self.tail.push_back(byte);
-                if self.tail.len() > self.cap {
-                    self.tail.pop_front();
-                }
+            if let Some(mut filter) = self.filter.take() {
+                filter.feed(&chunk[..n], |bytes| self.keep(bytes));
+                self.filter = Some(filter);
+            } else {
+                self.keep(&chunk[..n]);
             }
         }
     }
@@ -1292,7 +1354,7 @@ impl Ends {
             return head.into_owned();
         }
         let tail: Vec<u8> = self.tail.iter().copied().collect();
-        let dropped = self.seen - self.head.len() - self.tail.len();
+        let dropped = self.shown - self.head.len() - self.tail.len();
         let gap = match dropped {
             0 => String::new(),
             n => format!("\n[{n} bytes elided from the middle]\n"),

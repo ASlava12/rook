@@ -85,6 +85,11 @@ jobs:
       - name: release asset body recovery
         shell: bash
         run: python3 xtask/probes/asset-download-recovery/run.py --bin-dir target/debug --tmp-root "$RUNNER_TEMP" --output "$RUNNER_TEMP/rook-asset-download-recovery.json"
+      - name: Cargo output capture
+        shell: bash
+        run: |
+          rustfmt --edition 2024 --check xtask/probes/cargo-output/helper.rs
+          python3 xtask/probes/cargo-output/run.py --bin-dir target/debug --tmp-root "$RUNNER_TEMP" --output "$RUNNER_TEMP/rook-cargo-output.json"
       - name: bounded environment probes
         shell: bash
         run: python3 xtask/probes/environment-startup/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-environment-probes.json"

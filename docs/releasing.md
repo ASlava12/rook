@@ -172,6 +172,14 @@ same-version force update, exact resumed/restarted payloads, bounded attempts,
 refused invalid ranges/digests, complete installation-tree preservation on
 refusal and retained previous files. The provided pair must remain unchanged.
 
+When command-output presentation changes, run the
+[owned Cargo capture fixture](../xtask/probes/cargo-output/README.md) on the
+extracted host CLI/daemon pair. Require all twelve conditions, including both
+frontends, explicit raw output, four checked original captures, exact physical
+commands, preserved diagnostics/exit codes and workspace
+boundaries. The helper emits controlled compiler-shaped output; it does not
+establish real-model performance or arbitrary Cargo log compatibility.
+
 After the source gates and downloaded-draft checks pass, publish that same
 draft, without rebuilding or replacing its tested archives:
 
