@@ -59,6 +59,9 @@ jobs:
       - name: bounded environment probes
         shell: bash
         run: python3 xtask/probes/environment-startup/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-environment-probes.json"
+      - name: version capture and inherited pipes
+        shell: bash
+        run: python3 xtask/probes/version-capture/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-version-capture.json"
       - name: macOS process-group lifecycle
         if: matrix.os == 'macos-latest'
         run: cargo test --locked -p rook-contain process::tests -- --nocapture

@@ -34,5 +34,6 @@ Native subprocess tests exercise both streams, closed stdin, output larger than
 pipe capacity, a combined ceiling exceeded by individually smaller streams and
 a parent exiting before its pipe-holding descendant. The orphan is deliberate
 in that last fixture and belongs to the outer capture's process group. Owned CLI
-diagnostics compare the actual doctor and retain binary/workspace hashes. These
+diagnostics use the [tracked CLI fixture](../xtask/probes/version-capture/README.md)
+and retain binary/workspace hashes. These
 are process-contract checks, not model-quality or production-throughput results.

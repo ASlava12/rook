@@ -101,6 +101,12 @@ Require all eight flags on the extracted host CLI: exact maps, one execution per
 inventory entry, finished probes, observed parallel execution, the four-probe
 cap, no model calls and unchanged workspace/binary. Record timing as observation,
 without a speed threshold.
+When version output/deadline handling changes, run the
+[owned version-capture fixture](../xtask/probes/version-capture/README.md).
+Require all eight flags on the extracted host CLI, including the thirty-second
+inherited-pipe control, accepted stdout/stderr versions, rejected combined/
+individual output floods, exact calls, owned holder retirement and unchanged
+workspace/binary.
 When language-server startup changes, run the
 [owned daemon LSP probe](../xtask/probes/lsp-startup/README.md) against the extracted
 daemon as well. It checks shared-pool behavior through ordinary chat sockets.
