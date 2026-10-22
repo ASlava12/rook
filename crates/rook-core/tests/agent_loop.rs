@@ -7593,6 +7593,7 @@ async fn the_goal_check_is_shown_what_the_turn_did_and_not_only_what_it_left() {
     AgentLoop::new(&f.rook, earlier, session).run("what shall we do").await.unwrap();
 
     f.rook.set_goal(session, "say whether add sums, and do not change it").unwrap();
+    let before_stage = f.rook.store.get_session(session).unwrap().unwrap().next_seq;
     let provider = Arc::new(ScriptedProvider::new(vec![
         call(
             "write_file",
@@ -7618,7 +7619,27 @@ async fn the_goal_check_is_shown_what_the_turn_did_and_not_only_what_it_left() {
         .find(|m| m.contains("has just finished a turn"))
         .unwrap_or_else(|| panic!("the goal check never ran: {asked:?}"));
 
-    assert!(check.contains("what the turn did, in order"), "the history is offered as history: {check}");
+    assert!(check.contains("recorded excerpt of the turn"), "the history is offered as an excerpt: {check}");
+    assert!(check.contains("and do not change it"), "the original goal constraint is retained: {check}");
+    let coverage_record = check
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|record| record["rook_source"]["kind"] == "history_coverage")
+        .unwrap_or_else(|| panic!("the excerpt must report its coverage: {check}"));
+    assert_eq!(coverage_record["rook_source"]["authority"], "data");
+    let coverage: serde_json::Value =
+        serde_json::from_str(coverage_record["rook_source"]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(coverage["scope"], "saved_stage_excerpt");
+    assert_eq!(coverage["session"], rook_store::format_session_id(session));
+    let from = coverage["from"].as_u64().unwrap();
+    let through = coverage["through_exclusive"].as_u64().unwrap();
+    assert!(from >= before_stage && from < through, "the captured range is the current stage: {coverage}");
+    assert!(through <= f.rook.store.get_session(session).unwrap().unwrap().next_seq);
+    assert!(coverage["retained_entries"].as_u64().unwrap() > 0);
+    assert!(coverage["retained_entries"].as_u64().unwrap() <= 128);
+    assert!(coverage["scanned_events"].as_u64().unwrap() <= 1024);
+    assert!(coverage["issues"].as_array().unwrap().is_empty());
+    assert!(coverage["unread_before_exclusive"].is_null(), "this small stage fits in the excerpt");
     assert!(check.contains("tool-call"), "and it is the turn's own record: {check}");
     assert!(check.contains("write_file"), "with the call that was made: {check}");
     // The argument, which is the whole point: `a + b` is on disk either way, and
