@@ -151,6 +151,11 @@ the archive for this machine, checks it against the SHA-256 the release lists
 before anything is written, and replaces `rook`, `rookd` and the built-in
 skills beside the running binary.
 
+An interrupted release body can resume its missing range, with at most three
+attempts within one ten-minute fetch budget. A server ignoring Range triggers a
+full restart; size and SHA256 checks still precede installation. See the
+[download recovery contract](docs/asset-download-recovery.md) for limits.
+
 What it replaced is kept beside what replaced it — `rook.previous`,
 `rookd.previous`, `skills.previous` — and `rook update --rollback` puts it
 back, asking the network nothing, because the version to go back to is already

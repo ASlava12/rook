@@ -151,6 +151,13 @@ usage. A third chat must retain its earlier confirmed action while refusing an
 unconfirmed forced final answer before writing the output artifact. Require all
 twelve check flags.
 
+When release-asset transport changes, run the
+[owned CLI recovery fixture](../xtask/probes/asset-download-recovery/README.md)
+on the extracted host pair. Require all twelve conditions, including ordinary
+same-version force update, exact resumed/restarted payloads, bounded attempts,
+refused invalid ranges/digests, complete installation-tree preservation on
+refusal and retained previous files. The provided pair must remain unchanged.
+
 After the source gates and downloaded-draft checks pass, publish that same
 draft, without rebuilding or replacing its tested archives:
 
