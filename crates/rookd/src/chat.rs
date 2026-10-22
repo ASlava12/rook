@@ -2300,6 +2300,10 @@ fn as_event(progress: Progress<'_>, workspace: &std::path::Path) -> Option<ChatE
             name: "model".to_string(),
             said: rook_core::calls::waiting(secs, patience),
         },
+        Progress::ProviderWait { wait } => ChatEvent::ToolWorking {
+            name: "model".into(),
+            said: wait.map_or("provider wait ended".into(), |wait| wait.describe()),
+        },
         Progress::Context { used, size } => ChatEvent::Context { used, size },
         Progress::Spent { input, output, cached } => {
             ChatEvent::Spent { input_tokens: input, output_tokens: output, cached_tokens: cached }

@@ -33,6 +33,7 @@ impl rook_core::agent::observe::Observer for Observation {
                 }
                 Event::ModelQueued { session }
                 | Event::ModelStarted { session }
+                | Event::ModelRetry { session, .. }
                 | Event::ToolOutput { session }
                 | Event::CompactionStarted { session, .. }
                 | Event::CompactionEnded { session, .. }
@@ -41,6 +42,7 @@ impl rook_core::agent::observe::Observer for Observation {
                         && *live
                     {
                         match &event {
+                            Event::ModelRetry { wait, delay, .. } => tracker.provider_wait(*wait, *delay),
                             Event::ModelQueued { .. } => tracker.observe_phase(Stage::Queued),
                             Event::ToolOutput { .. } => tracker.observe_phase(Stage::Tool),
                             Event::Progress { workspace, progress, .. } => {
@@ -61,6 +63,10 @@ impl rook_core::agent::observe::Observer for Observation {
             }
         }
         let stage = match event {
+            Event::ModelRetry { session, wait, delay } if session == self.session => {
+                self.tracker.lock().unwrap_or_else(|e| e.into_inner()).provider_wait(wait, delay);
+                None
+            }
             Event::ModelQueued { session } if session == self.session => Some(Stage::Queued),
             Event::ModelStarted { session } if session == self.session => Some(Stage::Model),
             Event::ToolOutput { .. } => Some(Stage::Tool),
@@ -172,6 +178,10 @@ impl Observation {
 
     pub(super) fn finish(&self) {
         self.running.store(false, std::sync::atomic::Ordering::Release);
+        self.tracker.lock().unwrap_or_else(|e| e.into_inner()).clear_provider_wait();
+        for (tracker, _) in self.children.lock().unwrap_or_else(|e| e.into_inner()).values_mut() {
+            tracker.clear_provider_wait();
+        }
         self.save(&self.snapshot(false));
     }
 
@@ -442,11 +452,31 @@ mod child_observation_tests {
         assert_eq!(snapshot.owner_live, Some(true));
         assert_eq!(snapshot.stage, rook_proto::activity::Stage::Model);
         assert!(!serde_json::to_string(&snapshot).unwrap().contains("PRIVATE_TASK"));
+        let wait = rook_proto::activity::ProviderWait { until_ms: 45000, next_attempt: 2, status: Some(429) };
+        Observer::observe(
+            &*observation,
+            Event::ModelRetry { session: child, wait, delay: std::time::Duration::from_secs(45) },
+        );
+        assert_eq!(observation.for_session(child, true).unwrap().provider_wait, Some(wait));
+        assert!(observation.snapshot(true).provider_wait.is_none(), "child retry cannot replace root status");
+        Observer::observe(&*observation, Event::ModelStarted { session: root });
+        assert_eq!(observation.for_session(child, true).unwrap().provider_wait, Some(wait));
         Observer::observe(&*observation, Event::ChildEnded { child, result: None });
         assert_eq!(observation.for_session(child, true).unwrap().owner_live, Some(false));
+        assert!(observation.for_session(child, true).unwrap().provider_wait.is_none());
         Observer::observe(&*observation, Event::ChildStarted { parent: root, child, task: "task" });
+        Observer::observe(
+            &*observation,
+            Event::ModelRetry { session: child, wait, delay: std::time::Duration::from_secs(45) },
+        );
+        Observer::observe(
+            &*observation,
+            Event::ModelRetry { session: root, wait, delay: std::time::Duration::from_secs(45) },
+        );
         observation.finish();
         assert_eq!(observation.for_session(child, true).unwrap().owner_live, Some(false));
+        assert!(observation.for_session(child, true).unwrap().provider_wait.is_none());
+        assert!(observation.snapshot(false).provider_wait.is_none());
     }
     #[test]
     fn child_projection_reaches_its_bound_and_prunes_finished_observations_first() {

@@ -445,6 +445,9 @@ pub enum Progress<'a> {
         secs: u64,
         patience: u64,
     },
+    ProviderWait {
+        wait: Option<rook_proto::activity::ProviderWait>,
+    },
 }
 
 /// How long a wait for the model may go unmentioned. An ordinary answer begins
@@ -557,6 +560,7 @@ pub type FollowUpModel<'a> =
     dyn Fn() -> Result<(std::sync::Arc<dyn Provider>, rook_llm::Effort)> + Send + Sync + 'a;
 
 pub struct AgentLoop<'a> {
+    retry_status: tokio::sync::watch::Sender<Option<rook_proto::activity::ProviderWait>>,
     execution: Option<std::sync::Weak<crate::execution::Journal>>,
     reserved_execution: Option<std::sync::Arc<crate::execution::Journal>>,
     /// Socket admission receipt for this top-level prompt only. Follow-ups
@@ -700,6 +704,7 @@ impl<'a> AgentLoop<'a> {
             crate::model_attempt::observer(self.rook, self.session, self.vault.clone(), purpose),
             self.observer.clone(),
             self.session,
+            self.retry_status.clone(),
         )
     }
 
@@ -774,6 +779,7 @@ impl<'a> AgentLoop<'a> {
         let (routing, routing_invalid) = routing::settings(provider.as_ref());
         Self {
             execution: None,
+            retry_status: tokio::sync::watch::channel(None).0,
             reserved_execution: None,
             submission_key: None,
             observer: None,
@@ -943,6 +949,8 @@ impl<'a> AgentLoop<'a> {
         let mut changed = rook.extension_changed.subscribe();
         let mut cursor = crate::extension_ui::live::Cursor::default();
         let observer = self.observer.clone();
+        let mut retry_status = self.retry_status.subscribe();
+        let _retry_status = observe::RetryStatus(self.retry_status.clone());
         let progress = std::sync::Mutex::new(on_progress);
         let emit = |cursor: &mut crate::extension_ui::live::Cursor, initial: bool| match cursor
             .advance(rook, session)
@@ -966,7 +974,13 @@ impl<'a> AgentLoop<'a> {
             Err(why) => tracing::warn!("extension display refresh failed: {why}"),
         };
         emit(&mut cursor, true);
+        let retry_view = self.retry_status.clone();
         let mut relay = |p: Progress<'_>| {
+            let p = if matches!(p, Progress::Waiting { .. }) && retry_view.borrow().is_some() {
+                Progress::ProviderWait { wait: *retry_view.borrow() }
+            } else {
+                p
+            };
             if let Some(observer) = &observer {
                 observer.observe(observe::Event::Progress {
                     session,
@@ -986,6 +1000,12 @@ impl<'a> AgentLoop<'a> {
                 notification = changed.changed() => {
                     if notification.is_err() { return running.await; }
                     emit(&mut cursor, false);
+                }
+                notification = retry_status.changed() => {
+                    if notification.is_ok() {
+                        let wait = *retry_status.borrow_and_update();
+                        (progress.lock().unwrap_or_else(|e| e.into_inner()))(Progress::ProviderWait { wait });
+                    }
                 }
             }
         }

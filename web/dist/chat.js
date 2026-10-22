@@ -2,6 +2,7 @@
 // a turn that can be stopped, and the agent's questions answered in place.
 import { $, el, api, ago, md, state, nav, notify, askToNotify, jsonWithin } from './lib.js';
 import { historyPanel } from './history.js';
+import { activityPhase } from './activity.js';
 import { savedToolCard } from './tool-card.js';
 import { branchPanel } from './branches.js';
 import { backgroundPanel } from './background.js';
@@ -350,7 +351,7 @@ export function connect() {
       case 'reasoning': say('think', e.text); break;
       case 'activity': {
         const a = e.state;
-        const phase = a.retry_at != null && a.stage === 'queued' ? `waiting to retry at ${new Date(Number(a.retry_at) * 1000).toLocaleString()}` : a.stage;
+        const phase = activityPhase(a);
         const text = `${a.session}: ${phase}${a.operation ? ` · ${a.operation}` : ''}; no observed progress for ${a.idle_secs}s (notice after ${a.threshold_secs}s)`;
         say(a.stalled ? 'err' : 'stat', text);
         const notice = `${a.session}:${a.generation}:${a.last_progress_at}:${a.notifications}`;

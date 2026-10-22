@@ -3,6 +3,7 @@
 import { $, el, api, ago, state, nav } from './lib.js';
 import { continueIn, quoteIntoDraft, branchFromEvent } from './chat.js';
 import { historyPanel } from './history.js';
+import { activityPhase } from './activity.js';
 import { branchPanel } from './branches.js';
 import { backgroundPanel } from './background.js';
 import { worktreePanel } from './worktrees.js';
@@ -87,7 +88,7 @@ export async function renderSessions() {
         const report = await api(`/api/sessions/${session}/diagnostics?logs=false`);
         if (!activity.isConnected || state.session !== session) return;
         const a = report.activity;
-        const phase = a?.retry_at != null && a.stage === 'queued' ? `waiting to retry at ${new Date(Number(a.retry_at) * 1000).toLocaleString()}` : a?.stage;
+        const phase = activityPhase(a);
         activity.textContent = a ? `${a.session}: ${a.owner_live === null ? 'saved observation; owner unknown' : a.owner_live ? 'running' : 'owner stopped'}; ${phase}${a.operation ? ` · ${a.operation}` : ''}; no observed progress for ${a.idle_secs}s; last progress ${new Date(a.last_progress_at * 1000).toISOString()}${a.stalled ? '; inactivity threshold reached' : ''}` : 'No activity observation has been recorded for this session.';
         if (report.runtime) activity.textContent += `\nDaemon timings: ${report.runtime.aggregates.map(row => `${row.operation}/${row.metric}: max ${row.stats.max_ms} ms, slow ${row.stats.slow}`).join('; ')}. Observations may include waits; they do not establish a cause.`;
       } catch (error) { if (activity.isConnected) activity.textContent = String(error.error || error); }

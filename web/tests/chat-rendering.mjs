@@ -113,6 +113,27 @@ test('scheduled retries show their deadline without reporting a model stall or n
   document.hidden = false;
 });
 
+test('provider backoff is visible in live chat without a false inactivity notification', () => {
+  const notices = [];
+  globalThis.Notification = class {
+    static permission = 'granted';
+    constructor(title) { notices.push(title); }
+  };
+  window.Notification = globalThis.Notification;
+  document.hidden = true;
+  const socket = start();
+  socket.receive({ type: 'activity', state: {
+    session: 'provider-case', generation: 'retry', stage: 'model',
+    provider_wait: { until_ms: Date.now() + 45000, next_attempt: 2, status: 429 },
+    idle_secs: 40, threshold_secs: 30, last_progress_at: 1,
+    notifications: 0, stalled: false, owner_live: true
+  } });
+  assert.match(stream.textContent, /provider-case: provider retry in 45s after HTTP 429 \(attempt 2\)/);
+  assert.match(stream.textContent, /no observed progress for 40s/);
+  assert.equal(notices.length, 0);
+  document.hidden = false;
+});
+
 test('Done before a pending frame preserves a complete split fence without a duplicate or source attribute', () => {
   const socket = start(), reply = 'Paragraph\n\n```sql\nSELECT "🦉";\n```\n\nFinal';
   for (const part of reply.split('')) text(socket, part);

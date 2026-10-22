@@ -4735,6 +4735,9 @@ impl App {
                         // This is that number, from the turn that will enforce
                         // it.
                         Progress::Waiting { patience, .. } => TurnEvent::Waiting(patience),
+                        Progress::ProviderWait { wait } => TurnEvent::Working(
+                            wait.map_or("provider wait ended".into(), |wait| wait.describe()),
+                        ),
                         Progress::Heard { text, receipt } => {
                             TurnEvent::Heard(text.to_string(), receipt.cloned())
                         }

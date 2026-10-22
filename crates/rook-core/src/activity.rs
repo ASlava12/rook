@@ -16,6 +16,7 @@ pub struct Tracker {
     active_stage: Stage,
     waiting: bool,
     retry_due: Option<Instant>,
+    provider_due: Option<Instant>,
 }
 
 impl Tracker {
@@ -29,6 +30,7 @@ impl Tracker {
                 stage: Stage::Queued,
                 operation: None,
                 retry_at: None,
+                provider_wait: None,
                 last_progress_at: now,
                 observed_at: now,
                 idle_secs: 0,
@@ -41,10 +43,14 @@ impl Tracker {
             active_stage: Stage::Queued,
             waiting: false,
             retry_due: None,
+            provider_due: None,
         }
     }
 
     fn progressed(&mut self, stage: Stage) {
+        if matches!(stage, Stage::Model | Stage::Finished) {
+            self.clear_provider_wait();
+        }
         self.state.retry_at = None;
         self.retry_due = None;
         self.last_progress = Instant::now();
@@ -60,12 +66,16 @@ impl Tracker {
     /// Typed physical-request and pipe observations supply stages independently
     /// of when an attached view receives its display events.
     pub fn observe_phase(&mut self, stage: Stage) {
+        if stage == Stage::Queued {
+            self.clear_provider_wait();
+        }
         self.progressed(stage);
     }
 
     /// Scheduling is status, not fresh progress. Repeated observation of the
     /// same deadline must not postpone overdue notices or reset idle time.
     pub fn retry_wait(&mut self, at: u64) {
+        self.clear_provider_wait();
         if self.state.retry_at == Some(at) {
             return;
         }
@@ -82,6 +92,21 @@ impl Tracker {
         let changed = self.state.retry_at.take().is_some();
         self.retry_due = None;
         changed
+    }
+
+    pub fn provider_wait(&mut self, wait: rook_proto::activity::ProviderWait, delay: std::time::Duration) {
+        if self.state.provider_wait == Some(wait) {
+            return;
+        }
+        self.clear_retry();
+        self.provider_due = Instant::now().checked_add(delay);
+        self.state.provider_wait = Some(wait);
+        self.state.stalled = false;
+    }
+
+    pub fn clear_provider_wait(&mut self) {
+        self.provider_due = None;
+        self.state.provider_wait = None;
     }
 
     /// Periodic waiting lines, elapsed-time tool updates and control receipts
@@ -145,6 +170,7 @@ impl Tracker {
         }
         let unexpected_idle = self
             .retry_due
+            .or(self.provider_due)
             .map_or(self.state.idle_secs, |due| Instant::now().saturating_duration_since(due).as_secs());
         if self.state.stage != Stage::Finished
             && self.state.threshold_secs > 0
@@ -222,6 +248,48 @@ pub(crate) fn load(store: &Store, session: u128) -> Result<Option<Snapshot>> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[tokio::test(start_paused = true)]
+    async fn provider_backoff_is_status_without_progress_and_overdue_waits_still_notify() {
+        let mut tracker = Tracker::new(1, 30);
+        tracker.observe_phase(Stage::Model);
+        let wait = rook_proto::activity::ProviderWait { until_ms: 45000, next_attempt: 2, status: Some(429) };
+        let before = tracker.snapshot(true).last_progress_at;
+        tracker.provider_wait(wait, Duration::from_secs(45));
+        tokio::time::advance(Duration::from_secs(40)).await;
+        assert!(!tracker.check(false, false));
+        assert_eq!(tracker.snapshot(true).last_progress_at, before);
+        assert_eq!(tracker.snapshot(true).idle_secs, 40);
+        assert_eq!(tracker.snapshot(true).retry_at, None, "provider and scheduler deadlines remain distinct");
+        tracker.provider_wait(wait, Duration::from_secs(45));
+        tokio::time::advance(Duration::from_secs(36)).await;
+        assert!(tracker.check(false, false), "same wait cannot postpone an overdue notice");
+        assert_eq!(tracker.snapshot(true).notifications, 1);
+        tracker.observe_phase(Stage::Model);
+        assert!(tracker.snapshot(true).provider_wait.is_none());
+        assert!(!tracker.snapshot(true).stalled);
+        tokio::time::advance(Duration::from_secs(31)).await;
+        assert!(tracker.check(false, false), "new physical request gets ordinary no-output monitoring");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn concurrent_tool_progress_keeps_the_known_provider_deadline_and_owner_end_clears_it() {
+        let mut tracker = Tracker::new(1, 30);
+        tracker.observe_phase(Stage::Model);
+        let wait =
+            rook_proto::activity::ProviderWait { until_ms: 120000, next_attempt: 2, status: Some(503) };
+        tracker.provider_wait(wait, Duration::from_secs(120));
+        tracker.observe_phase(Stage::Tool);
+        tokio::time::advance(Duration::from_secs(40)).await;
+        assert!(!tracker.check(false, false));
+        assert_eq!(tracker.snapshot(true).provider_wait, Some(wait));
+        tracker.clear_provider_wait();
+        assert_eq!(tracker.snapshot(true).idle_secs, 40, "clearing status never invents work");
+        assert!(tracker.check(false, false));
+        tracker.provider_wait(wait, Duration::from_secs(120));
+        tracker.retry_wait(1800);
+        assert!(tracker.snapshot(true).provider_wait.is_none());
+    }
 
     #[tokio::test(start_paused = true)]
     async fn scheduled_retry_waits_preserve_idle_evidence_and_only_notice_unexpected_delay() {

@@ -313,6 +313,9 @@ impl Watching {
             Progress::Waiting { secs, patience } => {
                 self.calls.working(&rook_core::calls::waiting(secs, patience))
             }
+            Progress::ProviderWait { wait } => {
+                self.calls.working(&wait.map_or("provider wait ended".into(), |wait| wait.describe()))
+            }
             _ => String::new(),
         };
         if written.is_empty() {

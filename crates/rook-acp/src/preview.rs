@@ -391,7 +391,10 @@ fn child_stop(reason: &str) -> &str {
 impl Observer for Preview {
     fn observe(&self, event: Event<'_>) {
         match event {
-            Event::ModelQueued { .. } | Event::ModelStarted { .. } | Event::ToolOutput { .. } => {}
+            Event::ModelQueued { .. }
+            | Event::ModelStarted { .. }
+            | Event::ModelRetry { .. }
+            | Event::ToolOutput { .. } => {}
             Event::ChildStarted { parent, child, task } => self.announce(parent, child, task, true),
             Event::ChildEnded { child, result } => {
                 let mut children = self.children.lock().unwrap_or_else(|e| e.into_inner());

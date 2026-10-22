@@ -987,6 +987,11 @@ async fn prompt(
                     &format!("  {}\n", rook_core::calls::waiting(secs, patience)),
                     &part(1),
                 ),
+                Progress::ProviderWait { wait } => protocol::agent_thought_chunk(
+                    &session_id,
+                    &format!("  {}\n", wait.map_or("provider wait ended".into(), |wait| wait.describe())),
+                    &part(1),
+                ),
                 Progress::Delegating { at, doing } => protocol::agent_thought_chunk(
                     &session_id,
                     &format!("  {}\n", rook_core::calls::delegating(at, doing)),

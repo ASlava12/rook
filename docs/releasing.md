@@ -81,7 +81,11 @@ Require all eight functional flags and retain the physical request timings.
 Arrival spread is observational, not a statistical pass gate; deterministic
 injected-sampler tests establish jitter's wait bounds. Use the extracted CLI and
 preserve its SHA256 before and after this probe.
-When Retry-After interpretation changes, run the
+  When provider retry observations change, run the
+  [owned provider-wait probe](../xtask/probes/provider-wait/README.md).
+  Require all eight flags in both main and auxiliary modes on the extracted host CLI and
+  daemon; retain the actual request times, status snapshots and binary hashes.
+  When Retry-After interpretation changes, run the
 [owned HTTP-date probe](../xtask/probes/retry-after-date/README.md) against the
 extracted CLI. Require all eight flags, including a physical retry no earlier
 than the specified date, numeric-delay preservation and bounded invalid/distant

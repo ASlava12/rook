@@ -1,4 +1,5 @@
 import { el, api } from './lib.js';
+import { activityPhase } from './activity.js';
 
 // Read-only navigation never changes chat state or the current draft.
 export function backgroundPanel(session) {
@@ -20,7 +21,7 @@ export function backgroundPanel(session) {
       rows.replaceChildren(...nodes.map((node, index) => {
         const entry = page.entries.find(e => e.session === node.id);
         const activity = entry?.activity;
-        const phase = activity?.retry_at != null && activity.stage === 'queued' ? `waiting to retry at ${new Date(Number(activity.retry_at) * 1000).toLocaleString()}` : activity?.stage;
+        const phase = activityPhase(activity);
         const owner = entry?.owner_live == null ? 'Executor unverified · saved state'
           : entry.owner_live ? 'Live executor' : 'No observed executor';
         const summary = owner + (activity ? ` · ${phase} · idle ${activity.idle_secs}s${activity.stalled ? ' · stalled' : ''}` : '')
