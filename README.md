@@ -1,7 +1,7 @@
 # Rook
 
-[Rook 0.21.5](docs/releases/0.21.5.md): editor reads and writes follow independent
-ACP capabilities; credit-limited responses can retry once with a smaller allowance.
+[Rook 0.21.6](docs/releases/0.21.6.md): retries accept HTTP-date advice within the
+existing ceiling; checker history reports its bounds, omissions and paths to older evidence.
 
 [Domain network policy with OS containment](docs/domain-network-policy.md).
 
