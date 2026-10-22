@@ -1,7 +1,7 @@
 # Rook
 
-[Rook 0.21.11](docs/releases/0.21.11.md): LSP discovery separates probe outcomes from cleanup and retires owned children;
-skill source identity stays exact through caching, installation and updates.
+[Rook 0.21.12](docs/releases/0.21.12.md): automatic LSP discovery checks workspace languages before launching probes;
+support reports bound saved metadata reads and preserve readable neighboring events.
 
 [Domain network policy with OS containment](docs/domain-network-policy.md).
 
