@@ -25,11 +25,27 @@ use async_trait::async_trait;
 
 use crate::{LlmError, ModelInfo, Provider, Request, Response, ResponseStream, Result};
 
-/// Four tries over about seven seconds. Long enough to outlast the burst a rate
+/// Four tries with at most 8.75 seconds of ordinary backoff. Long enough to outlast the burst a rate
 /// limiter is smoothing, short enough that someone watching a turn does not
 /// conclude it has hung.
 const ATTEMPTS: u32 = 4;
 const FIRST_WAIT: Duration = Duration::from_secs(1);
+
+fn random_jitter() -> u32 {
+    fastrand::u32(..)
+}
+
+/// Positive jitter keeps concurrent callers from hitting the same rate window
+/// together. Never undercut a provider's minimum or add time above 120 seconds.
+/// A custom provider can supply a larger minimum; retain it without extra delay.
+fn jittered_wait(floor: Duration, sample: u32) -> Duration {
+    let headroom = Duration::from_secs(crate::MOST_PATIENCE_SECS).saturating_sub(floor);
+    let band = (floor / 4).min(headroom);
+    // The band is at most 30 seconds, so this product fits u128 and its
+    // scaled nanoseconds fit u64. Integer scaling preserves both endpoints.
+    let nanos = band.as_nanos() * u128::from(sample) / u128::from(u32::MAX);
+    floor.saturating_add(Duration::from_nanos(nanos as u64))
+}
 
 /// Statuses that mean *later*.
 ///
@@ -204,6 +220,9 @@ fn names_the_output(error: &LlmError) -> bool {
 #[derive(Clone)]
 pub struct Retrying {
     inner: std::sync::Arc<dyn Provider>,
+    // A sampling seam makes the actual retry paths testable without relying
+    // on statistical spread or changing a process-wide random seed.
+    sample_jitter: fn() -> u32,
     /// Set by the first refusal. A model name is what decides whether the field
     /// is sent, and a gateway serving something else under that name is exactly
     /// where that guess is wrong — so the endpoint's own answer overrides it,
@@ -220,6 +239,7 @@ impl Retrying {
     pub fn new(inner: Box<dyn Provider>) -> Self {
         Self {
             inner: inner.into(),
+            sample_jitter: random_jitter,
             effort_refused: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             output_ceiling: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
@@ -281,12 +301,13 @@ impl Retrying {
         if attempt >= ATTEMPTS {
             return false;
         }
-        let doubling = FIRST_WAIT * 2u32.pow(attempt - 1);
-        let wait = match error {
+        let doubling = FIRST_WAIT * 2u32.pow(attempt.saturating_sub(1));
+        let floor = match error {
             LlmError::Status { retry_after: Some(asked), .. } => doubling.max(*asked),
             _ => doubling,
         };
-        tracing::debug!(provider = self.inner.id(), "{error}; trying again in {}s", wait.as_secs());
+        let wait = jittered_wait(floor, (self.sample_jitter)());
+        tracing::debug!(provider = self.inner.id(), "{error}; trying again in {:.3}s", wait.as_secs_f64());
         tokio::time::sleep(wait).await;
         true
     }
@@ -508,5 +529,186 @@ impl Retrying {
                 answer => return answer,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::StreamExt;
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+
+    #[test]
+    fn positive_jitter_reaches_both_endpoints_without_undercutting_backoff() {
+        for seconds in [1, 2, 4, 30] {
+            let floor = Duration::from_secs(seconds);
+            let ceiling = floor + floor / 4;
+            assert_eq!(jittered_wait(floor, 0), floor);
+            assert_eq!(jittered_wait(floor, u32::MAX), ceiling);
+            let middle = jittered_wait(floor, u32::MAX / 2);
+            assert!(middle > floor && middle < ceiling);
+        }
+        assert_eq!(jittered_wait(Duration::ZERO, u32::MAX), Duration::ZERO);
+        assert_eq!(jittered_wait(Duration::from_nanos(1), u32::MAX), Duration::from_nanos(1));
+    }
+
+    #[test]
+    fn jitter_never_crosses_the_advice_ceiling_or_shortens_a_larger_custom_minimum() {
+        let cap = Duration::from_secs(120);
+        let near = cap - Duration::from_millis(100);
+        assert_eq!(jittered_wait(near, 0), near);
+        assert_eq!(jittered_wait(near, u32::MAX), cap);
+        for floor in [cap, cap + Duration::from_nanos(1), Duration::MAX] {
+            for sample in [0, 1, u32::MAX / 2, u32::MAX] {
+                assert_eq!(jittered_wait(floor, sample), floor);
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum Mode {
+        Complete,
+        StreamOpen,
+        FirstDelta,
+        Partial,
+        Completion,
+        Terminal,
+    }
+
+    struct Timed {
+        mode: Mode,
+        calls: Arc<Mutex<Vec<Instant>>>,
+    }
+
+    impl Timed {
+        fn called(&self) -> usize {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push(Instant::now());
+            calls.len()
+        }
+
+        fn refusal(&self) -> LlmError {
+            LlmError::Status {
+                status: if matches!(self.mode, Mode::Terminal) { 400 } else { 503 },
+                body: "owned refusal".into(),
+                retry_after: None,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for Timed {
+        fn id(&self) -> &str {
+            "owned-jitter"
+        }
+        fn context_window(&self) -> usize {
+            8192
+        }
+
+        async fn complete(&self, _: Request) -> Result<Response> {
+            if self.called() == 1 {
+                return Err(self.refusal());
+            }
+            Ok(Response {
+                message: crate::Message::assistant("done"),
+                stop_reason: crate::StopReason::EndTurn,
+                usage: crate::Usage::default(),
+                model: "owned".into(),
+            })
+        }
+
+        async fn stream(&self, _: Request) -> Result<ResponseStream> {
+            if self.called() == 1 {
+                if matches!(self.mode, Mode::StreamOpen | Mode::Terminal) {
+                    return Err(self.refusal());
+                }
+                let mut deltas = Vec::new();
+                if matches!(self.mode, Mode::Partial) {
+                    deltas.push(Ok(crate::Delta::Text("partial".into())));
+                }
+                if matches!(self.mode, Mode::Completion) {
+                    deltas.push(Ok(crate::Delta::ResponseMetadata {
+                        usage_reported: false,
+                        completion_confirmed: true,
+                    }));
+                }
+                deltas.push(Err(self.refusal()));
+                return Ok(Box::pin(futures_util::stream::iter(deltas)));
+            }
+            Ok(Box::pin(futures_util::stream::iter([
+                Ok(crate::Delta::Text("done".into())),
+                Ok(crate::Delta::Done {
+                    stop_reason: crate::StopReason::EndTurn,
+                    usage: crate::Usage::default(),
+                    model: "owned".into(),
+                }),
+            ])))
+        }
+    }
+
+    fn fixture(mode: Mode) -> (Retrying, Arc<Mutex<Vec<Instant>>>) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut retry = Retrying::new(Box::new(Timed { mode, calls: calls.clone() }));
+        retry.sample_jitter = || u32::MAX;
+        (retry, calls)
+    }
+
+    #[tokio::test]
+    async fn real_retry_paths_apply_injected_jitter_before_the_next_physical_call() {
+        for mode in [Mode::Complete, Mode::StreamOpen, Mode::FirstDelta] {
+            let (retry, calls) = fixture(mode);
+            if matches!(mode, Mode::Complete) {
+                assert_eq!(retry.complete(Request::new(Vec::new())).await.unwrap().message.content, "done");
+            } else {
+                let mut stream = retry.stream(Request::new(Vec::new())).await.unwrap();
+                let mut text = String::new();
+                while let Some(delta) = stream.next().await {
+                    if let crate::Delta::Text(value) = delta.unwrap() {
+                        text.push_str(&value);
+                    }
+                }
+                assert_eq!(text, "done");
+            }
+            let calls = calls.lock().unwrap();
+            assert_eq!(calls.len(), 2, "the actual provider must be refused and retried");
+            assert!(
+                calls[1].duration_since(calls[0]) >= Duration::from_millis(1250),
+                "the first 1-second backoff must include its injected 250 ms jitter"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_errors_partial_answers_and_completion_evidence_never_sample_or_replay() {
+        for mode in [Mode::Terminal, Mode::Partial, Mode::Completion] {
+            let (mut retry, calls) = fixture(mode);
+            retry.sample_jitter = || panic!("an ineligible retry must not sample randomness");
+            if matches!(mode, Mode::Terminal) {
+                assert!(retry.complete(Request::new(Vec::new())).await.is_err());
+            } else {
+                let mut stream = retry.stream(Request::new(Vec::new())).await.unwrap();
+                let first = stream.next().await.unwrap().unwrap();
+                match mode {
+                    Mode::Partial => assert!(matches!(first, crate::Delta::Text(text) if text == "partial")),
+                    Mode::Completion => assert!(matches!(
+                        first,
+                        crate::Delta::ResponseMetadata { completion_confirmed: true, .. }
+                    )),
+                    _ => unreachable!(),
+                }
+                assert!(matches!(stream.next().await, Some(Err(LlmError::Status { status: 503, .. }))));
+                assert!(stream.next().await.is_none());
+            }
+            assert_eq!(calls.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn exhausted_attempts_do_not_add_a_wait_or_sample() {
+        let (mut retry, _) = fixture(Mode::Complete);
+        retry.sample_jitter = || panic!("exhaustion must not sample randomness");
+        let error = LlmError::Status { status: 503, body: "owned".into(), retry_after: None };
+        assert!(!retry.wait_before(ATTEMPTS, &error).await);
     }
 }

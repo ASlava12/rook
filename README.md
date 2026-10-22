@@ -862,6 +862,13 @@ or an HTTP date. Both forms keep the existing 120-second ceiling. Past dates
 add no delay beyond ordinary backoff; invalid or more distant values do not
 override that backoff. Date interpretation uses the local receipt clock.
 
+Transient retries keep four attempts with ordinary 1/2/4-second minimum waits.
+Each eligible retry adds a fresh random delay of up to 25%, bounded so jitter
+cannot raise a wait above 120 seconds. Admitted provider advice remains a minimum;
+a larger minimum supplied by a custom provider is retained without extra delay.
+Complete requests, stream opening and errors before response content share this
+policy. Partial answers and completion evidence are never replayed automatically.
+
 The Responses transport is selected explicitly with `api = "responses"` (alias
 `"openai-responses"`) on a named model/endpoint, or `responses/gpt-6-astra`
 shorthand. The shorthand uses `OPENAI_API_KEY` and `OPENAI_BASE_URL`, like

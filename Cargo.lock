@@ -2864,6 +2864,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "base64",
+ "fastrand",
  "futures-core",
  "futures-util",
  "httpdate",
