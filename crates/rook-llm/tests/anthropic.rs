@@ -742,3 +742,97 @@ async fn tool_images_stay_inside_results_and_parallel_replies_stay_together() {
     assert_eq!(results[0]["content"][1]["source"]["data"], "aW1hZ2U=");
     assert_eq!(results[1]["content"], "ready");
 }
+
+fn image_only_fixture(data: &str) -> rook_llm::Image {
+    rook_llm::Image { mime_type: "image/png".into(), data: data.into(), width: 1, height: 1 }
+}
+
+#[tokio::test]
+async fn image_only_user_blocks_keep_both_cache_ttls_without_blank_text() {
+    for text in ["", " \t\r\n", "\u{2003}\u{a0}"] {
+        for ttl in [rook_llm::CacheTtl::FiveMinutes, rook_llm::CacheTtl::OneHour] {
+            for cache in [false, true] {
+                let (url, seen) = serve("200 OK", "application/json", DONE).await;
+                let mut message = Message::user(text);
+                if cache {
+                    message = message.cacheable();
+                }
+                message.images = vec![image_only_fixture("aW1hZ2U="), image_only_fixture("b3RoZXI=")];
+                let mut request = Request::new(vec![message]);
+                request.cache_ttl = ttl;
+                provider(url).complete(request).await.unwrap();
+                let body = seen.lock().unwrap().clone().unwrap();
+                let blocks = body["messages"][0]["content"].as_array().unwrap();
+                assert_eq!(blocks.len(), 2, "image-only turns need only their image blocks: {body}");
+                assert!(blocks.iter().all(|block| block["type"] == "image"));
+                assert_eq!(blocks[0]["source"]["data"], "aW1hZ2U=");
+                assert_eq!(blocks[1]["source"]["data"], "b3RoZXI=");
+                assert!(blocks[0].get("cache_control").is_none());
+                if cache {
+                    assert_eq!(blocks[1]["cache_control"]["type"], "ephemeral");
+                    match ttl {
+                        rook_llm::CacheTtl::FiveMinutes => {
+                            assert!(blocks[1]["cache_control"].get("ttl").is_none())
+                        }
+                        rook_llm::CacheTtl::OneHour => assert_eq!(blocks[1]["cache_control"]["ttl"], "1h"),
+                    }
+                } else {
+                    assert!(blocks[1].get("cache_control").is_none());
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn image_only_tool_blocks_preserve_batch_ids_and_plain_blank_output() {
+    for text in ["", " \t\r\n", "\u{2003}\u{a0}"] {
+        let (url, seen) = serve("200 OK", "application/json", DONE).await;
+        let mut calls = Message::assistant("");
+        calls.tool_calls = vec![
+            ToolCall { id: "one".into(), name: "screenshot".into(), arguments: serde_json::json!({}) },
+            ToolCall { id: "two".into(), name: "status".into(), arguments: serde_json::json!({}) },
+        ];
+        let mut result = Message::tool_result("one", text);
+        result.images = vec![image_only_fixture("aW1hZ2U="), image_only_fixture("b3RoZXI=")];
+        provider(url)
+            .complete(Request::new(vec![
+                Message::user("inspect"),
+                calls,
+                result,
+                Message::tool_result("two", text),
+            ]))
+            .await
+            .unwrap();
+        let body = seen.lock().unwrap().clone().unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 3, "tool images stay in their actual tool result: {body}");
+        let results = messages[2]["content"].as_array().unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["tool_use_id"], "one");
+        assert_eq!(results[1]["tool_use_id"], "two");
+        let images = results[0]["content"].as_array().unwrap();
+        assert_eq!(images.len(), 2, "an image result needs no blank text block: {body}");
+        assert!(images.iter().all(|block| block["type"] == "image"));
+        assert_eq!(images[0]["source"]["data"], "aW1hZ2U=");
+        assert_eq!(images[1]["source"]["data"], "b3RoZXI=");
+        assert_eq!(results[1]["content"], text, "plain tool output keeps its exact bytes");
+    }
+}
+
+#[tokio::test]
+async fn image_only_controls_preserve_real_captions_and_uncached_images() {
+    for caption in ["", "  caption\n\tkept exactly  "] {
+        let (url, seen) = serve("200 OK", "application/json", DONE).await;
+        let mut message = Message::user(caption);
+        message.images.push(image_only_fixture("aW1hZ2U="));
+        provider(url).complete(Request::new(vec![message])).await.unwrap();
+        let body = seen.lock().unwrap().clone().unwrap();
+        let blocks = body["messages"][0]["content"].as_array().unwrap();
+        assert!(blocks.iter().all(|block| block.get("cache_control").is_none()));
+        assert_eq!(blocks[0]["type"], "image");
+        if !caption.is_empty() {
+            assert_eq!(blocks[1]["text"], caption);
+        }
+    }
+}
