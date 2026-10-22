@@ -9,7 +9,8 @@ fn main() {
     let version=args==["--version"];
     let log=std::env::var("ROOK_OWNED_LSP_WORKSPACE_LOG").unwrap();
     let mut file=std::fs::OpenOptions::new().create(true).append(true).open(log).unwrap();
-    writeln!(file,"{name} {eof} {version}").unwrap();
+    // One append write keeps concurrent version-probe records whole.
+    file.write_all(format!("{name} {eof} {version}\n").as_bytes()).unwrap();
     if std::env::var("ROOK_OWNED_LSP_WORKSPACE_REFUSE").as_deref()==Ok(name) { std::process::exit(7); }
     println!("owned language server 99.0.1");
 }

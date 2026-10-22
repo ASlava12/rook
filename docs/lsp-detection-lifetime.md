@@ -25,8 +25,9 @@ remain refusals.
 
 The existing capture reader shares this owned-child guard. Its combined output
 ceiling, pipe-EOF deadline, partial-output refusal and successful-output behavior
-are unchanged. The discovery check remains sequential across known languages;
-this is not an overall startup deadline or a parallel LSP inventory.
+are unchanged. Independent discovery checks now use a
+[four-worker pool](lsp-discovery-pool.md) with stable language result order. The
+pool is per discovery call; an overall startup deadline is not introduced.
 
 Process creation/signalling remains synchronous. Darwin group cleanup retains
 its additional five-second grace. Windows job attachment follows spawn, and

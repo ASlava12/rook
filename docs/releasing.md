@@ -114,6 +114,13 @@ When PATH language-server discovery changes, also run the
 [owned LSP detection fixture](../xtask/probes/lsp-detection/README.md) on the
 extracted host CLI. Require all eleven flags, including the still-running
 admission and descendant retirement after both successful and refused parents.
+When discovery parallelism changes, run the
+[owned discovery-pool fixture](../xtask/probes/lsp-discovery-parallel/README.md)
+on the extracted host CLI. Require all eight conditions: overlapping probes,
+the four-probe bound, exactly five valid calls, retirement before fixture cleanup,
+stable language output order and HTTP/workspace/binary isolation. Preserve the
+separate status/descendant and workspace-admission fixtures. Record timings as
+controlled observations without a speed gate or global startup deadline claim.
 When support diagnostic metadata handling changes, run the
 [owned diagnostic metadata fixture](../xtask/probes/diagnostic-metadata/README.md)
 on the extracted host CLI/daemon pair. Require all eighteen conditions, including

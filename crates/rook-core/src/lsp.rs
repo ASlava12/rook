@@ -80,20 +80,64 @@ fn known() -> Vec<ServerConfig> {
 }
 
 fn discover(candidates: Vec<ServerConfig>) -> Vec<ServerConfig> {
-    candidates
-        .into_iter()
-        .filter_map(|mut server| {
-            // An explicitly installed payload wins over PATH and retains its
-            // probe bypass: its real invocation may require `--stdio`, making
-            // a refused `--version` an invalid reason to offer installation again.
-            if let Some(ours) = installed(&server.command) {
-                server.command = ours;
-            } else if !on_path(&server.command) || !starts(&server.command) {
-                return None;
+    probe_candidates(&candidates, 4, |candidate| {
+        let mut server = candidate.clone();
+        // An explicitly installed payload wins over PATH and retains its
+        // probe bypass: its real invocation may require `--stdio`, making
+        // a refused `--version` an invalid reason to offer installation again.
+        if let Some(ours) = installed(&server.command) {
+            server.command = ours;
+        } else if !on_path(&server.command) || !starts(&server.command) {
+            return None;
+        }
+        Some(server)
+    })
+}
+
+/// Each discovery batch owns at most four independent probes. Keep result
+/// slots in candidate order; process start and completion order may differ.
+/// The caller also consumes work, including when a worker cannot be spawned.
+fn probe_candidates(
+    candidates: &[ServerConfig],
+    parallelism: usize,
+    probe: impl Fn(&ServerConfig) -> Option<ServerConfig> + Sync,
+) -> Vec<ServerConfig> {
+    use std::sync::atomic::AtomicUsize;
+
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let parallelism = parallelism.clamp(1, 4).min(candidates.len());
+    let next = AtomicUsize::new(0);
+    let results = std::sync::Mutex::new(vec![None; candidates.len()]);
+    let work = || loop {
+        let index = next.fetch_add(1, Ordering::Relaxed);
+        let Some(candidate) = candidates.get(index) else { break };
+        let found = probe(candidate);
+        results.lock().unwrap_or_else(|error| error.into_inner())[index] = found;
+    };
+    std::thread::scope(|scope| {
+        let mut workers = Vec::with_capacity(parallelism - 1);
+        for index in 1..parallelism {
+            match std::thread::Builder::new()
+                .name(format!("rook-lsp-probe-{index}"))
+                .spawn_scoped(scope, work)
+            {
+                Ok(worker) => workers.push(worker),
+                Err(error) => {
+                    tracing::debug!(%error, "LSP probe worker unavailable; remaining workers continue");
+                    break;
+                }
             }
-            Some(server)
-        })
-        .collect()
+        }
+        work();
+        for worker in workers {
+            if worker.join().is_err() {
+                tracing::warn!("LSP probe worker ended unexpectedly");
+            }
+        }
+    });
+    results.into_inner().unwrap_or_else(|error| error.into_inner()).into_iter().flatten().collect()
 }
 
 /// The binary `rook lsp install` put under the state directory, if any.
@@ -663,3 +707,7 @@ impl Tool for FindSymbol {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "lsp/probe_tests.rs"]
+mod probe_tests;
