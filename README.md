@@ -1,7 +1,7 @@
 # Rook
 
-[Rook 0.21.10](docs/releases/0.21.10.md): version discovery bounds captured output and keeps pipe EOF under command patience;
-late or oversized banners are rejected without losing other tool versions.
+[Rook 0.21.11](docs/releases/0.21.11.md): LSP discovery separates probe outcomes from cleanup and retires owned children;
+skill source identity stays exact through caching, installation and updates.
 
 [Domain network policy with OS containment](docs/domain-network-policy.md).
 
