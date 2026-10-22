@@ -5,6 +5,7 @@ import hashlib
 import http.server
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -18,6 +19,8 @@ parser.add_argument('--output', type=Path, required=True)
 parser.add_argument('--tmp-root', type=Path)
 parser.add_argument('--refuse', choices=('main', 'auxiliary'), default='main')
 args = parser.parse_args()
+node = shutil.which('node')
+assert node, 'Node with built-in WebSocket support is required'
 refuse_stream = args.refuse == 'main'
 assert __debug__ and not args.output.exists()
 root = Path(__file__).resolve().parent
@@ -85,9 +88,14 @@ try:
         directory = Path(temporary)
         home, workspace = directory / 'home', directory / 'workspace'
         home.mkdir(); workspace.mkdir()
+        empty = directory / 'empty'; empty.mkdir()
         sentinel = workspace / 'sentinel'
         sentinel.write_bytes(b'owned unchanged')
-        env = dict(os.environ, ROOK_HOME=str(home), ROOK_CONFIG_DIR=str(home), ROOK_LOG='error')
+        # This probe measures provider waits, not the runner's installed tool
+        # shims. Catalog detection can otherwise spend five seconds per tool
+        # before the empty chat is able to consume /quit on Windows CI.
+        env = dict(os.environ, ROOK_HOME=str(home), ROOK_CONFIG_DIR=str(home), ROOK_LOG='error',
+            ROOK_BUILTIN_SKILLS=str(empty), PATH=str(empty))
         (home / 'config.toml').write_text(f'''[agent]
 model='fixture'
 install_servers=false
@@ -127,7 +135,7 @@ url='http://127.0.0.1:{server.server_port}/v1'
                 break
             except (OSError, ValueError): time.sleep(.05)
         captured = directory / 'observation.json'
-        observer = subprocess.Popen(['node', str(root / 'chat.mjs'), base, session, str(captured)],
+        observer = subprocess.Popen([node, str(root / 'chat.mjs'), base, session, str(captured)],
             cwd=workspace, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         report['diagnostics'] = []

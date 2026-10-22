@@ -14,6 +14,9 @@ one completion classification. No installed daemon, real endpoint or user store
 is accessed. Only owned processes are stopped during cleanup. The auxiliary mode
 instead refuses the first completion-classification call: one main request and
 two classification requests must occur. Both modes run in native source CI.
+The fixture resolves Node before giving the owned agent an empty tool PATH and
+skill directory. It therefore avoids probing the CI runner's unrelated tool
+shims while creating its empty conversation; the model fixture needs no tools.
 
 Eight required flags per mode cover physical call counts and minimum delay, visible chat
 status, scoped provider deadlines, unchanged physical progress through at least
