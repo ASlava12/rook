@@ -17,6 +17,9 @@ struct List {
 }
 
 pub(crate) fn list(rook: &Rook, params: serde_json::Value) -> Result<serde_json::Value, Error> {
+    if !params.is_null() && !params.is_object() {
+        return Err(Error::invalid_params("session/list parameters must be an object or null"));
+    }
     let request: List = if params.is_null() {
         List::default()
     } else {

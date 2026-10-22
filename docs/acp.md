@@ -18,6 +18,14 @@ connection close; another process cannot resume mutations until the user
 inspects the editor buffer and explicitly acknowledges recovery. Model-assisted
 inspection remains available and does not acknowledge the unknown effect.
 
+Terminal creation without a usable identity, missing/malformed output and an
+unconfirmed exit also retain uncertain execution. Output text and its truncation
+flag are required. A confirmed exit may come from `terminal/output.exitStatus`
+or the flattened `terminal/wait_for_exit` response. Null acknowledgements alone
+establish no exit code. Signal termination and the full unsigned 32-bit exit-code
+range retain known failure status. Known-terminal cleanup still runs on errors;
+cleanup requests do not certify that an unknown command stopped.
+
 For the defaultable `session/list` request, omitted parameters and `null` use
 the same unfiltered request as `{}`. Non-null malformed requests remain errors;
 required session/workspace/prompt fields are not defaulted.

@@ -1485,10 +1485,20 @@ struct EditorTerminals {
 
 impl EditorTerminals {
     async fn call(&self, method: &str, params: serde_json::Value) -> rook_tools::Result<serde_json::Value> {
-        self.peer
-            .request(method, params)
-            .await
-            .ok_or_else(|| rook_tools::ToolError::Denied(format!("the editor did not answer {method}")))
+        let answer = self.peer.request(method, params).await.ok_or_else(|| {
+            rook_tools::ToolError::ExecutionUnknown(format!(
+                "the editor did not answer {method}; inspect its terminal and /recovery before retrying"
+            ))
+        })?;
+        if matches!(method, "terminal/wait_for_exit" | "terminal/kill" | "terminal/release")
+            && !answer.is_null()
+            && !answer.is_object()
+        {
+            return Err(rook_tools::ToolError::ExecutionUnknown(format!(
+                "the editor returned an invalid {method} acknowledgement; inspect its terminal and /recovery before retrying"
+            )));
+        }
+        Ok(answer)
     }
 
     fn about(&self, terminal: &str) -> serde_json::Value {
@@ -1549,7 +1559,7 @@ impl rook_tools::Terminals for EditorTerminals {
             .as_str()
             .filter(|id| !id.is_empty() && id.len() <= 1024)
             .ok_or_else(|| {
-                rook_tools::ToolError::Denied(
+                rook_tools::ToolError::ExecutionUnknown(
                     "editor terminalId must contain 1..=1024 bytes; creation remains uncertain".into(),
                 )
             })?
@@ -1570,18 +1580,31 @@ impl rook_tools::Terminals for EditorTerminals {
 
         // Read before releasing: the client is free to forget the terminal the
         // moment it is released.
-        let read = self.call("terminal/output", self.about(&terminal)).await;
+        let read = self.call("terminal/output", self.about(&terminal)).await?;
+        let unknown = || {
+            rook_tools::ToolError::ExecutionUnknown(format!(
+                "editor terminal {terminal} has no valid output or confirmed exit status; inspect it and /recovery before retrying"
+            ))
+        };
+        let output = read["output"].as_str().ok_or_else(unknown)?;
+        let truncated = read["truncated"].as_bool().ok_or_else(unknown)?;
+        let status = |value: &serde_json::Value| {
+            value["exitCode"]
+                .as_u64()
+                .and_then(|code| u32::try_from(code).ok())
+                .map(|code| code as i32)
+                .or_else(|| value["signal"].as_str().filter(|signal| !signal.is_empty()).map(|_| -1))
+        };
+        // wait_for_exit flattens its exit fields; output nests them. A null
+        // wait acknowledgement alone establishes no exit status.
+        let exit_code = status(&read["exitStatus"])
+            .or_else(|| waited.ok().and_then(Result::ok).and_then(|waited| status(&waited)))
+            .ok_or_else(unknown)?;
         if self.call("terminal/release", self.about(&terminal)).await.is_ok() {
             cleanup.terminal = None;
         }
-        let read = read?;
 
-        Ok(rook_tools::Ran {
-            output: read["output"].as_str().unwrap_or_default().to_string(),
-            exit_code: read["exitStatus"]["exitCode"].as_i64().unwrap_or(-1) as i32,
-            truncated: read["truncated"] == true,
-            timed_out,
-        })
+        Ok(rook_tools::Ran { output: output.to_owned(), exit_code, truncated, timed_out })
     }
 }
 

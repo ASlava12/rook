@@ -24,6 +24,11 @@ counts = {}
 errors = []
 request_kinds = {}
 retrying = set()
+terminal_cases = {'null-terminal', 'null-create', 'missing-create', 'unknown-exit', 'wait-exit',
+                  'missing-output', 'malformed-output', 'missing-truncated', 'invalid-exit', 'signal-exit', 'large-exit', 'invalid-release'}
+ambiguous = dict.fromkeys(['missing-write', 'error-write', 'invalid-write'], 'write_file')
+ambiguous.update(dict.fromkeys(['null-create', 'missing-create', 'unknown-exit', 'missing-output',
+                                'malformed-output', 'missing-truncated', 'invalid-exit'], 'run_command'))
 
 
 class Provider(http.server.BaseHTTPRequestHandler):
@@ -46,7 +51,7 @@ class Provider(http.server.BaseHTTPRequestHandler):
             request_kinds[phase].append('classifier' if not request.get('stream') else 'verifier' if checking else 'main')
             if request.get('stream'):
                 if counts[phase] == 1:
-                    tool = 'run_command' if case == 'null-terminal' else 'read_file' if case == 'null-read' else 'write_file'
+                    tool = 'run_command' if case in terminal_cases and case not in retrying else 'read_file' if case == 'null-read' else 'write_file'
                     arguments = {'command': 'owned-not-executed'} if tool == 'run_command' else {'path': 'notes.txt'}
                     if tool == 'write_file':
                         arguments['content'] = 'owned editor update\n'
@@ -150,12 +155,13 @@ url='http://127.0.0.1:{port}/{case}/v1'
         try:
             initialized = call(1, 'initialize', {'protocolVersion': 1,
                 'clientCapabilities': {'fs': {'readTextFile': True, 'writeTextFile': True},
-                                       'terminal': case == 'null-terminal'}})
+                                       'terminal': case in terminal_cases}})
             assert initialized['result']['protocolVersion'] == 1
             opened = call(2, 'session/new', {'cwd': str(workspace)})
             session = opened['result']['sessionId']
             listing = {name: call(i, 'session/list', value) for i, (name, value) in enumerate(
-                [('object', {}), ('null', None), ('omitted', ...), ('invalid', False)], start=10)}
+                [('object', {}), ('null', None), ('omitted', ...), ('invalid-bool', False),
+                 ('invalid-array', []), ('invalid-string', 'bad')], start=10)}
             send({'jsonrpc': '2.0', 'id': 3, 'method': 'session/prompt',
                   'params': {'sessionId': session, 'prompt': [{'type': 'text', 'text': 'Perform the owned file operation.'}]}})
             buffer = original
@@ -182,12 +188,25 @@ url='http://127.0.0.1:{port}/{case}/v1'
                     elif method == 'fs/read_text_file':
                         reply['result'] = None if case == 'null-read' else {'content': buffer}
                     elif method == 'terminal/create':
-                        reply['result'] = {'terminalId': 'owned-terminal'}
+                        if case != 'missing-create':
+                            reply['result'] = None if case == 'null-create' else {'terminalId': 'owned-terminal'}
                     elif method == 'terminal/output':
-                        reply['result'] = {'output': 'owned terminal output\n', 'truncated': False,
-                                           'exitStatus': {'exitCode': 0}}
+                        if case != 'missing-output':
+                            result = {'output': 'owned terminal output\n', 'truncated': False}
+                            if case not in ['unknown-exit', 'wait-exit']:
+                                result['exitStatus'] = {'signal': 'SIGTERM'} if case == 'signal-exit' else {
+                                    'exitCode': -9 if case == 'invalid-exit' else 4294967295 if case == 'large-exit' else 0}
+                            if case == 'malformed-output':
+                                del result['output']
+                            if case == 'missing-truncated':
+                                del result['truncated']
+                            reply['result'] = result
+                    elif method == 'terminal/wait_for_exit' and case == 'wait-exit':
+                        reply['result'] = {'exitCode': 0}
+                    elif method == 'terminal/release' and case == 'invalid-release':
+                        reply['result'] = False
                     else:
-                        reply['result'] = None
+                        reply['result'] = None if case == 'null-terminal' else {}
                     send(reply)
                 elif method == 'session/update':
                     update = frame['params']['update']
@@ -201,8 +220,9 @@ url='http://127.0.0.1:{port}/{case}/v1'
             report = {'methods': methods, 'statuses': statuses, 'buffer': buffer,
                     'disk_unchanged': (workspace / 'notes.txt').read_text(encoding='utf-8') == original,
                     'list': {name: 'result' in frame and any(item['sessionId'] == session for item in frame['result']['sessions'])
-                             for name, frame in listing.items() if name != 'invalid'},
-                    'invalid_list_refused': listing['invalid'].get('error', {}).get('code') == -32602}
+                             for name, frame in listing.items() if not name.startswith('invalid-')},
+                    'invalid_list_refused': all(frame.get('error', {}).get('code') == -32602
+                        for name, frame in listing.items() if name.startswith('invalid-'))}
         except BaseException:
             log.flush()
             with (directory / 'stderr').open('rb') as diagnostic:
@@ -231,7 +251,7 @@ url='http://127.0.0.1:{port}/{case}/v1'
                          for operation in unknown.values()]
     report['recovery_pending'] = any(execution['pending'] or execution['background'] for execution in executions)
     report['retry'] = None
-    if case in ['missing-write', 'error-write', 'invalid-write'] and unknown:
+    if case in ambiguous and unknown:
         phase = case + '-retry'
         counts[phase] = 0
         request_kinds[phase] = []
@@ -257,7 +277,7 @@ worker.start()
 try:
     with tempfile.TemporaryDirectory(prefix='rook-acp-null-') as temporary:
         cases = {}
-        for case in ['object-write', 'null-write', 'missing-write', 'error-write', 'invalid-write', 'null-read', 'null-terminal']:
+        for case in ['object-write', 'null-write', 'missing-write', 'error-write', 'invalid-write', 'null-read', *sorted(terminal_cases)]:
             counts[case] = 0
             request_kinds[case] = []
             cases[case] = run_case(Path(temporary), case, server.server_port)
@@ -270,19 +290,33 @@ try:
             'required_read_content_not_defaulted': cases['null-read']['statuses'] == ['failed'],
             'null_terminal_cleanup_retires_once': cases['null-terminal']['statuses'] == ['completed']
                 and cases['null-terminal']['methods'] == ['terminal/create', 'terminal/wait_for_exit', 'terminal/output', 'terminal/release'],
+            'missing_terminal_identity_is_uncertain': all(cases[name]['statuses'] == ['failed']
+                and cases[name]['unknown'] for name in ['null-create', 'missing-create']),
+            'missing_terminal_result_evidence_is_uncertain': all(cases[name]['statuses'] == ['failed']
+                and cases[name]['unknown'] for name in ['unknown-exit', 'missing-output', 'malformed-output', 'missing-truncated', 'invalid-exit']),
+            'confirmed_wait_exit_status_is_used': cases['wait-exit']['statuses'] == ['completed']
+                and cases['wait-exit']['methods'] == ['terminal/create', 'terminal/wait_for_exit', 'terminal/output', 'terminal/release'],
+            'signal_and_large_exit_keep_known_failures': all(cases[name]['statuses'] == ['failed']
+                and not cases[name]['unknown']
+                and cases[name]['methods'] == ['terminal/create', 'terminal/wait_for_exit', 'terminal/output', 'terminal/release']
+                for name in ['signal-exit', 'large-exit']),
+            'malformed_release_does_not_forget_cleanup': cases['invalid-release']['statuses'] == ['completed']
+                and cases['invalid-release']['methods'] == ['terminal/create', 'terminal/wait_for_exit',
+                    'terminal/output', 'terminal/release', 'terminal/kill', 'terminal/release']
+                and not cases['invalid-release']['unknown'],
             'null_and_omitted_list_are_default_requests': all(all(case['list'].values()) for case in cases.values()),
             'invalid_nonnull_list_refused': all(case['invalid_list_refused'] for case in cases.values()),
-            'uncertain_write_retained_after_connection_close': all(
-                len(case['unknown']) == 1 and case['unknown'][0]['tool'] == 'write_file'
+            'uncertain_effect_retained_after_connection_close': all(
+                len(case['unknown']) == 1 and case['unknown'][0]['tool'] == ambiguous[name]
                 and case['unknown'][0]['may_have_effects'] and not case['recovery_pending']
-                for name, case in cases.items() if name in ['missing-write', 'error-write', 'invalid-write'])
+                for name, case in cases.items() if name in ambiguous)
                 and all(not case['unknown'] for name, case in cases.items()
-                        if name not in ['missing-write', 'error-write', 'invalid-write']),
+                        if name not in ambiguous),
             'fresh_process_retry_keeps_writes_blocked': all(case['retry']
                 and 0 <= case['retry']['provider_requests'] <= 4 and case['retry']['unknown_preserved']
                 and case['retry']['disk_unchanged']
                 and 'recovery' in case['retry']['tail'].lower()
-                for name, case in cases.items() if name in ['missing-write', 'error-write', 'invalid-write']),
+                for name, case in cases.items() if name in ambiguous),
             'editor_buffers_used_without_disk_fallback': all(case['disk_unchanged'] for case in cases.values())
                 and all(case['buffer'] == 'owned editor update\n' for name, case in cases.items() if name.endswith('-write'))
                 and all('fs/write_text_file' in case['methods'] for name, case in cases.items() if name.endswith('-write')),

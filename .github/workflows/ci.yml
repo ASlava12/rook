@@ -33,6 +33,11 @@ jobs:
       - name: model preparation regressions
         if: matrix.os == 'ubuntu-latest'
         run: python3 xtask/probes/model-smoke/check.py
+      - name: ACP null and default payloads
+        shell: bash
+        run: |
+          cargo build --locked -p rook-cli
+          python3 xtask/probes/acp-null/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-acp-null.json"
       - name: macOS process-group lifecycle
         if: matrix.os == 'macos-latest'
         run: cargo test --locked -p rook-contain process::tests -- --nocapture
@@ -48,11 +53,6 @@ jobs:
         run: |
           cargo build --locked -p rook-core --example compaction-ab
           python3 xtask/probes/compaction-comparison/run.py --binary target/debug/examples/compaction-ab --output "$RUNNER_TEMP/rook-compaction-comparison.json"
-      - name: ACP null and default payloads
-        shell: bash
-        run: |
-          cargo build --locked -p rook-cli
-          python3 xtask/probes/acp-null/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-acp-null.json"
 
       # The Intel slice of macOS has no hosted runner any more, but its SDK is
       # right here on the Apple-silicon one, so it is at least kept compiling.
