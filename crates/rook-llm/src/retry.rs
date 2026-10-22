@@ -297,7 +297,12 @@ impl Retrying {
     /// given the only number worth waiting: doubling from a second spends
     /// every try inside the window it named and ends the turn on a refusal it
     /// had already explained how to avoid.
-    async fn wait_before(&self, attempt: u32, error: &LlmError) -> bool {
+    async fn wait_before(
+        &self,
+        attempt: u32,
+        error: &LlmError,
+        observer: Option<&dyn crate::AttemptObserver>,
+    ) -> bool {
         if attempt >= ATTEMPTS {
             return false;
         }
@@ -307,6 +312,16 @@ impl Retrying {
             _ => doubling,
         };
         let wait = jittered_wait(floor, (self.sample_jitter)());
+        if let Some(observer) = observer {
+            observer.waiting_to_retry(crate::RetryWait {
+                delay: wait,
+                next_attempt: attempt + 1,
+                status: match error {
+                    LlmError::Status { status, .. } => Some(*status),
+                    _ => None,
+                },
+            });
+        }
         tracing::debug!(provider = self.inner.id(), "{error}; trying again in {:.3}s", wait.as_secs_f64());
         tokio::time::sleep(wait).await;
         true
@@ -427,7 +442,11 @@ impl Retrying {
                 None => self.inner.complete_with_metadata(request.clone()).await,
             };
             match answer {
-                Err(e) if worth_asking_again(&e) && self.wait_before(attempt, &e).await => attempt += 1,
+                Err(e)
+                    if worth_asking_again(&e) && self.wait_before(attempt, &e, observer.as_deref()).await =>
+                {
+                    attempt += 1
+                }
                 Err(e) if self.drop_the_effort(&e, &mut request) => continue,
                 Err(e) if self.ask_for_less_output(&e, &mut request) => continue,
                 Err(e) if use_credit_limit(&e, &mut request, &mut credit_retried) => continue,
@@ -477,7 +496,7 @@ impl Retrying {
                 // attempt before waiting or opening its replacement.
                 drop(stream);
                 if wait {
-                    if !owner.wait_before(attempt, &error).await {
+                    if !owner.wait_before(attempt, &error, observer.as_deref()).await {
                         Err(error)?;
                     }
                     attempt += 1;
@@ -522,7 +541,12 @@ impl Retrying {
                         futures_util::stream::once(async { Ok(crate::Delta::Effort(report)) }).chain(stream),
                     ));
                 }
-                Err(e) if worth_asking_again(&e) && self.wait_before(*attempt, &e).await => *attempt += 1,
+                Err(e)
+                    if worth_asking_again(&e)
+                        && self.wait_before(*attempt, &e, observer.as_deref()).await =>
+                {
+                    *attempt += 1
+                }
                 Err(e) if self.drop_the_effort(&e, request) => continue,
                 Err(e) if self.ask_for_less_output(&e, request) => continue,
                 Err(e) if use_credit_limit(&e, request, credit_retried) => continue,
@@ -538,6 +562,30 @@ mod tests {
     use futures_util::StreamExt;
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
+
+    #[derive(Default)]
+    struct WaitLog {
+        waits: Mutex<Vec<crate::RetryWait>>,
+        starts: std::sync::atomic::AtomicU32,
+    }
+
+    struct ObservedAttempt;
+    impl crate::Attempt for ObservedAttempt {
+        fn finish(&mut self, _: crate::AttemptStatus, _: &crate::AttemptFacts) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    impl crate::AttemptObserver for WaitLog {
+        fn waiting_to_retry(&self, wait: crate::RetryWait) {
+            assert_eq!(self.starts.load(std::sync::atomic::Ordering::Relaxed), 1);
+            self.waits.lock().unwrap().push(wait);
+        }
+        fn start(&self, _: Option<&crate::Dispatch>) -> Result<Box<dyn crate::Attempt>> {
+            self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(Box::new(ObservedAttempt))
+        }
+    }
 
     #[test]
     fn positive_jitter_reaches_both_endpoints_without_undercutting_backoff() {
@@ -658,10 +706,21 @@ mod tests {
     async fn real_retry_paths_apply_injected_jitter_before_the_next_physical_call() {
         for mode in [Mode::Complete, Mode::StreamOpen, Mode::FirstDelta] {
             let (retry, calls) = fixture(mode);
+            let observer = Arc::new(WaitLog::default());
             if matches!(mode, Mode::Complete) {
-                assert_eq!(retry.complete(Request::new(Vec::new())).await.unwrap().message.content, "done");
+                assert_eq!(
+                    retry
+                        .complete_observed(Request::new(Vec::new()), observer.clone())
+                        .await
+                        .unwrap()
+                        .response
+                        .message
+                        .content,
+                    "done"
+                );
             } else {
-                let mut stream = retry.stream(Request::new(Vec::new())).await.unwrap();
+                let mut stream =
+                    retry.stream_observed(Request::new(Vec::new()), observer.clone()).await.unwrap();
                 let mut text = String::new();
                 while let Some(delta) = stream.next().await {
                     if let crate::Delta::Text(value) = delta.unwrap() {
@@ -671,6 +730,15 @@ mod tests {
                 assert_eq!(text, "done");
             }
             let calls = calls.lock().unwrap();
+            assert_eq!(
+                *observer.waits.lock().unwrap(),
+                vec![crate::RetryWait {
+                    delay: Duration::from_millis(1250),
+                    next_attempt: 2,
+                    status: Some(503),
+                }]
+            );
+            assert_eq!(observer.starts.load(std::sync::atomic::Ordering::Relaxed), 2);
             assert_eq!(calls.len(), 2, "the actual provider must be refused and retried");
             assert!(
                 calls[1].duration_since(calls[0]) >= Duration::from_millis(1250),
@@ -683,11 +751,13 @@ mod tests {
     async fn terminal_errors_partial_answers_and_completion_evidence_never_sample_or_replay() {
         for mode in [Mode::Terminal, Mode::Partial, Mode::Completion] {
             let (mut retry, calls) = fixture(mode);
+            let observer = Arc::new(WaitLog::default());
             retry.sample_jitter = || panic!("an ineligible retry must not sample randomness");
             if matches!(mode, Mode::Terminal) {
-                assert!(retry.complete(Request::new(Vec::new())).await.is_err());
+                assert!(retry.complete_observed(Request::new(Vec::new()), observer.clone()).await.is_err());
             } else {
-                let mut stream = retry.stream(Request::new(Vec::new())).await.unwrap();
+                let mut stream =
+                    retry.stream_observed(Request::new(Vec::new()), observer.clone()).await.unwrap();
                 let first = stream.next().await.unwrap().unwrap();
                 match mode {
                     Mode::Partial => assert!(matches!(first, crate::Delta::Text(text) if text == "partial")),
@@ -701,6 +771,7 @@ mod tests {
                 assert!(stream.next().await.is_none());
             }
             assert_eq!(calls.lock().unwrap().len(), 1);
+            assert!(observer.waits.lock().unwrap().is_empty());
         }
     }
 
@@ -709,6 +780,20 @@ mod tests {
         let (mut retry, _) = fixture(Mode::Complete);
         retry.sample_jitter = || panic!("exhaustion must not sample randomness");
         let error = LlmError::Status { status: 503, body: "owned".into(), retry_after: None };
-        assert!(!retry.wait_before(ATTEMPTS, &error).await);
+        let observer = WaitLog::default();
+        assert!(!retry.wait_before(ATTEMPTS, &error, Some(&observer)).await);
+        assert!(observer.waits.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn dropping_an_announced_wait_does_not_admit_the_next_attempt() {
+        let (retry, calls) = fixture(Mode::Complete);
+        let observer = Arc::new(WaitLog::default());
+        let mut pending = Box::pin(retry.complete_observed(Request::new(Vec::new()), observer.clone()));
+        assert!(futures_util::poll!(&mut pending).is_pending());
+        assert_eq!(observer.waits.lock().unwrap().len(), 1, "the future reached its real retry sleep");
+        drop(pending);
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        assert_eq!(observer.starts.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 }

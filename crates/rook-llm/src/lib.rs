@@ -13,7 +13,7 @@
 #![warn(clippy::string_slice)]
 
 pub mod attempt;
-pub use attempt::{Attempt, AttemptFacts, AttemptObserver, AttemptStatus};
+pub use attempt::{Attempt, AttemptFacts, AttemptObserver, AttemptStatus, RetryWait};
 mod trace;
 pub use trace::{RequestTrace, TraceContext, valid_request_id};
 //

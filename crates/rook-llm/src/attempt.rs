@@ -25,11 +25,21 @@ pub struct AttemptFacts {
     pub provider_request_ids: std::collections::BTreeMap<String, String>,
 }
 
+/// Advisory status between physical attempts; contains no provider body or prompt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RetryWait {
+    pub delay: std::time::Duration,
+    pub next_attempt: u32,
+    pub status: Option<u16>,
+}
+
 /// The host persists admission before any generation request is sent.
 pub trait AttemptObserver: Send + Sync {
     /// Capacity waiting is not a physical generation and must not be billed
     /// or admitted as one. Observers may report it independently.
     fn waiting_for_capacity(&self) {}
+    /// The sampled delay is already fixed. This does not admit or bill a request.
+    fn waiting_to_retry(&self, _wait: RetryWait) {}
     fn start(&self, dispatch: Option<&Dispatch>) -> Result<Box<dyn Attempt>>;
 }
 
