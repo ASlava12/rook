@@ -12,6 +12,9 @@ use crate::{CoreError, Result, Rook};
 const TIMING_LABEL: &str = "rook:timing:v1";
 const MAX_REPORT: usize = 1024 * 1024;
 const MAX_TIMING: u64 = 1024;
+/// Per-session raw metadata admission for support readers, including API routing.
+pub const MAX_SESSION_METADATA: usize = 64 * 1024;
+const MAX_EVENT_METADATA: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -226,7 +229,7 @@ impl Rook {
     pub fn diagnostics(&self, session: u128, include_logs: bool) -> Result<Report> {
         let meta = self
             .store
-            .get_session(session)?
+            .get_session_limited(session, MAX_SESSION_METADATA)?
             .ok_or_else(|| CoreError::NoSession(rook_store::format_session_id(session)))?;
         let limit = self.config.telemetry.diagnostic_events.clamp(1, 2048);
         let from = meta.next_seq.saturating_sub(limit as u64);
@@ -255,10 +258,14 @@ impl Rook {
             Ok(state) => report.activity = state,
             Err(_) => report.notices.push("activity observation could not be read".into()),
         }
-        report.session["trace"] = serde_json::to_value(self.session_trace(session)?)?;
+        report.session["trace"] = serde_json::to_value(crate::correlation::session_bounded(
+            &self.store,
+            session,
+            MAX_SESSION_METADATA,
+        ))?;
         if report.session["trace"].is_null() {
             report.notices.push(
-                "session ancestry is missing, cyclic or exceeds 64 levels; correlation is unavailable".into(),
+                "session ancestry is missing, cyclic, exceeds 64 levels or has oversized metadata; correlation is unavailable".into(),
             );
         }
         report.settings["propagate_trace"] = json!(self.config.telemetry.propagate_trace);
@@ -269,7 +276,13 @@ impl Rook {
         if from > 0 {
             report.notices.push("only the bounded recent event tail is included".into());
         }
-        for event in self.store.events(session, from, limit)? {
+        let (events, omitted) = event_tail(&self.store, session, from, meta.next_seq, limit)?;
+        if omitted {
+            report.notices.push(
+                "some event metadata is oversized or unreadable; those tail records are omitted".into(),
+            );
+        }
+        for event in events {
             let size = self.store.stat_object(&event.record.body)?.map(|m| m.size_raw).unwrap_or(0);
             report.events.push(json!({"seq":event.seq,"at":event.record.ts,
                 "kind":event.record.kind.as_str(),"bytes":size}));
@@ -320,6 +333,33 @@ impl Rook {
         report.json()?;
         Ok(report)
     }
+}
+
+/// Keep the normal tail read to one transaction. Oversized/corrupt metadata is
+/// exceptional: inspect exact captured slots independently to preserve readable
+/// neighbors without decoding the refused record or admitting future appends.
+fn event_tail(
+    store: &Store,
+    session: u128,
+    from: u64,
+    before: u64,
+    limit: usize,
+) -> Result<(Vec<rook_store::Event>, bool)> {
+    match store.events_range_bounded(session, from, before, limit, MAX_EVENT_METADATA) {
+        Ok(events) => return Ok((events, false)),
+        Err(rook_store::StoreError::Encoding(_)) => {}
+        Err(error) => return Err(error.into()),
+    }
+    let mut events = Vec::new();
+    let mut omitted = false;
+    for seq in (from..before).take(limit) {
+        match store.events_range_bounded(session, seq, seq + 1, 1, MAX_EVENT_METADATA) {
+            Ok(mut admitted) => events.append(&mut admitted),
+            Err(rook_store::StoreError::Encoding(_)) => omitted = true,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok((events, omitted))
 }
 
 fn log_tail(root: &Path, name: &str, cap: usize, workspace: &Path) -> Value {

@@ -531,8 +531,11 @@ impl Source {
         }
     }
 
-    /// Resolve `last`, a prefix, or a whole id, wherever the sessions come from.
+    /// Resolve `last` or a whole id, wherever the sessions come from.
     pub fn session_named(&self, spec: &str, workspace: &std::path::Path) -> Result<u128> {
+        if !spec.eq_ignore_ascii_case("last") {
+            return Ok(rook_core::session_named(spec, workspace, &[])?);
+        }
         Ok(rook_core::session_named(spec, workspace, &self.sessions()?)?)
     }
 
@@ -2006,6 +2009,78 @@ impl Daemon {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_session_ids_do_not_fetch_an_unrelated_listing_but_last_still_does() {
+        use std::io::{Read, Write};
+        use std::sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        };
+        rook_llm::init_tls();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let requests = seen.clone();
+        let done = stop.clone();
+        let observer = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !done.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+                let mut socket = match listener.accept() {
+                    Ok((socket, _)) => socket,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        continue;
+                    }
+                    other => panic!("owned listing observer failed: {other:?}"),
+                };
+                socket.set_nonblocking(false).unwrap();
+                socket.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+                let mut request = Vec::new();
+                while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                    let mut chunk = [0; 1024];
+                    let n = socket.read(&mut chunk).unwrap();
+                    assert!(n > 0 && request.len() + n <= 4096);
+                    request.extend_from_slice(&chunk[..n]);
+                }
+                requests.lock().unwrap().push(String::from_utf8(request).unwrap());
+                let body = b"owned listing unavailable";
+                write!(
+                    socket,
+                    "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                socket.write_all(body).unwrap();
+            }
+        });
+        let source = Source::Daemon(Daemon {
+            http: daemon_client(&base).unwrap(),
+            base,
+            replaced: false,
+            workspace: std::path::PathBuf::from("owned-workspace"),
+            runtime: tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap(),
+        });
+        let id = rook_store::new_session_id();
+        let workspace = std::path::Path::new("owned-workspace");
+        let explicit = source.session_named(&rook_store::format_session_id(id), workspace);
+        let invalid = source.session_named("invalid-owned-id", workspace);
+        let before_last = seen.lock().unwrap().len();
+        let last = source.session_named("last", workspace);
+        // Collect the negative-control verdict before assertions and retire the
+        // owned observer even when a regression made unwanted HTTP requests.
+        stop.store(true, Ordering::SeqCst);
+        observer.join().unwrap();
+        assert_eq!(explicit.unwrap(), id);
+        assert!(invalid.is_err());
+        assert_eq!(before_last, 0, "explicit/invalid identifiers must not list sessions");
+        assert!(last.is_err());
+        let requests = seen.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("GET /api/sessions "));
+    }
 
     /// Work asked of the daemon gets longer than the question "are you there".
     ///

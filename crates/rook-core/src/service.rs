@@ -959,6 +959,9 @@ impl Rook {
     }
 
     pub fn session_named(&self, spec: &str) -> Result<u128> {
+        if !spec.eq_ignore_ascii_case("last") {
+            return session_named(spec, &self.workspace, &[]);
+        }
         session_named(spec, &self.workspace, &self.session_summaries()?)
     }
 

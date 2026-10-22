@@ -660,7 +660,7 @@ async fn diagnostics(
         .read()
         .await
         .store
-        .get_session(sid)
+        .get_session_limited(sid, rook_core::diagnostics::MAX_SESSION_METADATA)
         .map_err(CoreError::from)?
         .ok_or(CoreError::NoSession(id))?
         .workspace;
@@ -2963,6 +2963,64 @@ mod tests {
                 .iter()
                 .any(|v| v.as_str().unwrap().contains("workspace configuration unavailable"))
         );
+    }
+
+    #[tokio::test]
+    async fn diagnostics_metadata_limits_preserve_neighbors_and_refuse_oversized_session_routing() {
+        let f = fixture();
+        let id = rook_store::format_session_id(f.session);
+        let label = "private-oversized-label".repeat(1024);
+        let (oversized, after, parent) = {
+            let rook = f.state.rook.read().await;
+            let oversized = rook.log(f.session, rook_store::EventKind::Note, &label, "private body").unwrap();
+            let after =
+                rook.log(f.session, rook_store::EventKind::AssistantMessage, "", "private after").unwrap();
+            let parent = rook.start_session("owned parent").unwrap();
+            (oversized, after, parent)
+        };
+        let path = format!("/api/sessions/{id}/diagnostics?logs=false");
+        let (status, body) = get(&f, &path).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let events = body["events"].as_array().unwrap();
+        assert!(events.iter().any(|e| e["seq"].as_u64() == Some(after)));
+        assert!(!events.iter().any(|e| e["seq"].as_u64() == Some(oversized)));
+        assert!(
+            body["notices"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s.as_str().unwrap().contains("event metadata"))
+        );
+        {
+            let rook = f.state.rook.read().await;
+            rook.store.update_session(f.session, |meta| meta.title = "private-title".repeat(8192)).unwrap();
+        }
+        let (status, refusal) = get(&f, &path).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{refusal}");
+        assert!(refusal.to_string().contains("metadata"));
+        assert!(!refusal.to_string().contains("private-title"));
+        {
+            let rook = f.state.rook.read().await;
+            rook.store
+                .update_session(f.session, |meta| {
+                    meta.title = "api test".into();
+                    meta.parent = Some(parent);
+                })
+                .unwrap();
+            rook.store.update_session(parent, |meta| meta.title = "private-ancestor".repeat(8192)).unwrap();
+            assert_eq!(rook.store.events(f.session, oversized, 1).unwrap()[0].record.label, label);
+        }
+        let (status, body) = get(&f, &path).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body["session"]["trace"].is_null());
+        assert!(
+            body["notices"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s.as_str().unwrap().contains("correlation is unavailable"))
+        );
+        assert!(!body.to_string().contains("private"));
     }
 
     #[tokio::test]

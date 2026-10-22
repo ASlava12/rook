@@ -16,6 +16,11 @@ fn span(identity: &str) -> Option<String> {
 }
 
 pub(crate) fn session(store: &Store, session: u128) -> Option<TraceContext> {
+    session_bounded(store, session, usize::MAX)
+}
+
+/// Support readers bound each ancestry record before variable fields decode.
+pub(crate) fn session_bounded(store: &Store, session: u128, metadata_bytes: usize) -> Option<TraceContext> {
     let mut root = session;
     let mut seen = std::collections::BTreeSet::new();
     let mut settled = false;
@@ -23,7 +28,7 @@ pub(crate) fn session(store: &Store, session: u128) -> Option<TraceContext> {
         if !seen.insert(root) {
             return None;
         }
-        match store.get_session(root).ok()??.parent {
+        match store.get_session_limited(root, metadata_bytes).ok()??.parent {
             Some(parent) => root = parent,
             None => {
                 settled = true;
@@ -40,8 +45,11 @@ pub(crate) fn session(store: &Store, session: u128) -> Option<TraceContext> {
         format!("{root:032x}")
     };
     let span_id = span(&format!("session:{session:032x}"))?;
-    let parent =
-        store.get_session(session).ok()??.parent.and_then(|parent| span(&format!("session:{parent:032x}")));
+    let parent = store
+        .get_session_limited(session, metadata_bytes)
+        .ok()??
+        .parent
+        .and_then(|parent| span(&format!("session:{parent:032x}")));
     TraceContext::bounded(&trace_id, &span_id, parent.as_deref())
 }
 
