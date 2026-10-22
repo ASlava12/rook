@@ -1132,24 +1132,25 @@ impl Store {
     /// Read the nearest earlier events without collecting an entire session.
     /// `before` is exclusive; returned events remain in chronological order.
     pub fn events_before(&self, session: u128, before: u64, limit: usize) -> Result<Vec<Event>> {
-        self.events_before_bounded(session, before, limit, usize::MAX)
+        self.events_before_bounded(session, 0, before, limit, usize::MAX)
     }
 
-    /// Read an exclusive reverse window, admitting metadata before decoding
+    /// Read [from_seq, before) backwards, admitting metadata before decoding
     /// labels. Returned events remain in chronological order.
     pub fn events_before_bounded(
         &self,
         session: u128,
+        from_seq: u64,
         before: u64,
         limit: usize,
         record_bytes: usize,
     ) -> Result<Vec<Event>> {
-        if before == 0 || limit == 0 {
+        if from_seq >= before || limit == 0 {
             return Ok(Vec::new());
         }
         let txn = self.db.begin_read()?;
         let events = txn.open_table(schema::EVENTS)?;
-        let start = schema::event_key(session, 0);
+        let start = schema::event_key(session, from_seq);
         let end = schema::event_key(session, before - 1);
         let mut out = Vec::new();
         for entry in events.range(start.as_slice()..=end.as_slice())?.rev().take(limit) {
