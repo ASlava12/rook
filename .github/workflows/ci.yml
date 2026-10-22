@@ -47,6 +47,9 @@ jobs:
       - name: bounded checker history
         shell: bash
         run: python3 xtask/probes/checker-history/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-checker-history.json"
+      - name: concurrent provider retries
+        shell: bash
+        run: python3 xtask/probes/retry-jitter/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-retry-jitter.json"
       - name: macOS process-group lifecycle
         if: matrix.os == 'macos-latest'
         run: cargo test --locked -p rook-contain process::tests -- --nocapture

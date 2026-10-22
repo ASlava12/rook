@@ -75,6 +75,12 @@ When credit-limited provider recovery changes, run the
 [owned credit-output probe](../xtask/probes/credit-output/README.md) against the
 extracted CLI. Require all ten flags: one useful smaller-budget retry, bounded
 repeated/bad-budget refusals, unchanged owned workspace and unchanged binary.
+When retry scheduling changes, run the
+[owned concurrent retry probe](../xtask/probes/retry-jitter/README.md).
+Require all eight functional flags and retain the physical request timings.
+Arrival spread is observational, not a statistical pass gate; deterministic
+injected-sampler tests establish jitter's wait bounds. Use the extracted CLI and
+preserve its SHA256 before and after this probe.
 When Retry-After interpretation changes, run the
 [owned HTTP-date probe](../xtask/probes/retry-after-date/README.md) against the
 extracted CLI. Require all eight flags, including a physical retry no earlier
