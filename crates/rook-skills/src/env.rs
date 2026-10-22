@@ -8,6 +8,8 @@
 use std::collections::BTreeMap;
 use std::process::Command;
 
+const PROBE_PARALLELISM: usize = 4;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -61,15 +63,13 @@ impl Environment {
     /// absent from the map rather than an error.
     pub fn detect(agent_version: &str) -> Self {
         let mut languages = BTreeMap::new();
-        for probe in LANGUAGE_PROBES {
-            if let Some(v) = probe_version(probe) {
-                languages.insert(probe.key.to_string(), v);
-            }
-        }
         let mut tools = BTreeMap::new();
-        for probe in TOOL_PROBES {
-            if let Some(v) = probe_version(probe) {
-                tools.insert(probe.key.to_string(), v);
+        let probes: Vec<_> = LANGUAGE_PROBES.iter().chain(TOOL_PROBES).collect();
+        let versions = probe_versions(&probes, PROBE_PARALLELISM, probe_version);
+        for (index, (probe, version)) in probes.iter().zip(versions).enumerate() {
+            if let Some(version) = version {
+                let destination = if index < LANGUAGE_PROBES.len() { &mut languages } else { &mut tools };
+                destination.insert(probe.key.to_string(), version);
             }
         }
         Self {
@@ -106,6 +106,52 @@ impl Environment {
         self.tools.insert(key.to_string(), version.to_string());
         self
     }
+}
+
+/// Independent version commands may be slow shims. Keep a small pool rather
+/// than multiplying their deadlines, and preserve the input slots even when
+/// completion order differs. The caller participates so thread creation failure
+/// cannot strand unclaimed probes or require another worker to make progress.
+fn probe_versions(
+    probes: &[&Probe],
+    parallelism: usize,
+    ask: impl Fn(&Probe) -> Option<String> + Sync,
+) -> Vec<Option<String>> {
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+    if probes.is_empty() {
+        return Vec::new();
+    }
+    let parallelism = parallelism.clamp(1, PROBE_PARALLELISM).min(probes.len());
+    let next = AtomicUsize::new(0);
+    let results = Mutex::new(vec![None; probes.len()]);
+    let work = || loop {
+        let index = next.fetch_add(1, Ordering::Relaxed);
+        let Some(probe) = probes.get(index) else { break };
+        let version = ask(probe);
+        results.lock().unwrap_or_else(|error| error.into_inner())[index] = version;
+    };
+    std::thread::scope(|scope| {
+        let mut workers = Vec::with_capacity(parallelism - 1);
+        for index in 1..parallelism {
+            match std::thread::Builder::new().name(format!("rook-env-{index}")).spawn_scoped(scope, work) {
+                Ok(worker) => workers.push(worker),
+                Err(error) => {
+                    tracing::debug!(%error, "version probe worker unavailable; remaining workers continue");
+                    break;
+                }
+            }
+        }
+        work();
+        for worker in workers {
+            if worker.join().is_err() {
+                tracing::warn!("version probe worker ended unexpectedly");
+            }
+        }
+    });
+    results.into_inner().unwrap_or_else(|error| error.into_inner())
 }
 
 fn detect_userland() -> String {
@@ -284,5 +330,114 @@ mod tests {
         command.args(["-c", "echo 1.2.3"]);
         let out = ran_within(&mut command, std::time::Duration::from_secs(5)).expect("it answered");
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "1.2.3");
+    }
+}
+
+#[cfg(test)]
+mod parallel_tests {
+    use super::*;
+    use std::sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn independent_probes_reach_the_four_worker_bound_without_losing_input_order() {
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let (entered, starts) = mpsc::sync_channel(16);
+        let worker_gate = gate.clone();
+        let worker_active = active.clone();
+        let worker_peak = peak.clone();
+        let running = std::thread::spawn(move || {
+            let probes: Vec<_> = LANGUAGE_PROBES.iter().chain(TOOL_PROBES).collect();
+            probe_versions(&probes, 8, |probe| {
+                let current = worker_active.fetch_add(1, Ordering::SeqCst) + 1;
+                worker_peak.fetch_max(current, Ordering::SeqCst);
+                entered.send(probe.key).unwrap();
+                let (lock, wake) = &*worker_gate;
+                let released = lock.lock().unwrap();
+                let (released, timeout) =
+                    wake.wait_timeout_while(released, Duration::from_secs(30), |value| !*value).unwrap();
+                let valid = *released && !timeout.timed_out();
+                worker_active.fetch_sub(1, Ordering::SeqCst);
+                valid.then(|| probe.key.to_owned())
+            })
+        });
+        let first: Vec<_> = (0..4).map(|_| starts.recv_timeout(Duration::from_secs(30))).collect();
+        // Always release the children before assertions, including a failed
+        // admission precondition, so a failing test cannot strand its pool.
+        {
+            let (lock, wake) = &*gate;
+            *lock.lock().unwrap() = true;
+            wake.notify_all();
+        }
+        let versions = running.join().unwrap();
+        assert!(first.iter().all(Result::is_ok), "four probes must actually enter before release: {first:?}");
+        assert_eq!(
+            peak.load(Ordering::SeqCst),
+            4,
+            "oversized requested parallelism must still cap active probes at four"
+        );
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        let expected: Vec<_> =
+            LANGUAGE_PROBES.iter().chain(TOOL_PROBES).map(|probe| Some(probe.key.to_owned())).collect();
+        assert_eq!(versions, expected, "completion order cannot reorder or omit source slots");
+        assert_eq!(
+            starts.into_iter().count() + first.len(),
+            16,
+            "each source probe is admitted exactly once"
+        );
+    }
+
+    #[test]
+    fn empty_serial_and_partial_results_preserve_missing_tools_and_every_slot() {
+        let probes: Vec<_> = LANGUAGE_PROBES.iter().chain(TOOL_PROBES).collect();
+        let expected: Vec<_> = probes
+            .iter()
+            .map(|probe| if probe.key == "java" { None } else { Some(probe.key.to_owned()) })
+            .collect();
+        for parallelism in [0, 1, 4, 8] {
+            let calls = AtomicUsize::new(0);
+            let versions = probe_versions(&probes, parallelism, |probe| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                if probe.key == "java" { None } else { Some(probe.key.to_owned()) }
+            });
+            assert_eq!(versions, expected);
+            assert_eq!(calls.load(Ordering::SeqCst), 16);
+        }
+        assert!(probe_versions(&[], 4, |_| panic!("empty input cannot launch a probe")).is_empty());
+    }
+
+    #[test]
+    fn a_later_probe_can_finish_first_without_reordering_the_returned_versions() {
+        let probes = vec![&LANGUAGE_PROBES[0], &LANGUAGE_PROBES[1]];
+        let gate = (Mutex::new(false), Condvar::new());
+        let completion = Mutex::new(Vec::new());
+        let versions = probe_versions(&probes, 4, |probe| {
+            if probe.key == "rust" {
+                let ready = gate.0.lock().unwrap();
+                let (ready, timeout) =
+                    gate.1.wait_timeout_while(ready, Duration::from_secs(30), |ready| !*ready).unwrap();
+                if !*ready || timeout.timed_out() {
+                    return None;
+                }
+                completion.lock().unwrap().push(probe.key);
+            } else {
+                completion.lock().unwrap().push(probe.key);
+                *gate.0.lock().unwrap() = true;
+                gate.1.notify_all();
+            }
+            Some(probe.key.to_owned())
+        });
+        assert_eq!(
+            *completion.lock().unwrap(),
+            vec!["python", "rust"],
+            "the fixture must actually reverse completion order"
+        );
+        assert_eq!(versions, vec![Some("rust".into()), Some("python".into())]);
     }
 }
