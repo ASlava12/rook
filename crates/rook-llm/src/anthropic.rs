@@ -581,7 +581,10 @@ fn wire_request(model: &str, request: &Request, stream: bool) -> serde_json::Val
                 let content = if message.images.is_empty() {
                     serde_json::json!(message.content)
                 } else {
-                    let mut parts = vec![serde_json::json!({"type":"text", "text":message.content})];
+                    let mut parts = Vec::with_capacity(message.images.len() + 1);
+                    if !message.content.trim().is_empty() {
+                        parts.push(serde_json::json!({"type":"text", "text":message.content}));
+                    }
                     parts.extend(message.images.iter().map(|image| serde_json::json!({
                         "type":"image", "source":{"type":"base64", "media_type":image.mime_type,"data":image.data}
                     })));
@@ -608,7 +611,15 @@ fn wire_request(model: &str, request: &Request, stream: bool) -> serde_json::Val
                 let mut blocks: Vec<_> = message.images.iter().map(|image| serde_json::json!({
                     "type":"image", "source":{"type":"base64", "media_type":image.mime_type,"data":image.data}
                 })).collect();
-                blocks.push(text_block(&message.content, message.cache, request.cache_ttl));
+                if !message.content.trim().is_empty() || blocks.is_empty() {
+                    blocks.push(text_block(&message.content, message.cache, request.cache_ttl));
+                } else if message.cache {
+                    // Image-only turns retain the same cache boundary without
+                    // manufacturing an empty text block just to carry it.
+                    if let Some(last) = blocks.last_mut() {
+                        last["cache_control"] = ephemeral(request.cache_ttl);
+                    }
+                }
                 messages.push(serde_json::json!({"role":"user", "content":blocks}));
             }
             Role::Assistant => {

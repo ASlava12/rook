@@ -135,6 +135,11 @@ same trait, and the agent loop never learns which is answering. Responses is
 selected explicitly; it shares endpoint/authentication/catalog handling with
 the compatible adapter while encoding typed input/output items separately.
 
+Anthropic [image-only message conversion](anthropic-image-only.md) omits redundant
+blank caption blocks while retaining image payloads and native tool-result IDs.
+A requested image-only user cache boundary belongs to the last image, with the
+configured TTL; nonblank captions and plain tool output keep their exact bytes.
+
 The shared retry wrapper also handles transient refusals inside an HTTP 200
 stream before response content is delivered. Opening failures and stream refusals
 share a four-attempt ceiling. Responses reads case-insensitive nested Retry-After

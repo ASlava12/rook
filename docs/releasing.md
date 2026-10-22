@@ -158,6 +158,13 @@ usage. A third chat must retain its earlier confirmed action while refusing an
 unconfirmed forced final answer before writing the output artifact. Require all
 twelve check flags.
 
+When Anthropic image conversion changes, run the
+[owned legacy image replay](../xtask/probes/anthropic-image-only/README.md) on
+the extracted host CLI/daemon pair. Require all eight conditions, including
+ordinary CLI/WebSocket completion, exact image bytes, both cache TTLs and
+unchanged original saved input. The helper only seeds/verifies private data;
+the requested binary pair performs all provider requests.
+
 After the source gates and downloaded-draft checks pass, publish that same
 draft, without rebuilding or replacing its tested archives:
 
