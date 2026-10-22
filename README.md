@@ -848,6 +848,11 @@ The balance is not cached as a model limit. A second payment refusal or one
 without a usable integer budget follows the existing error/fallback path.
 Streams can retry only before answer content or completion evidence arrives.
 
+For retryable provider failures, `Retry-After` accepts either integer seconds
+or an HTTP date. Both forms keep the existing 120-second ceiling. Past dates
+add no delay beyond ordinary backoff; invalid or more distant values do not
+override that backoff. Date interpretation uses the local receipt clock.
+
 The Responses transport is selected explicitly with `api = "responses"` (alias
 `"openai-responses"`) on a named model/endpoint, or `responses/gpt-6-astra`
 shorthand. The shorthand uses `OPENAI_API_KEY` and `OPENAI_BASE_URL`, like

@@ -297,18 +297,26 @@ pub enum LlmError {
     Other(String),
 }
 
-/// How long the provider asked us to wait, in seconds.
-///
-/// Only the delta-seconds form: the HTTP-date form is legal and nobody sends
-/// it, and a date needs a clock and a parser to disagree about. A header that
-/// is not a number is no answer, which is what `None` means here.
+/// How long the provider asked us to wait, as delay-seconds or an HTTP date.
+/// Invalid or excessively distant values do not override ordinary backoff.
 pub fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<std::time::Duration> {
-    let said = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
-    let seconds: u64 = said.trim().parse().ok()?;
+    retry_after_at(headers, std::time::SystemTime::now())
+}
+
+fn retry_after_at(
+    headers: &reqwest::header::HeaderMap,
+    now: std::time::SystemTime,
+) -> Option<std::time::Duration> {
+    let said = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?.trim();
+    let wait = if said.bytes().all(|byte| byte.is_ascii_digit()) {
+        std::time::Duration::from_secs(said.parse().ok()?)
+    } else {
+        httpdate::parse_http_date(said).ok()?.duration_since(now).unwrap_or_default()
+    };
     // A provider that says to come back tomorrow is a provider to give up on
     // rather than to sleep through: a turn nobody is watching is still a turn
     // somebody is paying for.
-    (seconds <= MOST_PATIENCE_SECS).then(|| std::time::Duration::from_secs(seconds))
+    (wait <= std::time::Duration::from_secs(MOST_PATIENCE_SECS)).then_some(wait)
 }
 
 /// Beyond this, the answer is not "later" in any useful sense.
@@ -1515,10 +1523,6 @@ mod tests {
         assert_eq!(retry_after(&headers(&[("retry-after", " 5 ")])), Some(Duration::from_secs(5)));
         assert_eq!(retry_after(&headers(&[])), None, "no header is no answer");
 
-        // The date form is legal and nobody sends it; a clock and a parser
-        // disagreeing about one is worse than falling back to doubling.
-        assert_eq!(retry_after(&headers(&[("retry-after", "Wed, 21 Oct 2026 07:28:00 GMT")])), None);
-
         // Past the ceiling is not "later" in any useful sense: a turn nobody
         // is watching is still one somebody is paying for.
         assert_eq!(retry_after(&headers(&[("retry-after", "86400")])), None);
@@ -1527,6 +1531,46 @@ mod tests {
             Some(Duration::from_secs(MOST_PATIENCE_SECS)),
             "the ceiling itself is still an answer"
         );
+    }
+
+    #[test]
+    fn http_date_retry_waits_use_the_receipt_clock_and_the_existing_ceiling() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = UNIX_EPOCH + Duration::from_secs(1_762_000_000);
+        let at = |when: SystemTime, received: SystemTime| {
+            retry_after_at(&headers(&[("retry-after", &httpdate::fmt_http_date(when))]), received)
+        };
+        assert_eq!(at(now + Duration::from_secs(30), now), Some(Duration::from_secs(30)));
+        assert_eq!(at(now - Duration::from_secs(30), now), Some(Duration::ZERO));
+        assert_eq!(at(now, now), Some(Duration::ZERO));
+        assert_eq!(
+            at(now + Duration::from_secs(MOST_PATIENCE_SECS), now),
+            Some(Duration::from_secs(MOST_PATIENCE_SECS))
+        );
+        assert_eq!(at(now + Duration::from_secs(MOST_PATIENCE_SECS + 1), now), None);
+        assert_eq!(
+            at(now + Duration::from_secs(MOST_PATIENCE_SECS + 1), now + Duration::from_millis(500)),
+            None,
+            "a fractional second past the ceiling must not be rounded down into admission"
+        );
+        for value in
+            ["", "-1", "+30", "1.5", "tomorrow", "9999999999999999999999999", "Wed, 99 Oct 2026 07:28:00 GMT"]
+        {
+            assert_eq!(retry_after_at(&headers(&[("retry-after", value)]), now), None, "{value}");
+        }
+    }
+
+    #[test]
+    fn retry_after_accepts_the_legacy_http_date_spellings() {
+        let target = httpdate::parse_http_date("Sun, 06 Nov 1994 08:49:37 GMT").unwrap();
+        for value in
+            ["Sun, 06 Nov 1994 08:49:37 GMT", "Sunday, 06-Nov-94 08:49:37 GMT", "Sun Nov  6 08:49:37 1994"]
+        {
+            assert_eq!(
+                retry_after_at(&headers(&[("retry-after", value)]), target - Duration::from_secs(30)),
+                Some(Duration::from_secs(30))
+            );
+        }
     }
 }
 

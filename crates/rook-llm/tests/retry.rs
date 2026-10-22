@@ -380,21 +380,29 @@ async fn a_refusal_about_tools_names_the_setting_that_answers_it() {
 
 /// Answers 429 with the wait it wants, then a real reply. The header is what
 /// this is about, so the server sends it and nothing else does.
-async fn paced(seconds: &'static str) -> (String, Arc<AtomicUsize>) {
+async fn paced(
+    header: impl Fn() -> String + Send + 'static,
+) -> (String, Arc<std::sync::Mutex<Vec<std::time::SystemTime>>>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let seen = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
     let counted = seen.clone();
 
     tokio::spawn(async move {
         while let Ok((mut socket, _)) = listener.accept().await {
             let mut scratch = [0u8; 8192];
             let _ = socket.read(&mut scratch).await;
-            let n = counted.fetch_add(1, Ordering::SeqCst);
+            let n = {
+                let mut seen = counted.lock().unwrap();
+                assert!(seen.len() < 8, "the fixture admits at most eight requests");
+                seen.push(std::time::SystemTime::now());
+                seen.len() - 1
+            };
             let response = match n {
                 0 => {
+                    let seconds = header();
                     let body = r#"{"error":"slow down"}"#;
                     format!(
                         "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\n\
@@ -423,17 +431,42 @@ async fn paced(seconds: &'static str) -> (String, Arc<AtomicUsize>) {
 /// ends the turn on a refusal the server had already explained how to avoid.
 #[tokio::test]
 async fn the_wait_is_the_one_the_provider_asked_for() {
-    let (url, seen) = paced("2").await;
+    let (url, seen) = paced(|| "2".into()).await;
 
     let started = std::time::Instant::now();
     let answered = provider(url).complete(Request::new(Vec::new())).await;
     let waited = started.elapsed();
 
-    assert_eq!(seen.load(Ordering::SeqCst), 2, "asked again after waiting");
+    assert_eq!(seen.lock().unwrap().len(), 2, "asked again after waiting");
     assert_eq!(answered.expect("the second request answers").message.content, "answered");
     // A sleep does not finish early, so the floor is the assertion: without
     // reading the header the first wait is one second.
     assert!(waited >= std::time::Duration::from_secs(2), "waited only {waited:?}");
+}
+
+#[tokio::test]
+async fn a_real_http_date_refusal_is_not_retried_before_its_deadline() {
+    use std::time::{Duration, SystemTime};
+    let deadline = Arc::new(std::sync::Mutex::new(None));
+    let target = deadline.clone();
+    let (url, seen) = paced(move || {
+        // Construct the date at refusal time: runner delays before the request
+        // cannot consume the waiting interval this test is meant to exercise.
+        let header = httpdate::fmt_http_date(SystemTime::now() + Duration::from_secs(4));
+        *target.lock().unwrap() = Some(httpdate::parse_http_date(&header).unwrap());
+        header
+    })
+    .await;
+    let answered = provider(url).complete(Request::new(Vec::new())).await.unwrap();
+    assert_eq!(answered.message.content, "answered");
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    let deadline = deadline.lock().unwrap().unwrap();
+    assert!(seen[0] < deadline, "the refusal must actually specify a future deadline");
+    assert!(
+        seen[1] >= deadline,
+        "the second physical request arrived before Retry-After: {seen:?}, deadline {deadline:?}"
+    );
 }
 
 /// Answers the same status and body for ever, counting the asks.

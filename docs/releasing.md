@@ -75,6 +75,11 @@ When credit-limited provider recovery changes, run the
 [owned credit-output probe](../xtask/probes/credit-output/README.md) against the
 extracted CLI. Require all ten flags: one useful smaller-budget retry, bounded
 repeated/bad-budget refusals, unchanged owned workspace and unchanged binary.
+When Retry-After interpretation changes, run the
+[owned HTTP-date probe](../xtask/probes/retry-after-date/README.md) against the
+extracted CLI. Require all eight flags, including a physical retry no earlier
+than the specified date, numeric-delay preservation and bounded invalid/distant
+date fallbacks.
 When language-server startup changes, run the
 [owned daemon LSP probe](../xtask/probes/lsp-startup/README.md) against the extracted
 daemon as well. It checks shared-pool behavior through ordinary chat sockets.

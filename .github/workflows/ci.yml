@@ -41,6 +41,9 @@ jobs:
       - name: credit-limited output recovery
         shell: bash
         run: python3 xtask/probes/credit-output/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-credit-output.json"
+      - name: Retry-After HTTP dates
+        shell: bash
+        run: python3 xtask/probes/retry-after-date/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-retry-after-date.json"
       - name: macOS process-group lifecycle
         if: matrix.os == 'macos-latest'
         run: cargo test --locked -p rook-contain process::tests -- --nocapture

@@ -2866,6 +2866,7 @@ dependencies = [
  "base64",
  "futures-core",
  "futures-util",
+ "httpdate",
  "image",
  "reqwest",
  "rustls",
