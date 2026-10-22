@@ -1,7 +1,7 @@
 # Rook
 
-[Rook 0.21.8](docs/releases/0.21.8.md): provider retry waits show their deadline without inventing progress;
-CLI, TUI, ACP and browser views share scoped status.
+[Rook 0.21.9](docs/releases/0.21.9.md): independent language/tool version probes run up to four at a time;
+startup retains deterministic version maps and existing command deadlines.
 
 [Domain network policy with OS containment](docs/domain-network-policy.md).
 
