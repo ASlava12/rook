@@ -1,7 +1,7 @@
 # Rook
 
-[Rook 0.21.6](docs/releases/0.21.6.md): retries accept HTTP-date advice within the
-existing ceiling; checker history reports its bounds, omissions and paths to older evidence.
+[Rook 0.21.7](docs/releases/0.21.7.md): concurrent retries use bounded positive jitter;
+transcript and recall readers admit metadata before decoding it.
 
 [Domain network policy with OS containment](docs/domain-network-policy.md).
 
