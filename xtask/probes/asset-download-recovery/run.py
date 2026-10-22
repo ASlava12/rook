@@ -273,6 +273,11 @@ try:
         no_backups = not any((install / 'bin').glob('*.previous')) and not (install / 'share/rook/skills.previous').exists()
         result = json.loads(stdout) if code == 0 else None
         observed = [row for row in wire if row['mode'] == mode and row['kind'] == 'asset']
+        # Symbolized backtraces can fill the tail on hosted source builds.
+        # Check the actual error line; the complete bounded capture stays in logs.
+        error_line = stderr.decode('utf-8', errors='replace').split('\n', 1)[0][:2000]
+        print(json.dumps({'case': mode, 'exit_code': code, 'asset_requests': len(observed),
+                          'error_line': error_line}), flush=True)
         report['cases'].append({'mode': mode, 'exit_code': code, 'receipt': result,
             'expected_success': expected_success, 'asset_requests': observed,
             'installed_bytes_match': after_binary, 'previous_binaries_match': previous_binary,
@@ -281,6 +286,7 @@ try:
             'exact_successful_tree': after_install == expected_tree,
             'installation_before': before_install, 'installation_after': after_install,
             'workspace_unchanged': workspace_digest(workspace) == before,
+            'error_line': error_line,
             'stderr_tail': stderr.decode('utf-8', errors='replace')[-2000:]})
     cases = {row['mode']: row for row in report['cases']}
     def succeeded(name, count):
@@ -295,9 +301,9 @@ try:
     report['checks'] = {
         'cli_resumes_truncated_asset': succeeded('resume', 2),
         'cli_restarts_when_range_ignored': succeeded('ignored-range', 2),
-        'three_attempt_limit_enforced': cases['retry-cap']['exit_code'] != 0 and len(cases['retry-cap']['asset_requests']) == 3 and 'after 3 attempts' in cases['retry-cap']['stderr_tail'],
-        'mismatched_range_refused': cases['bad-range']['exit_code'] != 0 and len(cases['bad-range']['asset_requests']) == 2 and 'Content-Range' in cases['bad-range']['stderr_tail'],
-        'digest_refusal_is_terminal': cases['bad-digest']['exit_code'] != 0 and len(cases['bad-digest']['asset_requests']) == 1 and 'does not match the digest' in cases['bad-digest']['stderr_tail'],
+        'three_attempt_limit_enforced': cases['retry-cap']['exit_code'] != 0 and len(cases['retry-cap']['asset_requests']) == 3 and 'after 3 attempts' in cases['retry-cap']['error_line'],
+        'mismatched_range_refused': cases['bad-range']['exit_code'] != 0 and len(cases['bad-range']['asset_requests']) == 2 and 'Content-Range' in cases['bad-range']['error_line'],
+        'digest_refusal_is_terminal': cases['bad-digest']['exit_code'] != 0 and len(cases['bad-digest']['asset_requests']) == 1 and 'does not match the digest' in cases['bad-digest']['error_line'],
         'refusals_leave_installation_unchanged': all(row['refusal_has_no_effects'] for row in refusals),
         'successful_installs_have_exact_payloads': all(row['exit_code'] == 0 and row['installed_bytes_match'] and row['new_skills_match'] and row['exact_successful_tree'] for row in successes),
         'successful_installs_keep_previous_files': all(row['exit_code'] == 0 and row['previous_binaries_match'] and row['previous_skills_match'] for row in successes),

@@ -46,3 +46,8 @@ stream. Each CLI has a ninety-second fixture deadline. Only fixture-owned childr
 are killed after a deadline/capture refusal. All case directories, archives,
 receipts, requests and logs are retained. See the
 [reader contract and limits](../../../docs/asset-download-recovery.md).
+
+Refusal checks read the first error line. Symbolized backtraces can occupy the
+last 2,000 characters on hosted source builds, so a log tail alone cannot prove
+which refusal occurred. Each case prints its exit code, request count and error
+line; complete captures remain bounded and retained in the owned logs.
