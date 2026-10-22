@@ -32,7 +32,7 @@ impl Tool for RunCommand {
                     "timeout_secs": { "type": "integer" },
                     "output": {
                         "type": "string", "enum": ["auto", "raw"],
-                        "description": "auto condenses routine local foreground Cargo build progress when an original output capture is available; raw keeps it in the reply. Other command output remains unchanged."
+                        "description": "auto: condense local Cargo progress; raw: retain it."
                     },
                     "background": {
                         "type": "boolean",
@@ -41,7 +41,7 @@ impl Tool for RunCommand {
                     "secrets": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Names from `rook secrets`, put in the environment as $ROOK_SECRET_<NAME> for this command only. Values are never shown to you and are cut out of the output."
+                        "description": "Names from `rook secrets`; inject as uppercase ROOK_SECRET_<NAME>. Values are redacted from output."
                     }
                 },
                 "required": ["command"]
