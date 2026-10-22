@@ -20,6 +20,129 @@ fn add(rook: &Rook, session: u128, text: &str) -> u64 {
 }
 
 #[test]
+fn navigable_history_admits_the_session_before_decoding_its_variable_length_fields() {
+    let root = tempfile::tempdir().unwrap();
+    let rook = open(root.path(), Config::default());
+    let session = rook.start_session("small title").unwrap();
+    let seq = add(&rook, session, "readable body");
+    rook.store.update_session(session, |meta| meta.title = "x".repeat(65 * 1024)).unwrap();
+    let operations = [
+        rook.transcript_page(session, &PageRequest::default()).map(|_| ()),
+        rook.transcript_entry(session, seq, 0).map(|_| ()),
+        rook.transcript_quote(session, seq, 0).map(|_| ()),
+        rook.transcript_image(session, seq, 0).map(|_| ()),
+        rook.transcript_search(session, "readable", Cursor::default()).map(|_| ()),
+    ];
+    for result in operations {
+        let error = result.expect_err("the session header must fit before any event is acquired");
+        assert!(error.to_string().contains("metadata"), "{error}");
+        assert!(error.to_string().contains(&rook_store::format_session_id(session)), "{error}");
+    }
+    assert_eq!(rook.store.get_session(session).unwrap().unwrap().title.len(), 65 * 1024);
+}
+
+#[test]
+fn navigable_history_rejects_oversized_event_metadata_before_building_an_excerpt() {
+    let root = tempfile::tempdir().unwrap();
+    let rook = open(root.path(), Config::default());
+    let session = rook.start_session("bounded metadata").unwrap();
+    let seq = rook
+        .store
+        .append_event(
+            session,
+            NewEvent::new(EventKind::UserMessage, Kind::Message, b"small body")
+                .label(&"oversized-label".repeat(2048)),
+        )
+        .unwrap();
+    let operations = [
+        rook.transcript_page(session, &PageRequest::default()).map(|_| ()),
+        rook.transcript_entry(session, seq, 0).map(|_| ()),
+        rook.transcript_quote(session, seq, 0).map(|_| ()),
+        rook.transcript_image(session, seq, 0).map(|_| ()),
+        rook.transcript_search(session, "small", Cursor::default()).map(|_| ()),
+        rook.session_recall(&rook_core::session_recall::Request {
+            session: Some(rook_store::format_session_id(session)),
+            around: Some(seq),
+            ..Default::default()
+        })
+        .map(|_| ()),
+    ];
+    for result in operations {
+        let error = result.expect_err("a small output budget must not admit arbitrary encoded metadata");
+        assert!(error.to_string().contains("metadata"), "{error}");
+        assert!(error.to_string().contains(&format!("#{seq}")), "{error}");
+    }
+    assert_eq!(
+        rook.store.events(session, seq, 1).unwrap()[0].record.label.len(),
+        "oversized-label".len() * 2048
+    );
+}
+
+#[test]
+fn paging_existence_probes_admit_the_neighbors_metadata_before_decoding_it() {
+    for oversized_first in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let rook = open(root.path(), Config::default());
+        let session = rook.start_session("bounded neighboring metadata").unwrap();
+        let large = || {
+            rook.store
+                .append_event(
+                    session,
+                    NewEvent::new(EventKind::UserMessage, Kind::Message, b"neighbor")
+                        .label(&"x".repeat(20 * 1024)),
+                )
+                .unwrap()
+        };
+        if oversized_first {
+            large();
+        }
+        let seq = add(&rook, session, "ordinary requested entry");
+        if !oversized_first {
+            large();
+        }
+        let error = rook
+            .transcript_page(session, &PageRequest { from: Some(seq), limit: Some(1), ..Default::default() })
+            .expect_err("existence probes are reads too, even outside the returned page");
+        assert!(error.to_string().contains("metadata"), "{error}");
+    }
+}
+
+#[test]
+fn optional_tool_card_neighbors_cannot_bypass_transcript_metadata_admission() {
+    for before in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let rook = open(root.path(), Config::default());
+        let session = rook.start_session("bounded card neighbors").unwrap();
+        let large = || {
+            rook.store
+                .append_event(
+                    session,
+                    NewEvent::new(EventKind::Note, Kind::Message, b"unrelated UI note")
+                        .label(&"x".repeat(20 * 1024)),
+                )
+                .unwrap()
+        };
+        if before {
+            large();
+        }
+        let seq = rook.log(session, EventKind::ToolResult, "run_command", "retained result").unwrap();
+        if !before {
+            large();
+        }
+        let error = rook
+            .transcript_entry(session, seq, 0)
+            .expect_err("a card must not deserialize arbitrary previous or timing records");
+        assert!(error.to_string().contains("metadata"), "{error}");
+        if before {
+            let error = rook
+                .transcript_image(session, seq, 0)
+                .expect_err("explicit image reads must admit their companion metadata too");
+            assert!(error.to_string().contains("metadata"), "{error}");
+        }
+    }
+}
+
+#[test]
 fn tool_cards_require_an_exact_bounded_saved_measurement_and_never_infer_success_from_text() {
     let root = tempfile::tempdir().unwrap();
     let rook = open(root.path(), Config::default());

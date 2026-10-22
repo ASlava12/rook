@@ -111,11 +111,19 @@ pub(crate) fn tool_measurement(
     rook: &Rook,
     result: &rook_store::Event,
 ) -> Result<Option<crate::transcript::ToolMeasurement>> {
+    tool_measurement_bounded(rook, result, usize::MAX)
+}
+
+pub(crate) fn tool_measurement_bounded(
+    rook: &Rook,
+    result: &rook_store::Event,
+    metadata_bytes: usize,
+) -> Result<Option<crate::transcript::ToolMeasurement>> {
     if result.record.kind != EventKind::ToolResult {
         return Ok(None);
     }
     let Some(from) = result.seq.checked_add(1) else { return Ok(None) };
-    for event in rook.store.events(result.session, from, 16)? {
+    for event in rook.store.events_bounded(result.session, from, 16, metadata_bytes)? {
         if event.record.kind != EventKind::Note || event.record.label != TIMING_LABEL {
             continue;
         }

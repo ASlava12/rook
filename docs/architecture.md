@@ -1,5 +1,7 @@
 # Architecture
 
+[Transcript metadata admission and retrieval limits](transcript-admission.md).
+
 [Domain network policy with OS containment](domain-network-policy.md).
 
 Direct remote SSH file authority: [configuration and recovery limits](ssh-native-workspaces.md).

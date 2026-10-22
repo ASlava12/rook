@@ -7,6 +7,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{CoreError, Result, Rook, TranscriptEntry};
 
+// Output limits apply after decoding. Admit variable-length journal metadata
+// first, including records inspected only to find a cursor or a UI companion.
+const SESSION_METADATA_BYTES: usize = 64 * 1024;
+pub(crate) const EVENT_METADATA_BYTES: usize = 16 * 1024;
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -257,13 +262,17 @@ fn no_event(seq: u64) -> CoreError {
 }
 fn end(rook: &Rook, session: u128) -> Result<u64> {
     rook.store
-        .get_session(session)?
+        .get_session_limited(session, SESSION_METADATA_BYTES)?
         .map(|m| m.next_seq)
         .ok_or_else(|| CoreError::NoSession(rook_store::format_session_id(session)))
 }
 fn event(rook: &Rook, session: u128, seq: u64) -> Result<Event> {
     end(rook, session)?;
-    rook.store.events(session, seq, 1)?.into_iter().find(|e| e.seq == seq).ok_or_else(|| no_event(seq))
+    rook.store
+        .events_bounded(session, seq, 1, EVENT_METADATA_BYTES)?
+        .into_iter()
+        .find(|e| e.seq == seq)
+        .ok_or_else(|| no_event(seq))
 }
 
 /// Encoded attachments and provider companions are not searchable raw text.
@@ -357,10 +366,11 @@ fn entry_from(rook: &Rook, event: &Event, body: String, truncated: bool) -> Resu
         truncated,
         body,
         doing,
-        tool_measurement: crate::diagnostics::tool_measurement(rook, event)?,
-        change_note: crate::tool_changes::source(rook, event)?,
-        tool_details: crate::tool_details::load(rook, event)?,
-        image_note: crate::tool_images::companion(rook, event)?.map(|image| image.seq),
+        tool_measurement: crate::diagnostics::tool_measurement_bounded(rook, event, EVENT_METADATA_BYTES)?,
+        change_note: crate::tool_changes::source_bounded(rook, event, EVENT_METADATA_BYTES)?,
+        tool_details: crate::tool_details::load_bounded(rook, event, EVENT_METADATA_BYTES)?,
+        image_note: crate::tool_images::companion_bounded(rook, event, EVENT_METADATA_BYTES)?
+            .map(|image| image.seq),
     })
 }
 struct Count {
@@ -403,10 +413,14 @@ impl Rook {
         let count = request.limit.unwrap_or(settings.page_entries).clamp(1, settings.page_entries);
         let backwards = request.from.is_none();
         let mut events = match request.from {
-            Some(from) => self.store.events(session, from, count)?,
-            None => {
-                self.store.events_before(session, request.before.unwrap_or(through).min(through), count)?
-            }
+            Some(from) => self.store.events_bounded(session, from, count, EVENT_METADATA_BYTES)?,
+            None => self.store.events_before_bounded(
+                session,
+                0,
+                request.before.unwrap_or(through).min(through),
+                count,
+                EVENT_METADATA_BYTES,
+            )?,
         };
         if backwards {
             events.reverse();
@@ -439,8 +453,11 @@ impl Rook {
         let first =
             items.first().map(|e| e.seq).unwrap_or(request.before.or(request.from).unwrap_or(through));
         let after = items.last().map(|e| e.seq.saturating_add(1)).unwrap_or(first);
-        let previous = (!self.store.events_before(session, first, 1)?.is_empty()).then_some(first);
-        let next = (!self.store.events(session, after, 1)?.is_empty()).then_some(after);
+        let previous =
+            (!self.store.events_before_bounded(session, 0, first, 1, EVENT_METADATA_BYTES)?.is_empty())
+                .then_some(first);
+        let next = (!self.store.events_bounded(session, after, 1, EVENT_METADATA_BYTES)?.is_empty())
+            .then_some(after);
         Ok(Page { items, previous, next, through })
     }
 
@@ -522,7 +539,8 @@ impl Rook {
             .map_err(|e| CoreError::Other(e.to_string()))?;
         // Unicode case folding can match a wider UTF-8 character than the query.
         let overlap = query.chars().count().saturating_mul(4);
-        let events = self.store.events(session, cursor.seq, settings.search_events)?;
+        let events =
+            self.store.events_bounded(session, cursor.seq, settings.search_events, EVENT_METADATA_BYTES)?;
         let mut result = Matches { hits: Vec::new(), next: None, scanned_events: 0, scanned_bytes: 0 };
         if events.is_empty() {
             return Ok(result);

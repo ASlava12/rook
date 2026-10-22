@@ -50,16 +50,24 @@ pub(crate) fn note(name: &str, value: Option<&Value>, vault: &Vault) -> Option<S
 /// The atomic batch puts changes immediately before the result, or before
 /// its image companion. Never search another branch or infer a diff from prose.
 pub(crate) fn source(rook: &Rook, result: &Event) -> Result<Option<u64>> {
+    source_bounded(rook, result, usize::MAX)
+}
+
+pub(crate) fn source_bounded(rook: &Rook, result: &Event, metadata_bytes: usize) -> Result<Option<u64>> {
     if result.record.kind != EventKind::ToolResult {
         return Ok(None);
     }
     let Some(previous) = result.seq.checked_sub(1) else { return Ok(None) };
-    let Some(mut note) = rook.store.events(result.session, previous, 1)?.into_iter().next() else {
+    let Some(mut note) =
+        rook.store.events_bounded(result.session, previous, 1, metadata_bytes)?.into_iter().next()
+    else {
         return Ok(None);
     };
     if note.record.kind == EventKind::Note && note.record.label == crate::tool_images::LABEL {
         let Some(previous) = previous.checked_sub(1) else { return Ok(None) };
-        let Some(before) = rook.store.events(result.session, previous, 1)?.into_iter().next() else {
+        let Some(before) =
+            rook.store.events_bounded(result.session, previous, 1, metadata_bytes)?.into_iter().next()
+        else {
             return Ok(None);
         };
         note = before;

@@ -230,7 +230,8 @@ pub(crate) fn read(rook: &Rook, result: &Event, index: usize) -> Result<crate::t
     if index >= rook_llm::images::MAX_IMAGES_PER_MESSAGE {
         return Err(CoreError::Other("image index must be between 0 and 3".into()));
     }
-    let event = companion(rook, result)?.ok_or(CoreError::NoToolImage(result.seq, index))?;
+    let event = companion_bounded(rook, result, crate::transcript::EVENT_METADATA_BYTES)?
+        .ok_or(CoreError::NoToolImage(result.seq, index))?;
     let mut images = decode(rook, &event)?;
     let count = images.len();
     if index >= count {

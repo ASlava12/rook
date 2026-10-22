@@ -128,17 +128,29 @@ pub(crate) fn bind(preview: &str, text: &str) -> Result<String> {
 }
 
 pub(crate) fn load(rook: &Rook, result: &Event) -> Result<Option<ToolDetails>> {
+    load_bounded(rook, result, usize::MAX)
+}
+
+pub(crate) fn load_bounded(
+    rook: &Rook,
+    result: &Event,
+    metadata_bytes: usize,
+) -> Result<Option<ToolDetails>> {
     if result.record.kind != EventKind::ToolResult {
         return Ok(None);
     }
     let Some(previous) = result.seq.checked_sub(1) else { return Ok(None) };
-    let Some(mut event) = rook.store.events(result.session, previous, 1)?.into_iter().next() else {
+    let Some(mut event) =
+        rook.store.events_bounded(result.session, previous, 1, metadata_bytes)?.into_iter().next()
+    else {
         return Ok(None);
     };
     let has_images = event.record.kind == EventKind::Note && event.record.label == crate::tool_images::LABEL;
     if has_images {
         let Some(previous) = previous.checked_sub(1) else { return Ok(None) };
-        let Some(before) = rook.store.events(result.session, previous, 1)?.into_iter().next() else {
+        let Some(before) =
+            rook.store.events_bounded(result.session, previous, 1, metadata_bytes)?.into_iter().next()
+        else {
             return Ok(None);
         };
         event = before;
