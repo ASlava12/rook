@@ -20,8 +20,8 @@ Eight flags require exact language/tool maps, exactly one call per owned source,
 completion within twenty seconds of the holder handshake, closure of that owned
 holder's connection, no model HTTP calls and unchanged CLI/workspace bytes. The
 deadline check is a functional control against a thirty-second holder, not a
-throughput benchmark. Unit subprocess cases separately reach a pipe-capacity
-deadlock precondition and prove that individually smaller streams share one cap.
+throughput benchmark. Unit subprocess cases separately verify lossless large
+captures and prove that individually smaller streams share one cap.
 
 A bounded loopback receiver serializes events and acknowledges helper starts.
 The holder keeps its socket through the controlled sleep, so EOF/reset provides

@@ -226,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn output_is_drained_before_exit_so_full_pipes_cannot_deadlock_the_probe() {
+    fn large_stdout_and_stderr_are_captured_without_losing_bytes() {
         let output = captured_within(&mut command("flood"), Duration::from_secs(15), 300 * 1024).unwrap();
         assert!(output.status.success());
         assert_eq!(output.stdout.iter().filter(|byte| **byte == 0xfe).count(), 128 * 1024);
