@@ -499,33 +499,12 @@ impl<'a> AgentLoop<'a> {
         /// came back — and not so much that the check costs more than the turn.
         /// A step is a few hundred tokens, so this is tens of steps.
         const BUDGET_TOKENS: usize = 6_000;
-        /// Per entry, before the budget above is applied. A tool result of a
-        /// megabyte is a turn nobody can read either.
-        const PER_ENTRY_BYTES: usize = 2_000;
-
-        let Ok(entries) = self.rook.transcript(self.session, self.began_at_seq, usize::MAX, PER_ENTRY_BYTES)
-        else {
-            return String::new();
-        };
-        // What reaches a model is one question and it has one answer, which
-        // this did not ask the first time: the whole transcript went in,
-        // bookkeeping and all. A checkpoint carries, under a key called
-        // `files`, the store's object id for each path — sixty-four hex digits
-        // beside a filename, which is what a content hash looks like and is
-        // not one. A checker read the checkpoint taken before a rename, hashed
-        // the moved file, found the two did not agree and reported that the
-        // contents had been altered; the turn then spent every step it had
-        // left hunting a difference that was not there. Measured afterwards:
-        // the file was byte-identical throughout, and its plain SHA256 is the
-        // one the file has now, not the id the checkpoint recorded.
-        let entries: Vec<_> = entries
-            .into_iter()
-            .filter(|e| rook_store::EventKind::named(&e.kind).is_some_and(crate::context::reaches_the_model))
-            .collect();
-        let span = render_span(&entries, BUDGET_TOKENS);
-        if span.trim().is_empty() {
-            return String::new();
-        }
+        // Filter bookkeeping before resolving bodies and bound acquisition,
+        // not just the final rendering. Report missing history explicitly.
+        let excerpt = super::checker_history::read(self.rook, self.session, self.began_at_seq);
+        let entries = &excerpt.entries;
+        let span = render_span(entries, BUDGET_TOKENS);
+        let coverage = excerpt.notice(self.session, self.began_at_seq);
         let browser_evidence = entries
             .iter()
             .rev()
@@ -550,12 +529,12 @@ impl<'a> AgentLoop<'a> {
             .unwrap_or_default();
         let span = crate::sources::data("transcript", "this turn; recorded evidence", &span);
         format!(
-            "\n\nThis is what the turn did, in order. It is evidence of how the workspace came \
+            "\n\nThis is a recorded excerpt of the turn, in order. It is evidence of how the workspace came \
              to be as it is, not of whether the goal is met — that is still what is on disk and \
              what runs. Read it for the question the disk cannot answer: whether the agent \
              reached the goal or moved it. A tool's result is that tool's word and not the \
              agent's; the agent's own sentences are its account of itself and carry no weight \
-             beyond what they can be checked against.{browser_evidence}\n\n{span}"
+             beyond what they can be checked against.{browser_evidence}{coverage}\n\n{span}"
         )
     }
 

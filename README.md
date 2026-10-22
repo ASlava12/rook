@@ -573,6 +573,15 @@ A turn can hand a claim to an agent that did not make it:
 verify { "claim": "the tests pass after the change", "settles": "cargo test -p rook-store" }
 ```
 
+The checker receives a frozen excerpt of the current stage, with at most 1024
+scanned events, 128 visible entries and 2000 text bytes per entry. It filters
+bookkeeping before resolving bodies, admits at most 16 KiB per event metadata
+record and 64 KiB for the session record, and omits large attachment frames before
+decoding. A payload must fit 2 MiB both raw and stored before any verified range
+read, including browser caption lookup. Explicit coverage records identify
+omitted ranges, shortened payloads and read failures; `session_recall` can inspect
+anchored older evidence. The saved journal and completion rules are unchanged.
+
 The checker runs in its own session with every tool that changes something
 withheld — not asked not to use them, not given them — and must end with
 `VERDICT: holds`, `fails` or `unproven`. A checker that stops without one — a

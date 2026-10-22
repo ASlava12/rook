@@ -80,6 +80,11 @@ When Retry-After interpretation changes, run the
 extracted CLI. Require all eight flags, including a physical retry no earlier
 than the specified date, numeric-delay preservation and bounded invalid/distant
 date fallbacks.
+When checker history acquisition changes, run the
+[owned checker-history probe](../xtask/probes/checker-history/README.md) against
+the extracted CLI. Require all ten flags, including an actual stage exceeding
+the retention limit, explicit omitted-range coverage and old proof read back by
+the checker through `session_recall`.
 When language-server startup changes, run the
 [owned daemon LSP probe](../xtask/probes/lsp-startup/README.md) against the extracted
 daemon as well. It checks shared-pool behavior through ordinary chat sockets.

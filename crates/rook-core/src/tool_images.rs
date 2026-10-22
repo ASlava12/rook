@@ -160,11 +160,15 @@ fn decode(rook: &Rook, event: &Event) -> Result<Vec<Image>> {
 }
 
 pub(crate) fn companion(rook: &Rook, result: &Event) -> Result<Option<Event>> {
+    companion_bounded(rook, result, usize::MAX)
+}
+
+pub(crate) fn companion_bounded(rook: &Rook, result: &Event, metadata_bytes: usize) -> Result<Option<Event>> {
     if result.record.kind != EventKind::ToolResult {
         return Ok(None);
     }
     let Some(previous) = result.seq.checked_sub(1) else { return Ok(None) };
-    let event = rook.store.events(result.session, previous, 1)?.into_iter().next();
+    let event = rook.store.events_bounded(result.session, previous, 1, metadata_bytes)?.into_iter().next();
     let Some(event) =
         event.filter(|e| e.seq == previous && e.record.kind == EventKind::Note && e.record.label == LABEL)
     else {
