@@ -26,6 +26,9 @@ deadlines and parsing. It does not copy the upstream implementation.
 
 Deterministic tests saturate the four-probe bound, reject oversized requested
 parallelism, force a later probe to finish first, exercise serial/empty input and
-preserve missing results and exact invocation counts. Owned CLI measurements use
-four isolated two-second programs and compare actual process intervals and
-version maps, without turning a wall-time speed estimate into a statistical gate.
+preserve missing results and exact invocation counts. The tracked
+[CLI fixture](../xtask/probes/environment-startup/README.md) uses all sixteen
+isolated two-second version programs. A loopback receiver serializes start/end
+events and requires between two and four active probes, exact maps and one call
+per inventory entry. Source CI runs it on Linux, Windows and macOS. Timing is
+observational; no wall-time speed estimate becomes a statistical gate.

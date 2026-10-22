@@ -56,6 +56,9 @@ jobs:
           cargo build --locked -p rookd
           python3 xtask/probes/provider-wait/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-provider-wait.json"
           python3 xtask/probes/provider-wait/run.py --bin-dir target/debug --refuse auxiliary --output "$RUNNER_TEMP/rook-provider-wait-auxiliary.json"
+      - name: bounded environment probes
+        shell: bash
+        run: python3 xtask/probes/environment-startup/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-environment-probes.json"
       - name: macOS process-group lifecycle
         if: matrix.os == 'macos-latest'
         run: cargo test --locked -p rook-contain process::tests -- --nocapture
