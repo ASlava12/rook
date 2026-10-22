@@ -89,6 +89,7 @@ impl Removed {
 pub(super) struct Filter {
     pending: Vec<u8>,
     passthrough: bool,
+    diagnostic: bool,
     pub removed: Removed,
 }
 
@@ -105,10 +106,21 @@ impl Filter {
                 emit(part);
                 self.pending.clear();
                 self.passthrough = !complete;
+                self.diagnostic = true;
             } else {
                 self.pending.extend_from_slice(part);
                 if complete {
                     let kind = classify(&self.pending);
+                    match kind {
+                        Some(Line::Diagnostic) => self.diagnostic = true,
+                        Some(Line::Boundary | Line::Passed) => self.diagnostic = false,
+                        _ => {}
+                    }
+                    let kind = match kind {
+                        Some(Line::Progress) if !self.diagnostic => Some(true),
+                        Some(Line::Passed) => Some(false),
+                        _ => None,
+                    };
                     match kind {
                         Some(true) => self.removed.progress = self.removed.progress.saturating_add(1),
                         Some(false) => self.removed.passed = self.removed.passed.saturating_add(1),
@@ -132,7 +144,14 @@ impl Filter {
 
 /// Only ordinary SGR colors are ignored for classification. Kept lines retain
 /// every original byte; unknown controls and non-UTF8 data are passed through.
-fn classify(line: &[u8]) -> Option<bool> {
+enum Line {
+    Progress,
+    Passed,
+    Diagnostic,
+    Boundary,
+}
+
+fn classify(line: &[u8]) -> Option<Line> {
     let mut plain = Vec::with_capacity(line.len());
     let mut at = 0;
     while at < line.len() {
@@ -152,7 +171,17 @@ fn classify(line: &[u8]) -> Option<bool> {
         }
         at += 1;
     }
-    let text = std::str::from_utf8(&plain).ok()?.trim_ascii();
+    let original = std::str::from_utf8(&plain).ok()?.trim_end_matches(['\r', '\n']);
+    if original.is_empty() {
+        return Some(Line::Boundary);
+    }
+    let text = original.trim_ascii();
+    if ["error:", "warning:", "error[", "warning[", "note:", "help:"]
+        .iter()
+        .any(|prefix| text.starts_with(prefix))
+    {
+        return Some(Line::Diagnostic);
+    }
     for verb in ["Compiling ", "Checking ", "Fresh "] {
         if let Some(rest) = text.strip_prefix(verb) {
             let mut words = rest.split_ascii_whitespace();
@@ -161,15 +190,18 @@ fn classify(line: &[u8]) -> Option<bool> {
             if !package.is_empty()
                 && version.strip_prefix('v').is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit()))
             {
-                return Some(true);
+                return Some(Line::Progress);
             }
         }
     }
-    if text
+    // rustc indents multiline diagnostic payloads. Only an unindented test
+    // harness line can end that protected block and be removed.
+    if original
+        .trim_ascii_end()
         .strip_prefix("test ")
         .is_some_and(|rest| rest.strip_suffix(" ... ok").is_some_and(|name| !name.trim_ascii().is_empty()))
     {
-        return Some(false);
+        return Some(Line::Passed);
     }
     None
 }
@@ -257,8 +289,56 @@ mod tests {
         filter.feed(&input, |b| emitted += b.len());
         assert_eq!(emitted, input.len());
         assert!(filter.pending.len() <= MAX_LINE);
+        let continuation = b"\n   Checking diagnostic_data v1.0.0\n";
+        filter.feed(continuation, |b| emitted += b.len());
+        assert_eq!(filter.removed.progress, 0);
+        assert_eq!(emitted, input.len() + continuation.len());
         filter.feed(b"\n   Checking owned v1.0.0\n", |b| emitted += b.len());
         assert_eq!(filter.removed.progress, 1);
-        assert_eq!(emitted, input.len() + 1);
+        assert_eq!(emitted, input.len() + continuation.len() + 1);
+    }
+
+    #[test]
+    fn diagnostic_continuations_are_protected_until_a_real_boundary() {
+        let protected = b"\x1b[31merror[E0001]: message\x1b[0m\r\n   Fresh payload v1.0.0\n       \n   Compiling payload v1.0.0\n       test payload ... ok\n";
+        let mut input = protected.to_vec();
+        input.extend_from_slice(b"\ntest harness_case ... ok\n   Checking ordinary v1.0.0\n");
+        let mut expected = protected.to_vec();
+        expected.push(b'\n');
+        for chunk in [1, 7, 65536] {
+            let (kept, removed) = filtered(&input, chunk);
+            assert_eq!(kept, expected);
+            assert_eq!(removed.progress, 1);
+            assert_eq!(removed.passed, 1);
+        }
+        let (kept, removed) = filtered(b"warning: body\n   Checking payload v1.0.0\ntest real_case ... ok\n   Checking ordinary v1.0.0\n", 3);
+        assert_eq!(kept, b"warning: body\n   Checking payload v1.0.0\n");
+        assert_eq!(removed.progress, 1);
+        assert_eq!(removed.passed, 1);
+    }
+
+    #[test]
+    fn actual_rust_diagnostics_keep_lines_that_look_like_progress() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("message.rs");
+        std::fs::write(&source, "compile_error!(\"OWNED_DIAGNOSTIC_BEGIN\\n   Compiling DIAGNOSTIC_DATA v1.0.0\\nFresh DIAGNOSTIC_DATA v1.0.0\\ntest DIAGNOSTIC_DATA ... ok\\nOWNED_DIAGNOSTIC_END\");\n").unwrap();
+        let mut compiler = std::process::Command::new("rustc");
+        rook_contain::quietly(&mut compiler);
+        let result = compiler
+            .args(["--crate-type", "lib", "--edition", "2024", "--color", "never"])
+            .arg(&source)
+            .arg("-o")
+            .arg(root.path().join("not-built.rlib"))
+            .output()
+            .unwrap();
+        assert!(!result.status.success());
+        assert!(
+            String::from_utf8_lossy(&result.stderr)
+                .lines()
+                .any(|l| l.starts_with("error: OWNED_DIAGNOSTIC_BEGIN"))
+        );
+        let (kept, removed) = filtered(&result.stderr, 7);
+        assert_eq!(kept, result.stderr, "compiler diagnostic data is not Cargo progress");
+        assert_eq!(removed.bytes, 0);
     }
 }

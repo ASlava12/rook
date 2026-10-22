@@ -7,6 +7,12 @@ warning bodies, source spans, failing tests, test totals and unknown lines pass
 through unchanged to that cap. It remains possible to elide a large diagnostic;
 this is not a promise that arbitrarily large errors fit in one answer.
 
+Recognized error, warning, note and help blocks protect their continuation
+lines, even when the diagnostic text looks like Cargo progress. An empty line
+or an unindented passing-test harness line ends that protection. Indented
+`test ... ok` text inside a diagnostic remains data. An oversized line also
+protects subsequent lines until one of those boundaries.
+
 The `run_command` argument `output="raw"` keeps the original presentation.
 `output="auto"` is the default. The selector recognizes direct Cargo commands,
 including quoted executable paths and common global flags; compound commands,
@@ -45,3 +51,5 @@ Local owned-process tests demonstrate the old middle-diagnostic omission on a
 owned executable emitting Cargo-shaped text, not a real compiler failure or a
 model-quality benchmark. The [CLI/daemon fixture](../xtask/probes/cargo-output/README.md)
 also checks normal model/tool plumbing and the explicit raw override.
+A separate regression test invokes real `rustc` with a multiline
+`compile_error!` message and requires every diagnostic byte to survive.
