@@ -26,6 +26,16 @@ arrival lateness is observational; a loaded runner is not required to meet an
 arbitrary upper latency target. Diagnostics and WebSocket captures, requests,
 response bodies and overall observation time are bounded.
 
+Each diagnostics GET retains its three-second timeout and the overall observer
+retains its 120-second budget. A transient read-only poll timeout is recorded
+and retried within that budget; it cannot repeat model work or count as physical
+progress. Three consecutive diagnostics timeouts stop the fixture, and timeout
+records are bounded. Successful runs still require all eight original conditions,
+including diagnostics covering at least forty seconds of unchanged progress.
+An incomplete run prints its retained report so CI preserves missed polls and
+observed calls instead of only a traceback. This tolerance is for observation
+transport, not a relaxed provider delay or a claim of API-latency improvement.
+
 An optional --tmp-root places owned temporary state on a chosen volume. A fresh
 output path is required. The report is retained on a failed condition as well.
 Published0.21.6 and0.21.7 were independently observed announcing inactivity during

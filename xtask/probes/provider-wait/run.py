@@ -139,13 +139,28 @@ url='http://127.0.0.1:{server.server_port}/v1'
             cwd=workspace, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         report['diagnostics'] = []
+        report['diagnostic_timeouts'] = []
+        consecutive_timeouts = 0
         observed_until = time.monotonic() + 120
         while observer.poll() is None:
             assert time.monotonic() < observed_until, 'owned observation deadline'
-            with opener.open(base + '/api/sessions/' + session + '/diagnostics?logs=false', timeout=3) as response:
-                raw = response.read(1024 * 1024 + 1)
-                assert len(raw) <= 1024 * 1024
-                activity = json.loads(raw).get('activity')
+            try:
+                with opener.open(base + '/api/sessions/' + session + '/diagnostics?logs=false', timeout=3) as response:
+                    raw = response.read(1024 * 1024 + 1)
+                    assert len(raw) <= 1024 * 1024
+                    activity = json.loads(raw).get('activity')
+            except TimeoutError:
+                # This GET observes the scenario; it does not perform work.
+                # Retain missed observations without extending either deadline
+                # or replacing any of the physical/status assertions below.
+                consecutive_timeouts += 1
+                report['diagnostic_timeouts'].append({'epoch': time.time(), 'consecutive': consecutive_timeouts})
+                assert len(report['diagnostic_timeouts']) <= 16
+                assert consecutive_timeouts < 3, 'owned diagnostics repeatedly unresponsive'
+                assert daemon.poll() is None, 'owned daemon stopped'
+                time.sleep(1)
+                continue
+            consecutive_timeouts = 0
             if activity is not None:
                 report['diagnostics'].append({'epoch': time.time(), 'state': activity})
             assert len(report['diagnostics']) <= 120
@@ -190,6 +205,8 @@ finally:
             'binaries_unchanged': report['binaries_unchanged'],
         }
     args.output.write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
+    if report['status'] != 'completed':
+        print(json.dumps(report), flush=True)
 assert report['status'] == 'completed' and all(report['checks'].values()), report.get('checks')
 print(json.dumps({'status': report['status'], 'stalls_during_backoff': len(report['stalls_during_expected_backoff']),
     'retry_gap_seconds': report['retry_gap_seconds'], 'report': str(args.output)}))
