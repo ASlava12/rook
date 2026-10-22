@@ -114,6 +114,10 @@ When PATH language-server discovery changes, also run the
 [owned LSP detection fixture](../xtask/probes/lsp-detection/README.md) on the
 extracted host CLI. Require all eleven flags, including the still-running
 admission and descendant retirement after both successful and refused parents.
+When skill-source caching changes, run the
+[owned source identity fixture](../xtask/probes/catalog-source-identity/README.md)
+on the extracted host CLI. Require all eight flags, including two physical
+remote fetches, correct warm reuse/refresh and the unchanged legacy cache.
 When cache-install ownership changes, run the
 [owned background-install probe](../xtask/probes/lsp-install/README.md) on the
 extracted daemon. Two ordinary workspace chats must share the physical download

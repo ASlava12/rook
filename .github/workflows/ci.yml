@@ -42,6 +42,9 @@ jobs:
       - name: owned PATH language-server detection
         shell: bash
         run: python3 xtask/probes/lsp-detection/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-lsp-detection.json"
+      - name: distinct remote skill-source caches
+        shell: bash
+        run: python3 xtask/probes/catalog-source-identity/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-catalog-identity.json"
       - name: ACP null and default payloads
         shell: bash
         run: python3 xtask/probes/acp-null/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-acp-null.json"

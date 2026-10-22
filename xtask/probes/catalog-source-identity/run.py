@@ -1,0 +1,156 @@
+"""Read-only user-state audit using two entirely owned smart-HTTP repositories."""
+import argparse
+import tempfile
+import hashlib
+import http.server
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import threading
+import urllib.parse
+
+parser=argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--bin-dir',type=Path,required=True)
+parser.add_argument('--output',type=Path,required=True)
+parser.add_argument('--tmp-root',type=Path)
+args=parser.parse_args()
+suffix='.exe' if os.name=='nt' else ''
+binary=args.bin_dir.resolve()/('rook'+suffix)
+report_path=args.output.resolve()
+compiler_git=shutil.which('git')
+if not __debug__ or not binary.is_file() or not compiler_git or report_path.exists() or not report_path.parent.is_dir():
+    parser.error('Unoptimized Python, actual CLI, Git and fresh output path required')
+git=os.path.abspath(compiler_git)
+parent=(args.tmp_root or Path(tempfile.gettempdir())).resolve()
+root=Path(tempfile.mkdtemp(prefix='rook-catalog-identity-',dir=parent)).resolve()
+assert root.parent==parent and root.name.startswith('rook-catalog-identity-')
+for name in ['http-root','home','workspace','empty']: (root/name).mkdir(exist_ok=False)
+http_root=root/'http-root'
+(http_root/'a').mkdir()
+empty_config=root/'empty-git-config';empty_config.write_bytes(b'')
+isolated_env={key:value for key,value in os.environ.items() if not key.upper().startswith(('GIT_','ROOK_'))}
+git_env=dict(isolated_env,GIT_CONFIG_NOSYSTEM='1',GIT_CONFIG_GLOBAL=str(empty_config),GIT_CONFIG_COUNT='0',GIT_TERMINAL_PROMPT='0',
+    HTTP_PROXY='',HTTPS_PROXY='',ALL_PROXY='',http_proxy='',https_proxy='',all_proxy='',NO_PROXY='127.0.0.1,localhost')
+def run(command,cwd,**kwargs):
+    return subprocess.run(command,cwd=cwd,env=git_env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+        timeout=30,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0),check=True,**kwargs)
+for number,name,path in [(1,'first-owned',http_root/'a/b'),(2,'second-owned',http_root/'a-b')]:
+    source=root/f'source{number}';source.mkdir()
+    card=source/'skills'/name/'SKILL.md';card.parent.mkdir(parents=True)
+    card.write_text(f'---\nname: {name}\ndescription: Owned collision diagnostic repository {number}\n---\n\nOwned identity {number}.\n',encoding='utf-8')
+    run([git,'init'],source)
+    run([git,'add','--','skills'],source)
+    run([git,'-c','user.name=Owned diagnostic','-c','user.email=owned@example.invalid','commit','-m','Owned skill identity'],source)
+    run([git,'clone','--bare',str(source),str(path)],root)
+
+requests=[]
+errors=[]
+class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self,*args): pass
+    def do_GET(self): self.serve()
+    def do_POST(self): self.serve()
+    def serve(self):
+        try:
+            parsed=urllib.parse.urlsplit(self.path)
+            assert parsed.path.endswith(('/info/refs','/git-upload-pack'))
+            assert len(requests)<64
+            requests.append({'method':self.command,'path':parsed.path})
+            size=int(self.headers.get('Content-Length','0'));assert 0<=size<=65536
+            body=self.rfile.read(size)
+            env=dict(git_env,GIT_PROJECT_ROOT=str(http_root),GIT_HTTP_EXPORT_ALL='1',PATH_INFO=parsed.path,
+                QUERY_STRING=parsed.query,REQUEST_METHOD=self.command,CONTENT_TYPE=self.headers.get('Content-Type',''),
+                CONTENT_LENGTH=str(size),SERVER_PROTOCOL='HTTP/1.1',REMOTE_ADDR='127.0.0.1')
+            if self.headers.get('Git-Protocol'):env['HTTP_GIT_PROTOCOL']=self.headers['Git-Protocol']
+            result=subprocess.run([git,'http-backend'],input=body,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=20,
+                creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0),check=True)
+            assert len(result.stdout)<=1024*1024
+            raw=result.stdout
+            separator=b'\r\n\r\n' if b'\r\n\r\n' in raw else b'\n\n'
+            header,payload=raw.split(separator,1)
+            headers=[line.split(':',1) for line in header.decode('ascii').splitlines()]
+            status=next((int(value.strip().split()[0]) for key,value in headers if key.lower()=='status'),200)
+            self.send_response(status)
+            for key,value in headers:
+                if key.lower() not in ['status','content-length','connection']: self.send_header(key,value.strip())
+            self.send_header('Content-Length',str(len(payload)));self.end_headers();self.wfile.write(payload)
+        except Exception as error:
+            if len(errors)<8: errors.append(repr(error)[:500])
+            self.send_error(500)
+
+server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Handler)
+threading.Thread(target=server.serve_forever,daemon=True).start()
+urls=[f'http://127.0.0.1:{server.server_port}/a/b',f'http://127.0.0.1:{server.server_port}/a-b']
+def cache_name(value):
+    value=value.rstrip('/')
+    while value.endswith('.git'):value=value[:-4]
+    return ''.join(char if char.isascii() and (char.isalnum() or char in '-.') else '-' for char in value).strip('-.') or 'source'
+assert urls[0]!=urls[1] and cache_name(urls[0])==cache_name(urls[1])
+(root/'home/config.toml').write_text('skill_sources='+json.dumps(urls)+'\n[agent]\ninstall_servers=false\n',encoding='utf-8')
+env=dict(git_env,ROOK_HOME=str(root/'home'),ROOK_CONFIG_DIR=str(root/'home'),ROOK_BUILTIN_SKILLS=str(root/'empty'))
+def sha(path):
+    with path.open('rb') as stream:return hashlib.file_digest(stream,'sha256').hexdigest()
+identity=sha(binary)
+report={'status':'incomplete','binary':str(binary),'binary_sha256':identity,'owned_directory':str(root),'sources':urls}
+def snapshot(directory):
+    return {path.relative_to(directory).as_posix():sha(path) for path in directory.rglob('*') if path.is_file()}
+def search(label,refresh=False):
+    command=[str(binary),'--workspace',str(root/'workspace'),'--json','skills','search','collision']
+    if refresh: command.append('--refresh')
+    result=subprocess.run(command,env=env,cwd=root/'workspace',stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=45,
+        creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+    assert len(result.stdout)<=65536 and len(result.stderr)<=65536
+    (root/(label+'.stdout')).write_bytes(result.stdout)
+    (root/(label+'.stderr')).write_bytes(result.stderr)
+    assert result.returncode==0,(label,result.returncode,result.stderr[-2000:])
+    offers=json.loads(result.stdout)
+    assert isinstance(offers,list)
+    return offers
+def correct(offers):
+    return len(offers)==2 and {(row['name'],row['source']) for row in offers}=={
+        ('first-owned',urls[0]),('second-owned',urls[1])}
+try:
+    cache=root/'home/cache/sources';cache.mkdir(parents=True)
+    legacy=cache/cache_name(urls[0])
+    run([git,'clone','--',urls[0],str(legacy)],root)
+    legacy_before=snapshot(legacy)
+    initial_count=len(requests)
+    first=search('cold')
+    cold_requests=list(requests[initial_count:])
+    before_warm=len(requests)
+    warm=search('warm')
+    warm_requests=list(requests[before_warm:])
+    before_refresh=len(requests)
+    refreshed=search('refresh',True)
+    refresh_requests=list(requests[before_refresh:])
+    entries=[path for path in cache.iterdir() if path.is_dir() and path!=legacy]
+    origins=[]
+    for directory in entries:
+        result=run([git,'-C',str(directory),'config','--get','remote.origin.url'],root)
+        origins.append({'directory':directory.name,'origin':result.stdout.decode('utf-8').strip()})
+    def reached_both(rows):
+        return all(any(row['path'].startswith(path+'/') for row in rows) for path in ['/a/b','/a-b'])
+    report['checks']={
+        'distinct_sources_offer_their_own_skills':correct(first),
+        'both_remote_repositories_physically_fetched':reached_both(cold_requests),
+        'separate_cache_entries_retain_correct_origins':len(entries)==2 and {row['origin'] for row in origins}==set(urls),
+        'warm_search_reuses_the_correct_caches':correct(warm) and not warm_requests,
+        'refresh_preserves_both_source_identities':correct(refreshed) and reached_both(refresh_requests),
+        'legacy_lossy_cache_unchanged':legacy.is_dir() and snapshot(legacy)==legacy_before,
+        'workspace_unchanged':not list((root/'workspace').iterdir()),
+        'binary_unchanged':sha(binary)==identity,
+    }
+    report.update(status='passed' if all(report['checks'].values()) and not errors else 'failed',
+        cold_offers=first,warm_offers=warm,refreshed_offers=refreshed,cache_origins=origins,
+        legacy_directory=str(legacy),legacy_file_count=len(legacy_before),
+        cold_requests=cold_requests,warm_requests=warm_requests,refresh_requests=refresh_requests,
+        scope='Owned smart-HTTP Git repositories and fresh private CLI state. All diagnostic files and new private caches are retained; no cache is removed or migrated. No installed daemon, user cache or installation changed.')
+    assert not errors,errors
+    assert all(report['checks'].values()),report['checks']
+finally:
+    server.shutdown();server.server_close()
+    report['http_requests']=requests;report['server_errors']=errors
+    with report_path.open('x',encoding='utf-8') as output:json.dump(report,output,indent=2)
+    print(json.dumps(report),flush=True)

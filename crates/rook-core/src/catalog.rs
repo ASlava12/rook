@@ -186,23 +186,34 @@ fn fetch(source: &str, refresh: bool) -> Result<PathBuf> {
     Ok(into)
 }
 
-/// One directory per source, named after it rather than hashed: a cache you
-/// cannot read is one you cannot clear with any confidence.
+/// The readable label is only a hint; the complete configured source owns the
+/// cache identity. Lossy punctuation mapping alone aliased `/a/b` with `/a-b`,
+/// so a search attributed the first repository's skills to the second URL.
+/// Legacy directories remain untouched and are never treated as identity proof.
 fn cache_name(source: &str) -> String {
-    let name: String = source
-        .trim_end_matches('/')
+    use sha2::{Digest, Sha256};
+
+    // Keep a short repository label, excluding URL query/fragment and userinfo.
+    // The label is not parsed or used to equate repository addresses.
+    let address = source.split(['?', '#']).next().unwrap_or(source).trim_end_matches('/');
+    let label: String = address
+        .rsplit(['/', ':', '@'])
+        .next()
+        .unwrap_or("source")
         .trim_end_matches(".git")
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '-' })
+        // No dots: CON.anything is still a reserved Windows device name,
+        // even with a digest appended after its apparent extension.
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .take(24)
         .collect();
-    // Dots are kept because they are half of what makes a host readable, and
-    // trimmed at the ends because a name of nothing but them is `..` — a
-    // directory built from configuration that points outside the cache. No
-    // separator survives the mapping, so this is the only way out.
-    match name.trim_matches(['-', '.']) {
-        "" => "source".into(),
-        trimmed => trimmed.to_string(),
-    }
+    let label = match label.trim_matches('-') {
+        "" => "source",
+        label => label,
+    };
+    // Do not assume `.git`, trailing slash, case or URL escaping are aliases:
+    // arbitrary configured HTTP servers may map them to different repositories.
+    format!("{label}-{:x}", Sha256::digest(source.as_bytes()))
 }
 
 fn git(args: &[&str], cwd: Option<&Path>) -> Result<()> {
@@ -321,15 +332,51 @@ mod tests {
         assert!(matching(&offered, "database").is_empty(), "and nothing that shares no word");
     }
 
-    /// The name becomes a directory under the cache, and it is built from
-    /// configuration. No separator survives the mapping, so the only way out was
-    /// a name of nothing but dots.
     #[test]
-    fn a_cache_name_is_always_one_directory_inside_the_cache() {
-        assert_eq!(cache_name("https://github.com/rook/skills.git"), "https---github.com-rook-skills");
-        assert_eq!(cache_name("git@github.com:rook/skills"), "git-github.com-rook-skills");
-        assert_eq!(cache_name("..@"), "source", "not the cache's parent");
-        assert_eq!(cache_name("https://..."), "https", "and never only dots");
-        assert!(!cache_name("https://../../x").contains('/'), "and never a path of its own");
+    fn distinct_repository_addresses_do_not_share_a_lossy_label_as_identity() {
+        for (first, second) in [
+            ("https://example.invalid/a/b", "https://example.invalid/a-b"),
+            ("https://example.invalid/repo", "https://example.invalid/repo.git"),
+            ("https://example.invalid/repo", "https://example.invalid/repo/"),
+            ("https://example.invalid/Repo", "https://example.invalid/repo"),
+            ("https://example.invalid/a%2Fb", "https://example.invalid/a-b"),
+            ("https://example.invalid/repo?ref=first", "https://example.invalid/repo?ref=second"),
+        ] {
+            assert_ne!(cache_name(first), cache_name(second), "{first} and {second}");
+        }
+        assert_eq!(cache_name("https://example.invalid/repo"), cache_name("https://example.invalid/repo"));
+    }
+
+    #[test]
+    fn a_cache_name_is_one_bounded_readable_directory_even_for_long_or_unusual_sources() {
+        for source in [
+            "..@".to_string(),
+            "https://...".into(),
+            "https://../../x".into(),
+            format!("https://example.invalid/{}", "длинный-адрес".repeat(500)),
+            format!("https://example.invalid/{}", "long-name".repeat(500)),
+        ] {
+            let name = cache_name(&source);
+            assert!(!name.is_empty() && name.len() <= 89, "{name}");
+            assert!(name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'));
+            assert_ne!(name, ".");
+            assert_ne!(name, "..");
+            assert_eq!(std::path::Path::new(&name).components().count(), 1);
+        }
+        assert!(cache_name("https://example.invalid/readable.git").starts_with("readable-"));
+        assert!(
+            !cache_name("https://person:password@example.invalid/repo?token=secret").contains("password")
+        );
+        assert!(!cache_name("https://person:password@example.invalid/repo?token=secret").contains("secret"));
+    }
+
+    #[test]
+    fn repository_labels_cannot_create_windows_device_names() {
+        let directory = tempfile::tempdir().unwrap();
+        for label in ["CON.foo", "COM1.anything", "LPT1.txt", "NUL", "PRN"] {
+            let name = cache_name(&format!("https://example.invalid/{label}"));
+            assert!(!name.contains('.'), "a Windows device name cannot retain an apparent extension");
+            std::fs::create_dir(directory.path().join(name)).unwrap();
+        }
     }
 }
