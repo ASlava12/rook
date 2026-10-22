@@ -1,7 +1,7 @@
 # Rook
 
-[Rook 0.21.3](docs/releases/0.21.3.md): concurrent language-server installs in one
-daemon share the operation and retain each session's result.
+[Rook 0.21.4](docs/releases/0.21.4.md): parallel installer processes coordinate
+cache writes; uncertain editor writes and commands remain saved for explicit review.
 
 [Domain network policy with OS containment](docs/domain-network-policy.md).
 

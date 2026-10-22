@@ -335,5 +335,5 @@ report = {'binary': str(binary), 'binary_sha256': binary_hash, 'checks': checks,
           'provider_requests': counts, 'errors': errors, 'request_kinds': request_kinds}
 with args.output.open('x', encoding='utf-8') as output:
     json.dump(report, output, indent=2)
-print(json.dumps({'checks': checks, 'provider_requests': counts}), flush=True)
+print(json.dumps({'binary_sha256': binary_hash, 'checks': checks, 'provider_requests': counts}), flush=True)
 assert all(checks.values()), checks
