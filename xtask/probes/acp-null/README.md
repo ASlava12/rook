@@ -8,14 +8,14 @@ python3 xtask/probes/acp-null/run.py --bin-dir /path/to/package/bin \
   --output /path/to/acp-null-report.json
 ```
 
-Eighteen isolated CLI/editor exchanges use local scripted model replies. Each
+Twenty-six isolated CLI/editor exchanges use local scripted model replies. Each
 performs exactly two main requests, one verifier reporting `unproven`, and one
 completion classifier; these replies do not certify task quality. The editor
 uses its own buffers and fake terminal responses. No terminal command or real
 model runs, disk fixture contents remain unchanged, and the installed daemon is
 not involved. Only owned child processes/services and temporary state are cleaned.
 
-Require exit zero and all eighteen flags. Controls distinguish object/null write
+Require exit zero and all twenty-eight flags. Controls distinguish object/null write
 acknowledgements from missing results, explicit errors and invalid scalar
 acknowledgements. Null read results still fail without required text. Terminal
 wait/release null acknowledgements must produce one create/wait/output/release
@@ -34,8 +34,17 @@ refused before changing the file; the same unknown operation must remain for
 explicit review. Model-assisted inspection remains allowed. Ordinary successful
 operations and refused reads leave no unknown write.
 The report binds the checks,
-method/status observations, 72 initial provider requests and at most four
+method/status observations, 104 initial provider requests and at most four
 additional requests for each of the ten recovery attempts to the CLI SHA256.
+
+Eight exchanges cover read and write operations with both, read-only, write-only
+and neither client file capability. Distinct disk/editor markers establish read
+authority; writes must reach the editor only when that method is advertised.
+The fallback cases verify expected disk changes, and no unadvertised file method
+may be requested. Run just these ten matrix checks (32 initial model requests)
+against an older binary with `--capabilities-only`. The published Windows 0.21.3
+baseline passes nine controls but writes to disk instead of the editor for a
+write-only client. The complete probe also retains its earlier eighteen checks.
 
 The published Windows 0.21.3 baseline passes the object, missing/error and read
 controls but fails null write, scalar acknowledgement refusal, null/omitted

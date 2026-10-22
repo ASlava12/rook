@@ -14,6 +14,7 @@ import time
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--bin-dir', type=Path, required=True)
 parser.add_argument('--output', type=Path, required=True)
+parser.add_argument('--capabilities-only', action='store_true', help='Run only the independent read/write capability matrix.')
 args = parser.parse_args()
 binary = args.bin_dir.resolve() / ('rook.exe' if os.name == 'nt' else 'rook')
 if not __debug__ or not binary.is_file() or args.output.exists() or not args.output.parent.is_dir():
@@ -24,6 +25,11 @@ counts = {}
 errors = []
 request_kinds = {}
 retrying = set()
+matrix = {f'matrix-{name}-{operation}': (read, write, operation)
+          for name, read, write in [('both', True, True), ('read-only', True, False),
+                                     ('write-only', False, True), ('neither', False, False)]
+          for operation in ['read', 'write']}
+tool_text = {}
 terminal_cases = {'null-terminal', 'null-create', 'missing-create', 'unknown-exit', 'wait-exit',
                   'missing-output', 'malformed-output', 'missing-truncated', 'invalid-exit', 'signal-exit', 'large-exit', 'invalid-release'}
 ambiguous = dict.fromkeys(['missing-write', 'error-write', 'invalid-write'], 'write_file')
@@ -49,9 +55,12 @@ class Provider(http.server.BaseHTTPRequestHandler):
             counts[phase] += 1
             assert counts[phase] <= 4
             request_kinds[phase].append('classifier' if not request.get('stream') else 'verifier' if checking else 'main')
+            if case in matrix and request.get('stream') and not checking and counts[phase] > 1:
+                tool_text[case] = '\n'.join(str(message.get('content', ''))[:2000]
+                    for message in request['messages'] if message['role'] == 'tool')[-4000:]
             if request.get('stream'):
                 if counts[phase] == 1:
-                    tool = 'run_command' if case in terminal_cases and case not in retrying else 'read_file' if case == 'null-read' else 'write_file'
+                    tool = 'run_command' if case in terminal_cases and case not in retrying else 'read_file' if case == 'null-read' or (case in matrix and matrix[case][2] == 'read') else 'write_file'
                     arguments = {'command': 'owned-not-executed'} if tool == 'run_command' else {'path': 'notes.txt'}
                     if tool == 'write_file':
                         arguments['content'] = 'owned editor update\n'
@@ -153,8 +162,9 @@ url='http://127.0.0.1:{port}/{case}/v1'
             raise AssertionError('bounded ACP response frame count')
 
         try:
+            read_cap, write_cap = matrix[case][:2] if case in matrix else (True, True)
             initialized = call(1, 'initialize', {'protocolVersion': 1,
-                'clientCapabilities': {'fs': {'readTextFile': True, 'writeTextFile': True},
+                'clientCapabilities': {'fs': {'readTextFile': read_cap, 'writeTextFile': write_cap},
                                        'terminal': case in terminal_cases}})
             assert initialized['result']['protocolVersion'] == 1
             opened = call(2, 'session/new', {'cwd': str(workspace)})
@@ -164,7 +174,7 @@ url='http://127.0.0.1:{port}/{case}/v1'
                  ('invalid-array', []), ('invalid-string', 'bad')], start=10)}
             send({'jsonrpc': '2.0', 'id': 3, 'method': 'session/prompt',
                   'params': {'sessionId': session, 'prompt': [{'type': 'text', 'text': 'Perform the owned file operation.'}]}})
-            buffer = original
+            buffer = 'owned unsaved editor contents\n' if case in matrix else original
             methods = []
             statuses = []
             for _ in range(128):
@@ -184,7 +194,7 @@ url='http://127.0.0.1:{port}/{case}/v1'
                         elif case == 'invalid-write':
                             reply['result'] = False
                         elif case != 'missing-write':
-                            reply['result'] = {} if case == 'object-write' else None
+                            reply['result'] = {} if case == 'object-write' or case in matrix else None
                     elif method == 'fs/read_text_file':
                         reply['result'] = None if case == 'null-read' else {'content': buffer}
                     elif method == 'terminal/create':
@@ -218,6 +228,7 @@ url='http://127.0.0.1:{port}/{case}/v1'
             else:
                 raise AssertionError('bounded turn frame count')
             report = {'methods': methods, 'statuses': statuses, 'buffer': buffer,
+                    'disk': (workspace / 'notes.txt').read_text(encoding='utf-8'),
                     'disk_unchanged': (workspace / 'notes.txt').read_text(encoding='utf-8') == original,
                     'list': {name: 'result' in frame and any(item['sessionId'] == session for item in frame['result']['sessions'])
                              for name, frame in listing.items() if not name.startswith('invalid-')},
@@ -277,7 +288,9 @@ worker.start()
 try:
     with tempfile.TemporaryDirectory(prefix='rook-acp-null-') as temporary:
         cases = {}
-        for case in ['object-write', 'null-write', 'missing-write', 'error-write', 'invalid-write', 'null-read', *sorted(terminal_cases)]:
+        original_cases = ['object-write', 'null-write', 'missing-write', 'error-write', 'invalid-write', 'null-read', *sorted(terminal_cases)]
+        selected = list(matrix) if args.capabilities_only else original_cases + list(matrix)
+        for case in selected:
             counts[case] = 0
             request_kinds[case] = []
             cases[case] = run_case(Path(temporary), case, server.server_port)
@@ -317,14 +330,29 @@ try:
                 and case['retry']['disk_unchanged']
                 and 'recovery' in case['retry']['tail'].lower()
                 for name, case in cases.items() if name in ambiguous),
-            'editor_buffers_used_without_disk_fallback': all(case['disk_unchanged'] for case in cases.values())
-                and all(case['buffer'] == 'owned editor update\n' for name, case in cases.items() if name.endswith('-write'))
-                and all('fs/write_text_file' in case['methods'] for name, case in cases.items() if name.endswith('-write')),
+            'editor_buffers_used_without_disk_fallback': all(case['disk_unchanged'] for name, case in cases.items() if name not in matrix)
+                and all(case['buffer'] == 'owned editor update\n' for name, case in cases.items() if name.endswith('-write') and name not in matrix)
+                and all('fs/write_text_file' in case['methods'] for name, case in cases.items() if name.endswith('-write') and name not in matrix),
             'bounded_local_provider_requests': not errors and all(
                 value == ['main', 'main', 'verifier', 'classifier'] if not name.endswith('-retry')
                 else len(value) <= 4 and (not value or value[0] == 'main')
                 for name, value in request_kinds.items()),
-        }
+        } if not args.capabilities_only else {}
+        for name, (read_cap, write_cap, operation) in matrix.items():
+            case = cases[name]
+            if operation == 'read':
+                expected = 'owned unsaved editor contents' if read_cap else 'owned disk contents'
+                valid = expected in tool_text.get(name, '') and case['disk_unchanged']
+            else:
+                valid = (case['buffer'] == ('owned editor update\n' if write_cap else 'owned unsaved editor contents\n')
+                         and case['disk'] == ('owned disk contents\n' if write_cap else 'owned editor update\n')
+                         and case['methods'].count('fs/write_text_file') == int(write_cap))
+            checks[name] = valid and case['statuses'] == ['completed'] and not case['unknown']
+        checks['only_advertised_file_methods_requested'] = all(
+            (method != 'fs/read_text_file' or matrix[name][0]) and (method != 'fs/write_text_file' or matrix[name][1])
+            for name, case in cases.items() if name in matrix for method in case['methods'])
+        checks['capability_matrix_exact_requests'] = not errors and all(
+            request_kinds[name] == ['main', 'main', 'verifier', 'classifier'] for name in matrix)
 finally:
     server.shutdown()
     server.server_close()
@@ -332,7 +360,7 @@ finally:
 with binary.open('rb') as executable:
     assert binary_hash == hashlib.file_digest(executable, 'sha256').hexdigest()
 report = {'binary': str(binary), 'binary_sha256': binary_hash, 'checks': checks, 'cases': cases,
-          'provider_requests': counts, 'errors': errors, 'request_kinds': request_kinds}
+          'provider_requests': counts, 'errors': errors, 'request_kinds': request_kinds, 'matrix_tool_text': tool_text}
 with args.output.open('x', encoding='utf-8') as output:
     json.dump(report, output, indent=2)
 print(json.dumps({'binary_sha256': binary_hash, 'checks': checks, 'provider_requests': counts}), flush=True)

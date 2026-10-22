@@ -7,6 +7,13 @@ prompts. MCP initialization runs inside the cancellable turn, so a server that
 holds its handshake cannot block the connection's close/cancel reader. The
 installed daemon is not involved in this transport.
 
+File read and write capabilities are independent. A write-only client receives
+editor write requests while reads use the original bounded filesystem context.
+A read-only client serves editor reads while writes use the original filesystem
+context. With both capabilities enabled, both operations use the editor; with
+neither, ordinary filesystem operations remain in place. A fallback keeps the
+original workspace/path policy and never requests an unadvertised client method.
+
 JSON-RPC `result: null` remains a present result. Defaultable editor write,
 terminal wait and cleanup acknowledgements may use it instead of `{}`; it does
 not certify an exit code. A missing result or an explicit error remains a

@@ -897,13 +897,13 @@ async fn prompt(
     agent.approver = editor.clone();
     agent.ask_via(editor);
     agent.effort = setup.effort;
-    if setup.client.read {
+    if setup.client.read || setup.client.write {
         agent.tool_ctx.files = Some(Arc::new(EditorFiles {
             peer: peer.clone(),
             session: session_id.clone(),
             can_write: setup.client.write,
-            workspace: rook.workspace.clone(),
-            allow_outside: rook.config.sandbox.allow_outside_workspace,
+            can_read: setup.client.read,
+            fallback: agent.tool_ctx.clone(),
             children: setup.client.subagents,
         }));
     }
@@ -1366,8 +1366,8 @@ struct EditorFiles {
     peer: Arc<Peer>,
     session: String,
     can_write: bool,
-    workspace: std::path::PathBuf,
-    allow_outside: bool,
+    can_read: bool,
+    fallback: rook_tools::ToolContext,
 }
 
 #[async_trait]
@@ -1378,8 +1378,8 @@ impl rook_tools::Files for EditorFiles {
                 peer: self.peer.clone(),
                 session: session.into(),
                 can_write: self.can_write,
-                workspace: self.workspace.clone(),
-                allow_outside: self.allow_outside,
+                can_read: self.can_read,
+                fallback: self.fallback.clone(),
                 children: true,
             }) as Arc<dyn rook_tools::Files>
         })
@@ -1388,6 +1388,9 @@ impl rook_tools::Files for EditorFiles {
         self.read_limited(path, 16 * 1024 * 1024).await
     }
     async fn read_limited(&self, path: &Path, maximum: usize) -> rook_tools::Result<String> {
+        if !self.can_read {
+            return self.fallback.read_text_limited(path, maximum).await;
+        }
         let params = serde_json::json!({"sessionId":self.session,"path":path});
         let answer = self.peer.request("fs/read_text_file", params).await.ok_or_else(|| {
             rook_tools::ToolError::Io {
@@ -1411,9 +1414,7 @@ impl rook_tools::Files for EditorFiles {
         if !self.can_write {
             // Falling back rather than refusing: the client can read buffers and
             // not write them, and a write to disk is still correct then.
-            let mut ctx = rook_tools::ToolContext::new(self.workspace.clone());
-            ctx.allow_outside_workspace = self.allow_outside;
-            return ctx.write_text(path, contents).await;
+            return self.fallback.write_text(path, contents).await;
         }
         let params = serde_json::json!({ "sessionId": self.session, "path": path, "content": contents });
         let answer = self.peer.request("fs/write_text_file", params).await.ok_or_else(|| {
