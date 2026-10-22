@@ -1731,13 +1731,13 @@ mod audit_tests {
             peer: peer.clone(),
             session: "s".into(),
             can_write: true,
-            workspace: "/tmp".into(),
-            allow_outside: false,
+            can_read: true,
+            fallback: rook_tools::ToolContext::new("/tmp".into()),
         };
         let write = tokio::spawn(async move { editor.write(Path::new("/tmp/x"), "text").await });
         let request: serde_json::Value = serde_json::from_str(&requests.recv().await.unwrap().text).unwrap();
         peer.resolve(request["id"].as_u64().unwrap(), Err(Error::internal("write refused"))).await;
-        assert!(write.await.unwrap().is_err());
+        assert!(matches!(write.await.unwrap(), Err(rook_tools::ToolError::ExecutionUnknown(_))));
     }
     #[tokio::test]
     async fn cancelling_a_peer_request_releases_its_pending_entry() {
