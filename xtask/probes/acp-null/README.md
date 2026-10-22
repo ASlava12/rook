@@ -12,8 +12,9 @@ Twenty-six isolated CLI/editor exchanges use local scripted model replies. Each
 performs exactly two main requests, one verifier reporting `unproven`, and one
 completion classifier; these replies do not certify task quality. The editor
 uses its own buffers and fake terminal responses. No terminal command or real
-model runs, disk fixture contents remain unchanged, and the installed daemon is
-not involved. Only owned child processes/services and temporary state are cleaned.
+model runs. Capability cases without editor write support change only their owned
+disk fixtures; other cases preserve disk contents. The installed daemon is not
+involved. Only owned child processes/services and temporary state are cleaned.
 
 Require exit zero and all twenty-eight flags. Controls distinguish object/null write
 acknowledgements from missing results, explicit errors and invalid scalar
