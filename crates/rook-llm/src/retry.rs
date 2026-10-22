@@ -135,6 +135,50 @@ pub fn names_the_context(error: &LlmError) -> bool {
 /// endpoint refusing a thousand tokens is one nothing can be run against.
 const LEAST_OUTPUT: u32 = 1024;
 
+/// A credit balance is temporary, unlike a model's output ceiling. Only lower
+/// this request, once, when a payment refusal states what it can afford.
+fn use_credit_limit(error: &LlmError, request: &mut Request, retried: &mut bool) -> bool {
+    let LlmError::Status { status: 402, body, .. } = error else { return false };
+    if *retried {
+        return false;
+    }
+    let body = body.to_ascii_lowercase();
+    let Some((_, rest)) = body.split_once("can only afford ") else { return false };
+    let rest = rest.trim_start();
+    let end = rest.find(|c: char| !c.is_ascii_digit() && c != ',').unwrap_or(rest.len());
+    let Some((number, tail)) = rest.get(..end).zip(rest.get(end..)) else { return false };
+    if tail.starts_with(|c: char| !c.is_ascii_whitespace() && c != '.' && c != '"') {
+        return false;
+    }
+    if tail
+        .strip_prefix('.')
+        .is_some_and(|tail| tail.starts_with(|c: char| !c.is_ascii_whitespace() && c != '"'))
+    {
+        return false;
+    }
+    let mut groups = number.split(',');
+    let first = groups.next().unwrap_or_default();
+    if first.is_empty() || (number.contains(',') && first.len() > 3) || groups.any(|group| group.len() != 3) {
+        return false;
+    }
+    let Some(affordable) = number
+        .bytes()
+        .filter(|b| *b != b',')
+        .try_fold(0u32, |n, digit| n.checked_mul(10)?.checked_add(u32::from(digit - b'0')))
+    else {
+        return false;
+    };
+    // Leave room for endpoint accounting differences without increasing any
+    // caller allowance or remembering a balance across calls.
+    let Some(smaller) = affordable.checked_sub(64) else { return false };
+    if smaller < LEAST_OUTPUT || affordable >= request.max_output_tokens {
+        return false;
+    }
+    request.max_output_tokens = smaller;
+    *retried = true;
+    true
+}
+
 /// Whether a refusal is about how much output was asked for.
 ///
 /// The ceiling on a reply is in no API: Anthropic refuses a `max_tokens` above
@@ -355,6 +399,7 @@ impl Retrying {
     ) -> Result<crate::Completion> {
         let mut request = self.as_accepted(request);
         let mut attempt = 1;
+        let mut credit_retried = false;
         loop {
             let answer = match &observer {
                 Some(observer) => self.inner.complete_observed(request.clone(), observer.clone()).await,
@@ -364,6 +409,7 @@ impl Retrying {
                 Err(e) if worth_asking_again(&e) && self.wait_before(attempt, &e).await => attempt += 1,
                 Err(e) if self.drop_the_effort(&e, &mut request) => continue,
                 Err(e) if self.ask_for_less_output(&e, &mut request) => continue,
+                Err(e) if use_credit_limit(&e, &mut request, &mut credit_retried) => continue,
                 answer => return answer,
             }
         }
@@ -378,7 +424,9 @@ impl Retrying {
         let requested = request.effort;
         let mut request = self.as_accepted(request);
         let mut attempt = 1;
-        let mut stream = self.open_stream(&mut request, requested, &observer, &mut attempt).await?;
+        let mut credit_retried = false;
+        let mut stream =
+            self.open_stream(&mut request, requested, &observer, &mut attempt, &mut credit_retried).await?;
         let owner = self.clone();
         Ok(Box::pin(async_stream::try_stream! {
             loop {
@@ -391,23 +439,29 @@ impl Retrying {
                             yield delta;
                         }
                         Err(error) => {
+                            if !delivered && use_credit_limit(&error, &mut request, &mut credit_retried) {
+                                refused = Some((error, false));
+                                break;
+                            }
                             if !delivered && worth_asking_again(&error) {
-                                refused = Some(error);
+                                refused = Some((error, true));
                                 break;
                             }
                             Err(error)?;
                         }
                     }
                 }
-                let Some(error) = refused else { break };
+                let Some((error, wait)) = refused else { break };
                 // Release the failed stream's endpoint permit and physical
                 // attempt before waiting or opening its replacement.
                 drop(stream);
-                if !owner.wait_before(attempt, &error).await {
-                    Err(error)?;
+                if wait {
+                    if !owner.wait_before(attempt, &error).await {
+                        Err(error)?;
+                    }
+                    attempt += 1;
                 }
-                attempt += 1;
-                stream = owner.open_stream(&mut request, requested, &observer, &mut attempt).await?;
+                stream = owner.open_stream(&mut request, requested, &observer, &mut attempt, &mut credit_retried).await?;
             }
         }))
     }
@@ -418,6 +472,7 @@ impl Retrying {
         requested: Option<crate::Effort>,
         observer: &Option<std::sync::Arc<dyn crate::AttemptObserver>>,
         attempt: &mut u32,
+        credit_retried: &mut bool,
     ) -> Result<ResponseStream> {
         use futures_util::StreamExt;
         loop {
@@ -449,6 +504,7 @@ impl Retrying {
                 Err(e) if worth_asking_again(&e) && self.wait_before(*attempt, &e).await => *attempt += 1,
                 Err(e) if self.drop_the_effort(&e, request) => continue,
                 Err(e) if self.ask_for_less_output(&e, request) => continue,
+                Err(e) if use_credit_limit(&e, request, credit_retried) => continue,
                 answer => return answer,
             }
         }

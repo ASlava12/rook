@@ -841,6 +841,13 @@ contents cannot enter tool dispatch. Refusals and invalid function-call finishes
 are never retried, and a refusal cannot authorize a call from an earlier frame. Reported token counters remain attached to
 the failed physical attempt; omitted counters stay unknown.
 
+A payment refusal (HTTP 402) that explicitly says `can only afford N` can admit
+one retry with a smaller output allowance. The retry leaves a 64-token margin,
+requires at least 1024 output tokens and never raises the caller's allowance.
+The balance is not cached as a model limit. A second payment refusal or one
+without a usable integer budget follows the existing error/fallback path.
+Streams can retry only before answer content or completion evidence arrives.
+
 The Responses transport is selected explicitly with `api = "responses"` (alias
 `"openai-responses"`) on a named model/endpoint, or `responses/gpt-6-astra`
 shorthand. The shorthand uses `OPENAI_API_KEY` and `OPENAI_BASE_URL`, like

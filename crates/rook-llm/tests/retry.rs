@@ -11,6 +11,141 @@ use rook_llm::openai::{Config, OpenAiCompatible};
 use rook_llm::retry::Retrying;
 use rook_llm::{LlmError, Provider, Request};
 
+struct CreditStream {
+    seen: Arc<std::sync::Mutex<Vec<u32>>>,
+    opening_error: bool,
+    partial: bool,
+}
+
+#[async_trait::async_trait]
+impl Provider for CreditStream {
+    fn id(&self) -> &str {
+        "credit-stream"
+    }
+    fn context_window(&self) -> usize {
+        8192
+    }
+    fn dispatch_identity(&self) -> Option<rook_llm::Dispatch> {
+        rook_llm::Dispatch::bounded("credit-stream", "m", true)
+    }
+    async fn complete(&self, _: Request) -> rook_llm::Result<rook_llm::Response> {
+        Err(LlmError::Other("stream fixture only".into()))
+    }
+    async fn stream(&self, request: Request) -> rook_llm::Result<rook_llm::ResponseStream> {
+        let first = {
+            let mut seen = self.seen.lock().unwrap();
+            seen.push(request.max_output_tokens);
+            seen.len() == 1
+        };
+        let error =
+            LlmError::Status { status: 402, body: "can only afford 2048 tokens".into(), retry_after: None };
+        if first && self.opening_error {
+            return Err(error);
+        }
+        let mut deltas = Vec::new();
+        if first {
+            if self.partial {
+                deltas.push(Ok(rook_llm::Delta::Text("partial".into())));
+            }
+            deltas.push(Err(error));
+        } else {
+            deltas.push(Ok(rook_llm::Delta::Text("answered".into())));
+            deltas.push(Ok(rook_llm::Delta::Done {
+                stop_reason: rook_llm::StopReason::EndTurn,
+                usage: Default::default(),
+                model: "m".into(),
+            }));
+        }
+        Ok(Box::pin(futures_util::stream::iter(deltas)))
+    }
+}
+
+#[tokio::test]
+async fn credit_refusals_retry_at_stream_open_or_first_delta_but_never_after_text() {
+    use futures_util::StreamExt;
+    for (opening_error, partial) in [(true, false), (false, false), (false, true)] {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = Retrying::new(Box::new(CreditStream { seen: seen.clone(), opening_error, partial }));
+        let mut stream = provider.stream(Request::new(Vec::new())).await.unwrap();
+        let mut text = String::new();
+        let mut failed = false;
+        while let Some(delta) = stream.next().await {
+            match delta {
+                Ok(rook_llm::Delta::Text(value)) => text.push_str(&value),
+                Err(LlmError::Status { status: 402, .. }) => failed = true,
+                Err(error) => panic!("unexpected stream error: {error}"),
+                _ => {}
+            }
+        }
+        assert_eq!(failed, partial);
+        assert_eq!(text, if partial { "partial" } else { "answered" });
+        assert_eq!(*seen.lock().unwrap(), if partial { vec![4096] } else { vec![4096, 1984] });
+    }
+}
+
+#[tokio::test]
+async fn a_credit_limited_refusal_retries_once_without_remembering_the_balance() {
+    let (url, sent) = recording(vec![(
+        "402 Payment Required",
+        r#"{"error":{"message":"Requested 20000 tokens, but can only afford 7,117. Add credits."}}"#,
+    )])
+    .await;
+    let provider = provider(url);
+    let mut request = Request::new(Vec::new());
+    request.max_output_tokens = 20_000;
+    provider.complete(request.clone()).await.unwrap();
+    provider.complete(request).await.unwrap();
+    let bodies = sent.lock().unwrap();
+    let caps: Vec<_> = bodies
+        .iter()
+        .map(|body| serde_json::from_str::<serde_json::Value>(body).unwrap()["max_tokens"].as_u64().unwrap())
+        .collect();
+    assert_eq!(caps, [20_000, 7053, 20_000], "credit is not a permanent model ceiling");
+}
+
+#[tokio::test]
+async fn a_second_credit_refusal_is_returned_without_another_budget_retry() {
+    let (url, sent) = recording(vec![
+        ("402 Payment Required", r#"{"error":{"message":"can only afford 2048 tokens"}}"#),
+        ("402 Payment Required", r#"{"error":{"message":"can only afford 1500 tokens"}}"#),
+    ])
+    .await;
+    let error = provider(url).complete(Request::new(Vec::new())).await.unwrap_err();
+    assert!(matches!(error, LlmError::Status { status: 402, .. }));
+    assert_eq!(sent.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn payment_refusals_without_a_useful_smaller_integer_budget_are_not_retried() {
+    for message in [
+        "insufficient funds",
+        "can only afford 100 tokens",
+        "can only afford 1087 tokens",
+        "can only afford 4096 tokens",
+        "can only afford 999999999999999999 tokens",
+        "can only afford 2,04 tokens",
+        "can only afford 2000.5 tokens",
+        "can only afford 2000abc",
+    ] {
+        let body = serde_json::json!({"error":{"message":message}}).to_string();
+        let (url, sent) = recording(vec![("402 Payment Required", body)]).await;
+        let error = provider(url).complete(Request::new(Vec::new())).await.unwrap_err();
+        assert!(matches!(error, LlmError::Status { status: 402, .. }), "{message}");
+        assert_eq!(sent.lock().unwrap().len(), 1, "{message}");
+    }
+}
+
+#[tokio::test]
+async fn an_affordable_budget_in_a_non_payment_refusal_does_not_trigger_credit_recovery() {
+    let (url, sent) =
+        recording(vec![("400 Bad Request", r#"{"error":{"message":"can only afford 2048 tokens"}}"#)]).await;
+    assert!(matches!(
+        provider(url).complete(Request::new(Vec::new())).await,
+        Err(LlmError::Status { status: 400, .. })
+    ));
+    assert_eq!(sent.lock().unwrap().len(), 1);
+}
+
 /// Answers with `refusals` in order, then serves a real reply for ever after.
 /// Returns the endpoint and a counter of how many requests it saw.
 async fn flaky(refusals: Vec<&'static str>) -> (String, Arc<AtomicUsize>) {
@@ -93,8 +228,9 @@ async fn an_endpoint_that_stays_down_gives_up_and_says_which_status() {
 /// Answers each request with the next entry, then serves a real reply for ever
 /// after. Keeps every request body, so a test can say what was actually sent.
 async fn recording(
-    refusals: Vec<(&'static str, &'static str)>,
+    refusals: Vec<(&'static str, impl Into<String>)>,
 ) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+    let refusals: Vec<_> = refusals.into_iter().map(|(status, body)| (status, body.into())).collect();
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
