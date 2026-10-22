@@ -1,7 +1,7 @@
 # Rook
 
-[Rook 0.21.4](docs/releases/0.21.4.md): parallel installer processes coordinate
-cache writes; uncertain editor writes and commands remain saved for explicit review.
+[Rook 0.21.5](docs/releases/0.21.5.md): editor reads and writes follow independent
+ACP capabilities; credit-limited responses can retry once with a smaller allowance.
 
 [Domain network policy with OS containment](docs/domain-network-policy.md).
 
