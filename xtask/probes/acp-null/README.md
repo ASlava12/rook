@@ -23,10 +23,13 @@ sequence with no duplicate cleanup. All connections exercise object, null,
 omitted and malformed session-list parameters. After connection close, missing,
 error and malformed write acknowledgements must retain a potentially effective
 `write_file` operation in CLI recovery. An actual fresh CLI process then tries
-to resume each affected session and must stop before any model request or file
-write. Ordinary successful operations and refused reads leave no unknown write.
+to resume each affected session. Its model requests a write, which must be
+refused before changing the file; the same unknown operation must remain for
+explicit review. Model-assisted inspection remains allowed. Ordinary successful
+operations and refused reads leave no unknown write.
 The report binds the checks,
-method/status observations and 28 physical provider requests to the CLI SHA256.
+method/status observations, 28 initial provider requests and at most four
+additional requests for each of the three recovery attempts to the CLI SHA256.
 
 The published Windows 0.21.3 baseline passes the object, missing/error and read
 controls but fails null write, scalar acknowledgement refusal, null/omitted

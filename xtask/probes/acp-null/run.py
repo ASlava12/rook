@@ -23,6 +23,7 @@ with binary.open('rb') as executable:
 counts = {}
 errors = []
 request_kinds = {}
+retrying = set()
 
 
 class Provider(http.server.BaseHTTPRequestHandler):
@@ -34,16 +35,17 @@ class Provider(http.server.BaseHTTPRequestHandler):
             self.connection.settimeout(10)
             case = self.path.split('/')[1]
             assert case in counts
+            phase = case + '-retry' if case in retrying else case
             size = int(self.headers['Content-Length'])
             assert 0 < size <= 2 * 1024 * 1024
             request = json.loads(self.rfile.read(size))
             checking = any('You are checking a claim somebody else made.' in str(message.get('content', ''))
                            for message in request['messages'])
-            counts[case] += 1
-            assert counts[case] <= 4
-            request_kinds[case].append('classifier' if not request.get('stream') else 'verifier' if checking else 'main')
+            counts[phase] += 1
+            assert counts[phase] <= 4
+            request_kinds[phase].append('classifier' if not request.get('stream') else 'verifier' if checking else 'main')
             if request.get('stream'):
-                if counts[case] == 1:
+                if counts[phase] == 1:
                     tool = 'run_command' if case == 'null-terminal' else 'read_file' if case == 'null-read' else 'write_file'
                     arguments = {'command': 'owned-not-executed'} if tool == 'run_command' else {'path': 'notes.txt'}
                     if tool == 'write_file':
@@ -230,13 +232,21 @@ url='http://127.0.0.1:{port}/{case}/v1'
     report['recovery_pending'] = any(execution['pending'] or execution['background'] for execution in executions)
     report['retry'] = None
     if case in ['missing-write', 'error-write', 'invalid-write'] and unknown:
-        before = counts[case]
+        phase = case + '-retry'
+        counts[phase] = 0
+        request_kinds[phase] = []
+        retrying.add(case)
         retried = subprocess.run([str(binary), '--workspace', str(workspace), 'run', '--session', session,
             'Retry the owned file write.'], env=env, cwd=workspace, capture_output=True, timeout=30,
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         text = (retried.stdout + retried.stderr).decode('utf-8', errors='replace')
+        reviewed = subprocess.run([str(binary), '--workspace', str(workspace), 'session', 'recovery', session],
+            env=env, cwd=workspace, capture_output=True, timeout=30,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        assert reviewed.returncode == 0 and len(reviewed.stdout) <= 128 * 1024
+        after = {operation['id'] for execution in json.loads(reviewed.stdout) for operation in execution['unknown']}
         report['retry'] = {'exit': retried.returncode, 'tail': text[-2400:],
-                          'provider_unchanged': before == counts[case],
+                          'provider_requests': counts[phase], 'unknown_preserved': set(unknown) == after,
                           'disk_unchanged': (workspace / 'notes.txt').read_text(encoding='utf-8') == original}
     return report
 
@@ -268,15 +278,18 @@ try:
                 for name, case in cases.items() if name in ['missing-write', 'error-write', 'invalid-write'])
                 and all(not case['unknown'] for name, case in cases.items()
                         if name not in ['missing-write', 'error-write', 'invalid-write']),
-            'fresh_process_retry_stops_before_model_or_write': all(case['retry']
-                and case['retry']['provider_unchanged'] and case['retry']['disk_unchanged']
+            'fresh_process_retry_keeps_writes_blocked': all(case['retry']
+                and 0 <= case['retry']['provider_requests'] <= 4 and case['retry']['unknown_preserved']
+                and case['retry']['disk_unchanged']
                 and 'recovery' in case['retry']['tail'].lower()
                 for name, case in cases.items() if name in ['missing-write', 'error-write', 'invalid-write']),
             'editor_buffers_used_without_disk_fallback': all(case['disk_unchanged'] for case in cases.values())
                 and all(case['buffer'] == 'owned editor update\n' for name, case in cases.items() if name.endswith('-write'))
                 and all('fs/write_text_file' in case['methods'] for name, case in cases.items() if name.endswith('-write')),
-            'bounded_local_provider_requests': not errors and all(value == ['main', 'main', 'verifier', 'classifier']
-                for value in request_kinds.values()),
+            'bounded_local_provider_requests': not errors and all(
+                value == ['main', 'main', 'verifier', 'classifier'] if not name.endswith('-retry')
+                else len(value) <= 4 and (not value or value[0] == 'main')
+                for name, value in request_kinds.items()),
         }
 finally:
     server.shutdown()
