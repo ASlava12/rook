@@ -3514,7 +3514,18 @@ fn durable_recovery(in_conversation: bool, scheduled: bool) {
         duplicate, finished["instructions"][0],
         "retrying a receipt must not create a second instruction"
     );
-    rook.ok(&["task", "forget", id]);
+    loop {
+        let output = rook.run(&["task", "forget", id]);
+        if output.status.success() {
+            break;
+        }
+        // The completed record is committed before its worker finishes cleanup.
+        // Retry only that admission refusal within the existing recovery deadline.
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("this run is still finishing its active operation"), "{error}");
+        assert!(std::time::Instant::now() < deadline, "completed worker did not retire: {error}");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
     assert_eq!(rook.json(&["task", "list"]), serde_json::json!([]));
 }
 
