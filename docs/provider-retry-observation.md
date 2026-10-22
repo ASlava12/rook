@@ -13,6 +13,10 @@ Physical admission clears the status. Cancellation and owner termination clear
 both root and child observations; stored observations never establish a live owner
 or authorize a request after restart.
 
+Delegated waits also reach the parent's bounded display-hint channel. A child's
+deadline remains in that child's activity projection: it does not replace the
+parent's own model deadline or disable the parent's ordinary inactivity checks.
+
 Activity snapshots add optional provider_wait data: until_ms, next_attempt and
 status. Older snapshots and clients remain readable. Existing scheduler retry_at
 keeps its original meaning. The expected provider pause excludes that period from

@@ -210,3 +210,86 @@ async fn a_delayed_display_reader_keeps_exact_child_operations_without_fragment_
         "fragmenting the same text must not add copied conversation snapshots: {measurements:?}"
     );
 }
+
+struct WaitingChild {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+#[async_trait]
+impl Provider for WaitingChild {
+    fn id(&self) -> &str {
+        "owned-child-wait"
+    }
+    fn context_window(&self) -> usize {
+        200_000
+    }
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+    async fn complete(&self, request: Request) -> rook_llm::Result<Response> {
+        assert!(request.messages.first().unwrap().content.starts_with("Classify whether"));
+        Ok(Response {
+            message: Message::assistant(r#"{"action":"finish"}"#),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            model: "owned-child-wait".into(),
+        })
+    }
+    async fn stream(&self, _: Request) -> rook_llm::Result<rook_llm::ResponseStream> {
+        if self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+            return Err(LlmError::Status { status: 503, body: "owned refusal".into(), retry_after: None });
+        }
+        Ok(Box::pin(futures_util::stream::iter([
+            Ok(Delta::Text("child report".into())),
+            Ok(Delta::Done {
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+                model: "owned-child-wait".into(),
+            }),
+        ])))
+    }
+}
+
+#[tokio::test]
+async fn an_actual_child_retry_reaches_the_bounded_parent_display_without_a_runtime_observer() {
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let rook = Rook::from_parts(
+        rook_store::Store::open(directory.path().join("store")).unwrap(),
+        Default::default(),
+        rook_skills::Environment::bare("test", "test", "test"),
+        Default::default(),
+        workspace,
+    );
+    let parent = rook.start_session("parent").unwrap();
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let provider = Arc::new(rook_llm::retry::Retrying::new(Box::new(WaitingChild { calls: calls.clone() })));
+    let agent = AgentLoop::new(&rook, provider, parent);
+    assert!(agent.observer.is_none(), "this is the local frontend path");
+    let crew = agent.crew(0);
+    let (doing, mut steps) = super::super::delegation_progress::channel(1);
+    let bounds = Bounds {
+        isolated: false,
+        steps: Some(3),
+        by: None,
+        tokens: 0,
+        provider: None,
+        effort: None,
+        recipe: None,
+        executor: None,
+        result_schema: None,
+    };
+    let running = crew.run_subtask("report without tools", None, bounds, doing, 0, Default::default());
+    let display = async {
+        let (at, status) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), steps.recv()).await.unwrap().unwrap();
+        assert_eq!(at, 0);
+        assert!(
+            status.contains("provider retry") && status.contains("HTTP 503") && status.contains("attempt 2"),
+            "{status}"
+        );
+    };
+    let (result, ()) = tokio::join!(running, display);
+    assert_eq!(result.unwrap().1.reply, "child report");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+}

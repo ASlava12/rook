@@ -385,6 +385,8 @@ impl Crew<'_> {
                 if let Progress::Delta(Delta::ToolCall(call)) = progress {
                     doing
                         .send(index, &crate::calls::doing(&call.name, Some(&call.arguments), &where_it_runs));
+                } else if let Progress::ProviderWait { wait } = progress {
+                    doing.send(index, &wait.map_or("provider wait ended".into(), |wait| wait.describe()));
                 }
             }))
             .await;
