@@ -117,13 +117,15 @@ pub fn install(skill: &Offered, into: &Path) -> Result<PathBuf> {
     Ok(target)
 }
 
-/// Source identity is independent of catalog order and equivalent local paths.
+/// Equivalent local paths share identity; remote addresses remain exact.
 pub(crate) fn source_identity(source: &str) -> String {
     let path = Path::new(source);
     if path.is_dir() || path.is_absolute() || source.starts_with('.') {
         return path.canonicalize().unwrap_or_else(|_| path.to_path_buf()).display().to_string();
     }
-    source.trim_end_matches('/').trim_end_matches(".git").to_string()
+    // An explicit origin or a saved installation origin must not match a
+    // different configured HTTP repository merely because `.git` was trimmed.
+    source.to_string()
 }
 
 /// What one install may copy.
@@ -292,7 +294,7 @@ fn copy_tree(from: &Path, to: &Path, budget: &mut Budget) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Offered, cache_name, matching};
+    use super::{Offered, cache_name, matching, source_identity};
 
     fn offering(name: &str, description: &str) -> Offered {
         Offered {
@@ -343,6 +345,11 @@ mod tests {
             ("https://example.invalid/repo?ref=first", "https://example.invalid/repo?ref=second"),
         ] {
             assert_ne!(cache_name(first), cache_name(second), "{first} and {second}");
+            assert_ne!(
+                source_identity(first),
+                source_identity(second),
+                "origin selection: {first} and {second}"
+            );
         }
         assert_eq!(cache_name("https://example.invalid/repo"), cache_name("https://example.invalid/repo"));
     }
@@ -378,5 +385,13 @@ mod tests {
             assert!(!name.contains('.'), "a Windows device name cannot retain an apparent extension");
             std::fs::create_dir(directory.path().join(name)).unwrap();
         }
+    }
+
+    #[test]
+    fn local_origin_selection_still_recognizes_equivalent_directories() {
+        let directory = tempfile::tempdir().unwrap();
+        let direct = directory.path().display().to_string();
+        let equivalent = directory.path().join(".").display().to_string();
+        assert_eq!(source_identity(&direct), source_identity(&equivalent));
     }
 }

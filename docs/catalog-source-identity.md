@@ -18,10 +18,20 @@ meanings. Repeated use of the same address selects the same directory.
 
 Legacy directories remain in place. A subsequent explicit search fetches into
 the new address-specific directory; it never migrates, deletes or treats a
-lossy legacy name as proof of source identity. Local directory sources and
-installed skills retain their existing behavior. The digest identifies a
+lossy legacy name as proof of source identity. The digest identifies a
 configuration string; transport authentication and content trust continue
 through the existing Git and skill-install controls.
+
+Remote origin selection also compares the exact configured address. Previously
+it removed `.git` and a trailing slash, so explicit `--source ADDRESS` could
+install a same-named skill from a different endpoint, and updates could continue
+using that substituted origin. A cache-only candidate reproduced both failures
+even after all eight search/cache conditions passed. Installation and saved
+update origins now retain the same distinctions as the cache key. Equivalent
+local directory paths still canonicalize to the same identity. Existing
+installed content and local-edit protection remain in place. If an origin's
+configured spelling changes, use `rook skills install NAME --source ADDRESS`
+for an intentional source migration instead of assuming the addresses alias.
 
 Reading pinned Hermes `22063fc099ec9ad8357d7f8f6e6248a0400680d3`,
 `tools/skills_hub_github.py::_tap_cache_key`, prompted this identity audit.
@@ -30,9 +40,13 @@ punctuation; it is not claimed collision-proof and its mapping is not copied.
 Rook independently uses its existing SHA256 dependency. No dependency, schema,
 configuration setting or MSRV changes.
 
-Unit tests cover the colliding addresses, exact-address distinctions, stable
-reuse, long ASCII/Unicode names and directory boundaries. The
+Unit tests cover the colliding addresses, exact-address distinctions in both
+cache and origin selection, equivalent local paths, stable reuse, long
+ASCII/Unicode names and directory boundaries. The
 [actual CLI fixture](../xtask/probes/catalog-source-identity/README.md) serves two
 owned repositories over smart HTTP, seeds a legacy cache and verifies cold,
 warm and refresh behavior plus original-cache/workspace/binary preservation.
+It additionally installs a same-named skill from the explicitly selected `.git`
+endpoint, advances that repository and verifies updated manifest/resource bytes
+come from the recorded exact origin.
 These are source-identity checks, independent of live-model task quality.

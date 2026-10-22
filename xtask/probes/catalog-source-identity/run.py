@@ -1,4 +1,4 @@
-"""Read-only user-state audit using two entirely owned smart-HTTP repositories."""
+"""Owned smart-HTTP source identity through search, installation and update."""
 import argparse
 import tempfile
 import hashlib
@@ -36,10 +36,15 @@ git_env=dict(isolated_env,GIT_CONFIG_NOSYSTEM='1',GIT_CONFIG_GLOBAL=str(empty_co
 def run(command,cwd,**kwargs):
     return subprocess.run(command,cwd=cwd,env=git_env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
         timeout=30,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0),check=True,**kwargs)
-for number,name,path in [(1,'first-owned',http_root/'a/b'),(2,'second-owned',http_root/'a-b')]:
+for number,name,path in [(1,'first-owned',http_root/'a/b'),(2,'second-owned',http_root/'a-b'),
+                         (3,'origin-owned',http_root/'a/b.git')]:
     source=root/f'source{number}';source.mkdir()
     card=source/'skills'/name/'SKILL.md';card.parent.mkdir(parents=True)
-    card.write_text(f'---\nname: {name}\ndescription: Owned collision diagnostic repository {number}\n---\n\nOwned identity {number}.\n',encoding='utf-8')
+    card.write_bytes(f'---\nname: {name}\ndescription: Owned collision diagnostic repository {number}\n---\n\nOwned identity {number}.\n'.encode())
+    if number in [1,3]:
+        origin=source/'skills/origin-owned';origin.mkdir(exist_ok=True)
+        (origin/'SKILL.md').write_bytes(f'---\nname: origin-owned\ndescription: Owned collision origin {number}\n---\n\nOwned origin {number}, revision 1.\n'.encode())
+        (origin/'proof.txt').write_bytes(f'origin {number} revision 1\n'.encode())
     run([git,'init'],source)
     run([git,'add','--','skills'],source)
     run([git,'-c','user.name=Owned diagnostic','-c','user.email=owned@example.invalid','commit','-m','Owned skill identity'],source)
@@ -81,7 +86,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Handler)
 threading.Thread(target=server.serve_forever,daemon=True).start()
-urls=[f'http://127.0.0.1:{server.server_port}/a/b',f'http://127.0.0.1:{server.server_port}/a-b']
+urls=[f'http://127.0.0.1:{server.server_port}'+path for path in ['/a/b','/a-b','/a/b.git']]
 def cache_name(value):
     value=value.rstrip('/')
     while value.endswith('.git'):value=value[:-4]
@@ -95,9 +100,8 @@ identity=sha(binary)
 report={'status':'incomplete','binary':str(binary),'binary_sha256':identity,'owned_directory':str(root),'sources':urls}
 def snapshot(directory):
     return {path.relative_to(directory).as_posix():sha(path) for path in directory.rglob('*') if path.is_file()}
-def search(label,refresh=False):
-    command=[str(binary),'--workspace',str(root/'workspace'),'--json','skills','search','collision']
-    if refresh: command.append('--refresh')
+def cli(label,words):
+    command=[str(binary),'--workspace',str(root/'workspace'),'--json','skills',*words]
     result=subprocess.run(command,env=env,cwd=root/'workspace',stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=45,
         creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
@@ -105,12 +109,15 @@ def search(label,refresh=False):
     (root/(label+'.stdout')).write_bytes(result.stdout)
     (root/(label+'.stderr')).write_bytes(result.stderr)
     assert result.returncode==0,(label,result.returncode,result.stderr[-2000:])
-    offers=json.loads(result.stdout)
+    return result.stdout
+
+def search(label,refresh=False):
+    offers=json.loads(cli(label,['search','collision',*(['--refresh'] if refresh else [])]))
     assert isinstance(offers,list)
     return offers
 def correct(offers):
-    return len(offers)==2 and {(row['name'],row['source']) for row in offers}=={
-        ('first-owned',urls[0]),('second-owned',urls[1])}
+    return len(offers)==4 and {(row['name'],row['source']) for row in offers}=={
+        ('first-owned',urls[0]),('origin-owned',urls[0]),('second-owned',urls[1]),('origin-owned',urls[2])}
 try:
     cache=root/'home/cache/sources';cache.mkdir(parents=True)
     legacy=cache/cache_name(urls[0])
@@ -125,27 +132,47 @@ try:
     before_refresh=len(requests)
     refreshed=search('refresh',True)
     refresh_requests=list(requests[before_refresh:])
+    wanted=root/'source3/skills/origin-owned'
+    expected_install={name:(wanted/name).read_bytes() for name in ['SKILL.md','proof.txt']}
+    cli('install',['install','origin-owned','--source',urls[2]])
+    installed=root/'home/skills/origin-owned'
+    install_correct=all((installed/name).is_file() and (installed/name).read_bytes()==value for name,value in expected_install.items())
+    installed_hashes={name:sha(installed/name) for name in expected_install if (installed/name).is_file()}
+    for name in expected_install:
+        (wanted/name).write_bytes(expected_install[name].replace(b'revision 1',b'revision 2'))
+    run([git,'add','--','skills'],root/'source3')
+    run([git,'-c','user.name=Owned diagnostic','-c','user.email=owned@example.invalid','commit','-m','Owned origin revision two'],root/'source3')
+    branch=run([git,'branch','--show-current'],root/'source3').stdout.decode().strip()
+    run([git,'push','--',str(http_root/'a/b.git'),'HEAD:refs/heads/'+branch],root/'source3')
+    cli('update',['update'])
+    update_correct=all((installed/name).is_file() and (installed/name).read_bytes()==(wanted/name).read_bytes() for name in expected_install)
+    updated_hashes={name:sha(installed/name) for name in expected_install if (installed/name).is_file()}
     entries=[path for path in cache.iterdir() if path.is_dir() and path!=legacy]
     origins=[]
     for directory in entries:
         result=run([git,'-C',str(directory),'config','--get','remote.origin.url'],root)
         origins.append({'directory':directory.name,'origin':result.stdout.decode('utf-8').strip()})
-    def reached_both(rows):
-        return all(any(row['path'].startswith(path+'/') for row in rows) for path in ['/a/b','/a-b'])
+    def reached_all(rows):
+        return all(any(row['path'].startswith(path+'/') for row in rows) for path in ['/a/b','/a-b','/a/b.git'])
     report['checks']={
         'distinct_sources_offer_their_own_skills':correct(first),
-        'both_remote_repositories_physically_fetched':reached_both(cold_requests),
-        'separate_cache_entries_retain_correct_origins':len(entries)==2 and {row['origin'] for row in origins}==set(urls),
+        'all_remote_repositories_physically_fetched':reached_all(cold_requests),
+        'separate_cache_entries_retain_correct_origins':len(entries)==3 and {row['origin'] for row in origins}==set(urls),
         'warm_search_reuses_the_correct_caches':correct(warm) and not warm_requests,
-        'refresh_preserves_both_source_identities':correct(refreshed) and reached_both(refresh_requests),
+        'refresh_preserves_all_source_identities':correct(refreshed) and reached_all(refresh_requests),
         'legacy_lossy_cache_unchanged':legacy.is_dir() and snapshot(legacy)==legacy_before,
         'workspace_unchanged':not list((root/'workspace').iterdir()),
         'binary_unchanged':sha(binary)==identity,
+        'explicit_origin_installs_exact_payload':install_correct,
+        'update_keeps_the_recorded_exact_origin':update_correct,
     }
     report.update(status='passed' if all(report['checks'].values()) and not errors else 'failed',
         cold_offers=first,warm_offers=warm,refreshed_offers=refreshed,cache_origins=origins,
         legacy_directory=str(legacy),legacy_file_count=len(legacy_before),
         cold_requests=cold_requests,warm_requests=warm_requests,refresh_requests=refresh_requests,
+        explicit_install_origin=urls[2],installed_payload_sha256=installed_hashes,
+        expected_install_sha256={name:hashlib.sha256(value).hexdigest() for name,value in expected_install.items()},
+        updated_payload_sha256=updated_hashes,expected_update_sha256={name:sha(wanted/name) for name in expected_install},
         scope='Owned smart-HTTP Git repositories and fresh private CLI state. All diagnostic files and new private caches are retained; no cache is removed or migrated. No installed daemon, user cache or installation changed.')
     assert not errors,errors
     assert all(report['checks'].values()),report['checks']
