@@ -95,6 +95,12 @@ When checker history acquisition changes, run the
 the extracted CLI. Require all ten flags, including an actual stage exceeding
 the retention limit, explicit omitted-range coverage and old proof read back by
 the checker through `session_recall`.
+When version discovery changes, run the
+[owned environment-probe fixture](../xtask/probes/environment-startup/README.md).
+Require all eight flags on the extracted host CLI: exact maps, one execution per
+inventory entry, finished probes, observed parallel execution, the four-probe
+cap, no model calls and unchanged workspace/binary. Record timing as observation,
+without a speed threshold.
 When language-server startup changes, run the
 [owned daemon LSP probe](../xtask/probes/lsp-startup/README.md) against the extracted
 daemon as well. It checks shared-pool behavior through ordinary chat sockets.
