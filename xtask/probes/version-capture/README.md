@@ -28,6 +28,10 @@ throughput benchmark. Unit subprocess cases separately verify lossless large
 captures and prove that individually smaller streams share one cap.
 
 A bounded loopback receiver serializes events and acknowledges helper starts.
+The three oversized sources do not send a completion handshake after their
+banners: capture rejection may terminate them between connecting and writing
+that optional frame. Their acknowledged starts, exact inventory count and
+rejected versions remain required; malformed frames still fail the fixture.
 The holder keeps its socket through the controlled sleep, so EOF/reset provides
 retirement evidence for this owned case. This does not prove universal process
 containment or close the Windows post-spawn job-attachment race. Reports retain

@@ -66,5 +66,10 @@ fn main() {
         // system program even after PATH has been reduced to this directory.
         _ => std::process::exit(1),
     }
-    drop(notice("finished", name));
+    // These banners deliberately cross the capture ceiling. The caller can
+    // terminate us immediately, including between TCP connect and frame write;
+    // a trailing completion handshake would race that expected termination.
+    if !matches!(name, "git" | "cargo" | "npm") {
+        drop(notice("finished", name));
+    }
 }

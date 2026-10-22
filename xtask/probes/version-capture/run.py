@@ -42,7 +42,7 @@ class Events(socketserver.StreamRequestHandler):
         self.request.settimeout(35)
         try:
             line=self.rfile.readline(257)
-            assert len(line)<=256 and line.endswith(b'\n')
+            assert len(line)<=256 and line.endswith(b'\n'), repr(line)
             text=line.decode('ascii').strip()
             if text.startswith(('GET ','POST ','PUT ','PATCH ','DELETE ')):
                 with lock: state['http_requests']+=1
