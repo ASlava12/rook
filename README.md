@@ -1,7 +1,8 @@
 # Rook
 
-[Rook 0.21.12](docs/releases/0.21.12.md): automatic LSP discovery checks workspace languages before launching probes;
-support reports bound saved metadata reads and preserve readable neighboring events.
+[Rook 0.21.13](docs/releases/0.21.13.md): independent LSP discovery probes run up to four at once;
+Anthropic image-only messages retain valid blocks and cache boundaries;
+interrupted release downloads resume with checked ranges and full digest verification.
 
 [Domain network policy with OS containment](docs/domain-network-policy.md).
 
