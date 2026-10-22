@@ -9,7 +9,9 @@ python3 xtask/probes/checker-history/run.py --bin-dir target/debug --output /tmp
 The actual CLI completes 80 distinct, read-only catalog queries against a local
 scripted provider. This creates more visible events than the 128-entry retention
 limit. Its checker receives acquisition coverage and uses the parent session's
-sequence anchor to read an old proof back with `session_recall`. Require all ten
+actual harness-suggested sequence anchor to read an old proof back with
+`session_recall`. The hint must start at the stage floor because returned cursors
+move forwards; starting at the newest omitted event strands older proof. Require all ten
 flags. The fixture bounds requests to 2 MiB, output capture to 1 MiB, physical
 requests to 92 and the owned CLI process to 180 seconds. It uses a fresh isolated
 home and workspace, verifies the workspace sentinel and hashes the binary before
