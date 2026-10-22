@@ -35,8 +35,11 @@ oversized event labels, primary session metadata and ancestry metadata. The
 candidate preserves neighboring events and current activity, refuses oversized
 primary metadata, and omits only the unavailable trace. Existing diagnostic
 execution/timing/privacy checks and actual source-client HTTP controls are also
-required. Packaged CLI/daemon runtime verification remains a release gate; unit
-success alone is not that evidence.
+required. The [owned CLI/daemon fixture](../xtask/probes/diagnostic-metadata/README.md)
+checks eighteen conditions through local CLI, HTTP and remote CLI. The published
+0.21.10 pair fails ten reader/listing conditions while retaining eight controls;
+the development correction passes all eighteen. Extracted-package execution
+still remains a release gate; development-binary success alone is not that evidence.
 
 This follows the existing Pi-inspired committed-range and transcript-admission
 audit, with Pi `482c1381a00d8d00bc81697e4a980c593db6803e`,

@@ -69,6 +69,11 @@ jobs:
           cargo build --locked -p rookd
           python3 xtask/probes/provider-wait/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-provider-wait.json"
           python3 xtask/probes/provider-wait/run.py --bin-dir target/debug --refuse auxiliary --output "$RUNNER_TEMP/rook-provider-wait-auxiliary.json"
+      - name: diagnostic metadata admission
+        shell: bash
+        run: |
+          rustfmt --edition 2024 --check xtask/probes/diagnostic-metadata/seed.rs
+          python3 xtask/probes/diagnostic-metadata/run.py --bin-dir target/debug --build-target target --output "$RUNNER_TEMP/rook-diagnostic-metadata.json"
       - name: bounded environment probes
         shell: bash
         run: python3 xtask/probes/environment-startup/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-environment-probes.json"

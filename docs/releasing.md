@@ -114,6 +114,13 @@ When PATH language-server discovery changes, also run the
 [owned LSP detection fixture](../xtask/probes/lsp-detection/README.md) on the
 extracted host CLI. Require all eleven flags, including the still-running
 admission and descendant retirement after both successful and refused parents.
+When support diagnostic metadata handling changes, run the
+[owned diagnostic metadata fixture](../xtask/probes/diagnostic-metadata/README.md)
+on the extracted host CLI/daemon pair. Require all eighteen conditions, including
+readable neighbor/activity preservation, bounded primary/ancestor handling,
+remote explicit-ID listing bypass and unchanged saved records/bodies. Its
+compiled helper seeds/verifies private data; report reads must use the extracted
+pair, with their SHA256s preserved.
 When workspace admission for language-server discovery changes, run the
 [owned workspace fixture](../xtask/probes/lsp-workspace-detection/README.md) on
 the extracted host CLI. Require all twelve conditions, including no probes for
