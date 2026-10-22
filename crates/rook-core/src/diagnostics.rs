@@ -111,19 +111,24 @@ pub(crate) fn tool_measurement(
     rook: &Rook,
     result: &rook_store::Event,
 ) -> Result<Option<crate::transcript::ToolMeasurement>> {
-    tool_measurement_bounded(rook, result, usize::MAX)
+    tool_measurement_bounded(rook, result, usize::MAX, None)
 }
 
 pub(crate) fn tool_measurement_bounded(
     rook: &Rook,
     result: &rook_store::Event,
     metadata_bytes: usize,
+    before: Option<u64>,
 ) -> Result<Option<crate::transcript::ToolMeasurement>> {
     if result.record.kind != EventKind::ToolResult {
         return Ok(None);
     }
     let Some(from) = result.seq.checked_add(1) else { return Ok(None) };
-    for event in rook.store.events_bounded(result.session, from, 16, metadata_bytes)? {
+    let events = match before {
+        Some(before) => rook.store.events_range_bounded(result.session, from, before, 16, metadata_bytes)?,
+        None => rook.store.events_bounded(result.session, from, 16, metadata_bytes)?,
+    };
+    for event in events {
         if event.record.kind != EventKind::Note || event.record.label != TIMING_LABEL {
             continue;
         }
@@ -366,4 +371,45 @@ fn redact(text: &str, workspace: &Path) -> String {
         }
     }
     text
+}
+
+#[cfg(test)]
+mod frozen_measurement_tests {
+    use super::*;
+
+    #[test]
+    fn a_page_measurement_cannot_admit_future_notes_outside_its_captured_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let rook = Rook::from_parts(
+            Store::open(dir.path().join("store")).unwrap(),
+            crate::Config::default(),
+            rook_skills::Environment::bare("test", "test", "test"),
+            rook_skills::SkillIndex::default(),
+            dir.path().into(),
+        );
+        let session = rook.start_session("frozen measurement").unwrap();
+        let seq = rook.log(session, EventKind::ToolResult, "run_command", "saved result").unwrap();
+        let first_head = rook.store.get_session(session).unwrap().unwrap().next_seq;
+        let timing_seq = rook
+            .log(
+                session,
+                EventKind::Note,
+                TIMING_LABEL,
+                &format!(
+                    r#"{{"phase":"tool_dispatch","status":"completed","duration_ms":42,"result_seq":{seq}}}"#
+                ),
+            )
+            .unwrap();
+        let measured_head = rook.store.get_session(session).unwrap().unwrap().next_seq;
+        rook.log(session, EventKind::Note, &"x".repeat(20 * 1024), "later unrelated note").unwrap();
+        let event = rook.store.events(session, seq, 1).unwrap().remove(0);
+        assert_eq!(tool_measurement_bounded(&rook, &event, 16 * 1024, Some(first_head)).unwrap(), None);
+        let expected = crate::transcript::ToolMeasurement { failed: false, duration_ms: 42, timing_seq };
+        assert_eq!(
+            tool_measurement_bounded(&rook, &event, 16 * 1024, Some(measured_head)).unwrap(),
+            Some(expected)
+        );
+        assert!(tool_measurement_bounded(&rook, &event, 16 * 1024, None).is_err());
+        assert_eq!(tool_measurement(&rook, &event).unwrap(), Some(expected));
+    }
 }

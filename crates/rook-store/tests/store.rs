@@ -1,6 +1,47 @@
 use rook_store::{EventKind, Kind, NewEvent, ObjectId, SessionMeta, Store};
 
 #[test]
+fn forward_ranges_exclude_oversized_metadata_outside_both_frozen_bounds() {
+    let (_dir, store) = tmp_store();
+    let id = rook_store::new_session_id();
+    store.create_session(&SessionMeta::new(id, "frozen forward", "/owned", 0)).unwrap();
+    for label in ["x".repeat(4096), "first".into(), "second".into(), "y".repeat(4096)] {
+        store
+            .append_event(id, NewEvent::new(EventKind::UserMessage, Kind::Message, b"owned").label(&label))
+            .unwrap();
+    }
+    let window = store.events_range_bounded(id, 1, 3, 128, 256).unwrap();
+    assert_eq!(window.iter().map(|e| e.seq).collect::<Vec<_>>(), [1, 2]);
+    assert_eq!(store.events_range_bounded(id, 1, 3, 1, 256).unwrap()[0].seq, 1);
+    for (from, before, refused) in [(0, 3, 0), (1, 4, 3)] {
+        let error = store.events_range_bounded(id, from, before, 128, 256).unwrap_err().to_string();
+        assert!(error.contains(&format!("event #{refused}")) && error.contains("256-byte"), "{error}");
+    }
+    assert_eq!(store.events_bounded(id, 1, 2, 256).unwrap().len(), 2);
+    assert!(store.events_bounded(id, 1, 3, 256).is_err());
+    assert_eq!(store.events(id, 0, 128).unwrap().len(), 4, "legacy readers keep all metadata");
+}
+
+#[test]
+fn forward_ranges_keep_empty_inverted_zero_and_exclusive_bounds_inside_one_session() {
+    let (_dir, store) = tmp_store();
+    let id = rook_store::new_session_id();
+    store.create_session(&SessionMeta::new(id, "forward bounds", "/owned", 0)).unwrap();
+    for _ in 0..4 {
+        store.append_event(id, NewEvent::new(EventKind::Note, Kind::Message, b"owned")).unwrap();
+    }
+    let other = rook_store::new_session_id();
+    store.create_session(&SessionMeta::new(other, "other session", "/owned", 0)).unwrap();
+    store.append_event(other, NewEvent::new(EventKind::Note, Kind::Message, b"other")).unwrap();
+    let events = store.events_range_bounded(id, 1, 3, 128, 256).unwrap();
+    assert_eq!(events.iter().map(|e| (e.session, e.seq)).collect::<Vec<_>>(), [(id, 1), (id, 2)]);
+    for (from, before, count) in [(0, 0, 1), (4, 2, 1), (0, 4, 0), (u64::MAX, u64::MAX, 1)] {
+        assert!(store.events_range_bounded(id, from, before, count, 0).unwrap().is_empty());
+    }
+    assert!(store.events_range_bounded(id, 0, 1, 1, 0).is_err());
+}
+
+#[test]
 fn reverse_event_metadata_is_admitted_before_an_oversized_label_is_decoded() {
     let (_dir, store) = tmp_store();
     let id = rook_store::new_session_id();

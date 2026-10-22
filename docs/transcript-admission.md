@@ -7,6 +7,15 @@ quotes and explicit image reads, previous/next existence probes, and neighboring
 timing/change/detail/image records used to decorate a result. `session_recall`
 shares the page/search readers.
 
+Forward acquisition applies its captured exclusive head to the database range,
+before admitting metadata, as reverse reads already did. Frozen search cursors,
+page acquisition and next/previous probes cannot inspect later appended records.
+Optional timing measurements on a page use that same captured head. Otherwise an
+unrelated oversized future note could fail a read of valid older evidence even
+though the renderer would eventually omit it. Individual entry decoration keeps
+its existing live timing lookup; fixed event reads still admit only the captured
+session head.
+
 A record that exceeds the bound returns an explicit read error naming the session
 or event. It is neither silently removed nor evidence that a saved action did not
 happen. The original journal is unchanged. Ordinary page and body output budgets,
@@ -30,6 +39,11 @@ admission independently. No upstream implementation is copied.
 The regression suite drives public transcript and recall APIs with oversized
 event labels, oversized session headers and unrelated neighboring records.
 The three event/neighbor fixtures failed against the original implementation.
+An additional frozen-search regression reproduced a read failure caused by an
+oversized event beyond the saved cursor head. Store range tests cover both
+metadata boundaries, exclusive/empty/inverted ranges, count limits and session
+isolation. A saved-measurement fixture excludes future timing and oversized notes
+while retaining an in-range exact measurement and legacy lookup behavior.
 Normal long-session paging, escaped serialized page budgets, large-body search
 continuation, UTF-8 quotes, saved measurement linkage and inherited history remain
 covered by the existing transcript and recall suites. Local Windows validation

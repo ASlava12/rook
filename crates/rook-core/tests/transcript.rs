@@ -20,6 +20,30 @@ fn add(rook: &Rook, session: u128, text: &str) -> u64 {
 }
 
 #[test]
+fn a_frozen_search_never_admits_metadata_from_events_appended_after_its_head() {
+    let root = tempfile::tempdir().unwrap();
+    let rook = open(root.path(), Config::default());
+    let session = rook.start_session("frozen search head").unwrap();
+    let proof = add(&rook, session, "old proof within captured history");
+    let through = rook.store.get_session(session).unwrap().unwrap().next_seq;
+    rook.store
+        .append_event(
+            session,
+            NewEvent::new(EventKind::UserMessage, Kind::Message, b"later unrelated event")
+                .label(&"x".repeat(20 * 1024)),
+        )
+        .unwrap();
+    let found = rook
+        .transcript_search(session, "old proof", Cursor { through: Some(through), ..Default::default() })
+        .expect("future metadata must stay outside the captured range before it is decoded");
+    assert_eq!(found.hits.len(), 1);
+    assert_eq!(found.hits[0].seq, proof);
+    assert_eq!(found.scanned_events, 1);
+    assert!(found.next.is_none());
+    assert!(rook.transcript_search(session, "old proof", Cursor::default()).is_err());
+}
+
+#[test]
 fn navigable_history_admits_the_session_before_decoding_its_variable_length_fields() {
     let root = tempfile::tempdir().unwrap();
     let rook = open(root.path(), Config::default());

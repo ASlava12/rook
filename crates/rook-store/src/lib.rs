@@ -1102,15 +1102,43 @@ impl Store {
         limit: usize,
         record_bytes: usize,
     ) -> Result<Vec<Event>> {
-        if limit == 0 {
+        self.events_to_bound(session, from_seq, None, limit, record_bytes)
+    }
+
+    /// Read [from_seq, before) forwards. Exclude later records at the database
+    /// range, before their variable-length metadata can be admitted or decoded.
+    pub fn events_range_bounded(
+        &self,
+        session: u128,
+        from_seq: u64,
+        before: u64,
+        limit: usize,
+        record_bytes: usize,
+    ) -> Result<Vec<Event>> {
+        self.events_to_bound(session, from_seq, Some(before), limit, record_bytes)
+    }
+
+    fn events_to_bound(
+        &self,
+        session: u128,
+        from_seq: u64,
+        before: Option<u64>,
+        limit: usize,
+        record_bytes: usize,
+    ) -> Result<Vec<Event>> {
+        use std::ops::Bound;
+
+        if limit == 0 || before.is_some_and(|before| from_seq >= before) {
             return Ok(Vec::new());
         }
         let txn = self.db.begin_read()?;
         let events = txn.open_table(schema::EVENTS)?;
         let start = schema::event_key(session, from_seq);
-        let end = schema::event_key(session, u64::MAX);
+        let end = schema::event_key(session, before.unwrap_or(u64::MAX));
+        let upper =
+            if before.is_some() { Bound::Excluded(end.as_slice()) } else { Bound::Included(end.as_slice()) };
         let mut out = Vec::new();
-        for entry in events.range(start.as_slice()..=end.as_slice())? {
+        for entry in events.range::<&[u8]>((Bound::Included(start.as_slice()), upper))? {
             let (k, v) = entry?;
             let Some((sid, seq)) = schema::parse_event_key(k.value()) else { continue };
             if sid != session {
