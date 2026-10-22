@@ -6,16 +6,18 @@ before an empty chat could consume input. Environment detection now uses at most
 four active probes per invocation, including the caller and up to three temporary
 worker threads. It still runs once per existing lazy environment value.
 
-Each command keeps the existing five-second patience, hidden-process setup,
-version parser and direct-child cleanup. Failed or missing tools remain absent
+Each command keeps the existing five-second patience, hidden-process setup and
+version parser. [Bounded pipe capture](version-probe-capture.md) also applies that
+patience after parent exit and caps combined stdout/stderr at 64 KiB. Failed or
+missing tools remain absent
 from the same language/tool maps. Output slots follow the static input inventory,
 and the resulting maps retain their deterministic ordering regardless of which
 command finishes first. Failed worker creation leaves the caller and remaining
 workers to drain unclaimed probes; it does not drop queued inventory entries.
 
 The bound applies to each invocation, not globally across independent Rook
-instances. This does not establish a deadline for an entire application startup,
-change the existing subprocess output/descendant contract or make environment
+instances. This does not establish a deadline for an entire application startup
+or make environment
 detection transactional against changes in installed tools. No persistent cache,
 configuration key, dependency or model request is added.
 

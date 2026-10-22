@@ -241,27 +241,9 @@ fn ran_within(command: &mut Command, patience: std::time::Duration) -> Option<st
     // console is a window. Sixteen probes at startup is sixteen windows that
     // open and shut on the person's desktop before the first frame is drawn —
     // reported from a real one as a swarm of them.
-    rook_contain::quietly(command);
-    let mut child = command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .ok()?;
-    let deadline = std::time::Instant::now() + patience;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => return child.wait_with_output().ok(),
-            Err(_) => return None,
-            Ok(None) if std::time::Instant::now() >= deadline => {
-                let _ = child.kill();
-                // Reaped, so the answer is not a process nobody waited for.
-                let _ = child.wait();
-                return None;
-            }
-            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
-        }
-    }
+    // A completed parent can leave descendants holding either pipe. Keep EOF
+    // under the same patience, and reject banners beyond this metadata ceiling.
+    rook_contain::captured_within(command, patience, 64 * 1024).ok()
 }
 
 /// Pull the first `x.y[.z]` looking token out of a `--version` banner.

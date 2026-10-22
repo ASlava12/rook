@@ -12,6 +12,9 @@
 //! The network is not restrained by this: an integrity level is about objects
 //! on the machine. The result of every command says so.
 
+mod capture;
+pub use capture::captured_within;
+
 #[cfg(target_os = "macos")]
 mod process;
 

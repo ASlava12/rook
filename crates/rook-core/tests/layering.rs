@@ -143,7 +143,9 @@ fn every_file_that_starts_a_process_says_how() {
     // own process group; `quietly` or `NO_WINDOW` for everything else; and
     // `on_its_own` where a deadline has to reach the whole tree, which is
     // `quietly` and a process group together.
-    const SAYS_HOW: [&str; 4] = ["creation_flags", "quietly", "NO_WINDOW", "on_its_own"];
+    // `captured_within` owns the spawn and applies `on_its_own` internally;
+    // callers no longer start the child or choose its console flags themselves.
+    const SAYS_HOW: [&str; 5] = ["creation_flags", "quietly", "NO_WINDOW", "on_its_own", "captured_within"];
     let mut checked = 0;
 
     for entry in walk(&crates_dir()) {
