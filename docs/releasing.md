@@ -71,6 +71,10 @@ read/output content, terminal exit evidence, single normal cleanup and durable
 uncertain-effect recovery.
 Its editor buffers and provider are
 local fixtures; it does not establish compatibility with a particular editor.
+When credit-limited provider recovery changes, run the
+[owned credit-output probe](../xtask/probes/credit-output/README.md) against the
+extracted CLI. Require all ten flags: one useful smaller-budget retry, bounded
+repeated/bad-budget refusals, unchanged owned workspace and unchanged binary.
 When language-server startup changes, run the
 [owned daemon LSP probe](../xtask/probes/lsp-startup/README.md) against the extracted
 daemon as well. It checks shared-pool behavior through ordinary chat sockets.
