@@ -298,7 +298,16 @@ async fn nested_retry_advice_is_bounded_case_insensitive_and_preserves_terminal_
         ("rate_limit_exceeded", json!({"Retry-After":["2"]}), 429, None),
         ("rate_limit_exceeded", json!({"Retry-After":"2","retry-after":"3"}), 429, None),
         ("rate_limit_exceeded", json!({"Retry-After":"0".repeat(33)}), 429, None),
-        ("rate_limit_exceeded", json!({"Retry-After":"Wed, 21 Oct 2026 07:28:00 GMT"}), 429, None),
+        ("rate_limit_exceeded", json!({"Retry-After":"Thu, 01 Jan 1970 00:00:00 GMT"}), 429, Some(0)),
+        (
+            "rate_limit_exceeded",
+            json!({"Retry-After": httpdate::fmt_http_date(std::time::SystemTime::now() + Duration::from_secs(86400))}),
+            429,
+            None,
+        ),
+        ("rate_limit_exceeded", json!({"Retry-After":"Wed, 99 Oct 2026 07:28:00 GMT"}), 429, None),
+        ("rate_limit_exceeded", json!({"Retry-After":"+2"}), 429, None),
+        ("invalid_api_key", json!({"Retry-After":"Thu, 01 Jan 1970 00:00:00 GMT"}), 400, Some(0)),
         ("invalid_api_key", json!({"Retry-After":"2"}), 400, Some(2)),
         ("invalid_request_error", json!({"Retry-After":"2"}), 400, Some(2)),
     ];
