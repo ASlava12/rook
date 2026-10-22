@@ -7,7 +7,10 @@ python3 xtask/probes/version-capture/run.py --bin-dir target/debug --output /tmp
 Requires the actual CLI and a Rust compiler. The compiler proxy's executable
 name is preserved before isolating PATH; resolving rustc to rustup would change
 the selected operation. The fixture compiles one owned version program and
-installs six aliases in a fresh temporary tool directory. Real JSON doctor sees:
+installs all sixteen inventory aliases in a fresh temporary tool directory.
+Six exercise specific behavior; the others return status1 without output so
+Windows cannot discover an unrelated system program through native lookup.
+Real JSON doctor sees:
 
 - rustc: a version parent exits while its owned descendant retains both pipes
   and a liveness connection for thirty seconds unless terminated;
@@ -16,7 +19,8 @@ installs six aliases in a fresh temporary tool directory. Real JSON doctor sees:
 - git: stdout and stderr individually below 64 KiB but together above the ceiling;
 - cargo/npm: oversized stdout/stderr respectively.
 
-Eight flags require exact language/tool maps, exactly one call per owned source,
+Eight flags require exact language/tool maps, exactly one call per each of the
+sixteen owned sources,
 completion within twenty seconds of the holder handshake, closure of that owned
 holder's connection, no model HTTP calls and unchanged CLI/workspace bytes. The
 deadline check is a functional control against a thirty-second holder, not a

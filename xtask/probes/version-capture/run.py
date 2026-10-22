@@ -28,7 +28,8 @@ compiler=os.path.abspath(compiler)
 parent=(args.tmp_root or Path(tempfile.gettempdir())).resolve()
 directory=Path(tempfile.mkdtemp(prefix='rook-version-capture-',dir=parent)).resolve()
 assert directory.parent==parent and directory.name.startswith('rook-version-capture-')
-inventory={'rustc','python3','java','git','cargo','npm'}
+inventory={'rustc','python3','node','go','java','ruby','php','dotnet',
+    'git','cargo','npm','uv','docker','kubectl','rg','gh'}
 lock=threading.Lock()
 holder_closed=threading.Event()
 state={'starts':{},'events':[],'errors':[],'http_requests':0,'holder':None,'parent_exiting':None}
@@ -141,7 +142,7 @@ url='http://127.0.0.1:{server.server_address[1]}/v1'
         report['checks']={
             'expected_language_versions':actual['languages']=={'python':'99.0.1','java':'99.0.1'},
             'oversized_tool_versions_rejected':actual['tools']=={},
-            'each_owned_probe_runs_once':set(state['starts'])==inventory and len(state['starts'])==6 and not state['errors'],
+            'each_owned_probe_runs_once':set(state['starts'])==inventory and len(state['starts'])==16 and not state['errors'],
             'inherited_pipe_deadline_preserved':holder is not None and parent_exit is not None
                 and parent_exit['pid']==state['starts'].get('rustc') and 0<=held_seconds<20,
             'owned_holder_connection_retired':retired,

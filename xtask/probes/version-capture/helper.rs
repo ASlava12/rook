@@ -62,7 +62,9 @@ fn main() {
         }
         "cargo" => banner(std::io::stdout(), 128 * 1024),
         "npm" => banner(std::io::stderr(), 128 * 1024),
-        _ => panic!("unexpected owned inventory name"),
+        // Shadow all other inventory names too: Windows may find an installed
+        // system program even after PATH has been reduced to this directory.
+        _ => std::process::exit(1),
     }
     drop(notice("finished", name));
 }
