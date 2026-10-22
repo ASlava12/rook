@@ -33,11 +33,15 @@ jobs:
       - name: model preparation regressions
         if: matrix.os == 'ubuntu-latest'
         run: python3 xtask/probes/model-smoke/check.py
+      - name: build native CLI
+        shell: bash
+        run: cargo build --locked -p rook-cli
+      - name: version capture and inherited pipes
+        shell: bash
+        run: python3 xtask/probes/version-capture/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-version-capture.json"
       - name: ACP null and default payloads
         shell: bash
-        run: |
-          cargo build --locked -p rook-cli
-          python3 xtask/probes/acp-null/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-acp-null.json"
+        run: python3 xtask/probes/acp-null/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-acp-null.json"
       - name: credit-limited output recovery
         shell: bash
         run: python3 xtask/probes/credit-output/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-credit-output.json"
@@ -59,9 +63,6 @@ jobs:
       - name: bounded environment probes
         shell: bash
         run: python3 xtask/probes/environment-startup/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-environment-probes.json"
-      - name: version capture and inherited pipes
-        shell: bash
-        run: python3 xtask/probes/version-capture/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-version-capture.json"
       - name: macOS process-group lifecycle
         if: matrix.os == 'macos-latest'
         run: cargo test --locked -p rook-contain process::tests -- --nocapture

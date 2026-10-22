@@ -161,4 +161,4 @@ finally:
         shutil.rmtree(directory)
     else: report['retained_owned_directory']=str(directory)
     with output.open('x',encoding='utf-8') as sink: json.dump(report,sink,indent=2)
-print(json.dumps(report))
+    print(json.dumps(report),flush=True)
