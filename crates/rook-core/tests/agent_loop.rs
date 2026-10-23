@@ -3233,6 +3233,7 @@ async fn a_hook_that_fails_blocks_the_call_it_was_guarding() {
 
 #[tokio::test]
 async fn a_prompt_hook_can_refuse_the_turn_and_add_context() {
+    use tracing::instrument::WithSubscriber;
     let _one = one_at_a_time().await;
     let f = fixture();
     let rook = hooked(
@@ -3259,6 +3260,7 @@ async fn a_prompt_hook_can_refuse_the_turn_and_add_context() {
             rook_core::agent::Progress::PromptAdmitted { .. } => admitted = true,
             _ => {}
         })
+        .with_subscriber(tracing_subscriber::fmt().with_test_writer().finish())
         .await
         .unwrap_err();
     assert!(announced && !admitted, "an execution starts before hooks can refuse admission");
@@ -3320,6 +3322,7 @@ async fn prompt_admission_is_reported_after_the_atomic_receipt_before_the_model_
 
 #[tokio::test]
 async fn a_session_start_hook_contributes_data_outside_the_system_prompt() {
+    use tracing::instrument::WithSubscriber;
     let _one = one_at_a_time().await;
     let f = fixture();
     let rook = hooked(&f, vec![hook(rook_core::hooks::Event::SessionStart, "echo 'this repo pins nightly'")]);
@@ -3327,7 +3330,11 @@ async fn a_session_start_hook_contributes_data_outside_the_system_prompt() {
 
     let provider = ScriptedProvider::new(vec![reply("ok")]);
     let seen = provider.share();
-    AgentLoop::new(&rook, Arc::new(provider), session).run("hello").await.unwrap();
+    AgentLoop::new(&rook, Arc::new(provider), session)
+        .run("hello")
+        .with_subscriber(tracing_subscriber::fmt().with_test_writer().finish())
+        .await
+        .unwrap();
 
     let request = seen.lock().unwrap().last().cloned().unwrap();
     assert!(!request.messages[0].content.contains("this repo pins nightly"));

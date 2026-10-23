@@ -198,6 +198,14 @@ fn plan(rook: &Rook, owner: u128, p: &Proposal, rollback: bool) -> Result<Plan> 
                     .unwrap_or_else(|| Scope::Project(rook.workspace.display().to_string())),
             )
             .from_turn(owner, seq);
+            // The preview and apply must construct the same fact even across
+            // clock ticks or a restart. The proposal's ULID already retains
+            // its creation time; using now here made every token expire at
+            // the next second without any change to the reviewed inputs.
+            after.created_at = (ulid::Ulid::from_string(&p.id)
+                .map_err(|_| bad("invalid learning proposal identity"))?
+                .timestamp_ms()
+                / 1000) as i64;
             if let Some(old) = &before {
                 if old.text.trim() == text.trim() {
                     return Err(bad("this correction does not change the remembered text"));

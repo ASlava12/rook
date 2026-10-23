@@ -237,6 +237,44 @@ async fn a_failed_native_task_never_schedules_a_learning_review_or_changes_memor
     assert!(ask(&rook,owner,json!({"action":"propose","result":0,"draft":{"target":{"kind":"memory","text":"Unsupported failed procedure"},"reason":"no completion exists","evidence":[0]}})).await.is_err());
 }
 #[tokio::test]
+async fn a_memory_prepare_token_survives_elapsed_time_but_refuses_a_changed_head() {
+    let _serial = TESTS.lock().await;
+    let root = tempfile::tempdir().unwrap();
+    let rook = open(root.path(), config());
+    let owner = rook.start_session("stable learning token").unwrap();
+    let (result, seq) = task(&rook, owner, "Respond in Russian.").await;
+    let p = propose(&rook, owner, result, seq, "Respond in Russian.", None).await;
+    let prepared = ask(&rook, owner, json!({"action":"prepare","proposal":p["id"]})).await.unwrap();
+    // A real second boundary used to change the proposed Fact.created_at,
+    // invalidating review tokens even though no retained input had changed.
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    drop(rook);
+    let rook = open(root.path(), config());
+    let again = ask(&rook, owner, json!({"action":"prepare","proposal":p["id"]})).await.unwrap();
+    assert_eq!(prepared["token"], again["token"]);
+    assert_eq!(prepared["diff"], again["diff"]);
+    ask(&rook, owner, json!({"action":"apply","proposal":p["id"],"token":prepared["token"]})).await.unwrap();
+    let fact = rook.memory().unwrap().facts.remove(0);
+    assert_eq!(fact.text, "Respond in Russian.");
+    assert_eq!(fact.created_at, prepared["diff"]["after"]["created_at"].as_i64().unwrap());
+    assert_eq!(
+        fact.created_at,
+        (ulid::Ulid::from_string(p["id"].as_str().unwrap()).unwrap().timestamp_ms() / 1000) as i64
+    );
+
+    let next = propose(&rook, owner, result, seq, "Use concise replies.", None).await;
+    let stale = ask(&rook, owner, json!({"action":"prepare","proposal":next["id"]})).await.unwrap();
+    let other = propose(&rook, owner, result, seq, "Preserve source citations.", None).await;
+    apply(&rook, owner, &other["id"], false).await.unwrap();
+    assert!(
+        ask(&rook, owner, json!({"action":"apply","proposal":next["id"],"token":stale["token"]}))
+            .await
+            .is_err()
+    );
+    assert_eq!(rook.memory().unwrap().facts.len(), 2);
+}
+
+#[tokio::test]
 async fn a_reviewed_revision_keeps_its_parent_and_invalidates_the_old_apply_token() {
     let _serial = TESTS.lock().await;
     let root = tempfile::tempdir().unwrap();
