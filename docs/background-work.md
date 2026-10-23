@@ -75,8 +75,9 @@ read errors and cancellation.
 
 `xtask/probes/background-utf8/run.py` also drives an actual local CLI turn and a
 CLI turn through a private daemon. The child holds unfinished stdout/stderr
-characters until the first job read, then completes multilingual output. Its
-22 checks include the intermediate and final text, exit status, confirmed
+characters until the first job read, then finishes stdout and waits for its
+observed output before finishing stderr. Its 24 checks include the intermediate
+and final text, exit status, confirmed
 execution route and unchanged workspace sentinel. The same probe has an explicit
 `--expect-corruption` mode to reproduce the failure on an older binary pair;
 ordinary CI requires every check to pass on its newly built pair.

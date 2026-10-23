@@ -43,7 +43,10 @@ while not (root/'release').exists():
     time.sleep(.01)
 for byte in bytes([0xbd,0xa0])+' Русский 🙂 OUT_END\\n'.encode():
     out.write(bytes([byte]));out.flush();time.sleep(.01)
-time.sleep(.1)
+(root/'out-done').write_text('done')
+while not (root/'release-err').exists():
+    if time.monotonic()>deadline:raise SystemExit(71)
+    time.sleep(.01)
 for byte in bytes([0x9f,0x99,0x82])+' 你好 ERR_END\\n'.encode():
     err.write(bytes([byte]));err.flush();time.sleep(.01)
 (root/'done').write_text('done')
@@ -53,9 +56,16 @@ report={'stage':args.stage,'owned_root':str(root),'script_sha256':sha(__file__),
     'expect_corruption':args.expect_corruption,'binaries':{},'cases':{},'checks':{}}
 def tool_text(message):
     value=message['content']
-    if isinstance(value,str):return value
-    assert isinstance(value,list)
-    return '\n'.join(p.get('text','') for p in value if isinstance(p,dict))
+    if not isinstance(value,str):
+        assert isinstance(value,list)
+        value='\n'.join(p.get('text','') for p in value if isinstance(p,dict))
+    try:wrapper=json.loads(value)
+    except json.JSONDecodeError:return value
+    if isinstance(wrapper,dict) and isinstance(wrapper.get('rook_source'),dict):
+        source=wrapper['rook_source']
+        assert source['kind']=='tool_result' and isinstance(source['content'],str)
+        return source['content']
+    return value
 class Model(http.server.BaseHTTPRequestHandler):
     def setup(self):super().setup();self.connection.settimeout(15)
     def log_message(self,*args):pass
@@ -70,7 +80,7 @@ class Model(http.server.BaseHTTPRequestHandler):
             with lock:
                 case['requests']+=1;assert case['requests']<=8
                 if classifier or verifier:case['auxiliary']+=1;index=-1
-                else:index=case['main'];case['main']+=1;assert index<4
+                else:index=case['main'];case['main']+=1;assert index<5
             text='{"action":"finish"}' if classifier else 'VERDICT: unproven' if verifier else 'OWNED_UTF8_DONE'
             call=None
             if index==0:
@@ -80,14 +90,20 @@ class Model(http.server.BaseHTTPRequestHandler):
             elif index==1:
                 tool=next(m for m in reversed(request['messages']) if m['role']=='tool')
                 match=re.search(r'\bjob[0-9]{3,}\b',tool_text(tool));assert match,tool_text(tool)[-2000:]
-                case['job']=match.group(0);call=('job',{'id':case['job'],'wait_secs':1})
+                case['job']=match.group(0);call=('job',{'id':case['job'],'wait_secs':3})
             elif index==2:
                 tool=next(m for m in reversed(request['messages']) if m['role']=='tool')
                 case['partial']=tool_text(tool)
                 assert (case['workspace']/'ready').is_file(),'helper did not reach the split boundary'
                 (case['workspace']/'release').write_bytes(b'release')
-                call=('job',{'id':case['job'],'wait_secs':10})
+                call=('job',{'id':case['job'],'wait_secs':3})
             elif index==3:
+                tool=next(m for m in reversed(request['messages']) if m['role']=='tool')
+                case['stdout_only']=tool_text(tool)
+                assert (case['workspace']/'out-done').is_file() and 'OUT_END' in case['stdout_only']
+                (case['workspace']/'release-err').write_bytes(b'release')
+                call=('job',{'id':case['job'],'wait_secs':10})
+            elif index==4:
                 tool=next(m for m in reversed(request['messages']) if m['role']=='tool')
                 case['final']=tool_text(tool)
             if call:
@@ -158,17 +174,18 @@ url='http://127.0.0.1:{server.server_port}/{name}/v1'
                 creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
         assert out.stat().st_size<=4*1024*1024 and err.stat().st_size<=128*1024
         with lock:
-            case=cases[name];partial=case.get('partial','');final=case.get('final','')
+            case=cases[name];partial=case.get('partial','');middle=case.get('stdout_only','');final=case.get('final','')
             row={k:v for k,v in case.items() if k!='workspace'}
         checks={
             'client_completed':result.returncode==0 and b'OWNED_UTF8_DONE' in out.read_bytes(),
-            'helper_completed':(workspace/'ready').exists() and (workspace/'release').exists() and (workspace/'done').exists(),
+            'helper_completed':all((workspace/marker).exists() for marker in ['ready','release','out-done','release-err','done']),
             'partial_was_running':'running for' in partial and 'OUT ' in partial and 'ERR ' in partial,
             'partial_clean':bool(partial) and '\ufffd' not in partial,
+            'stdout_before_stderr_exact':'你 Русский 🙂 OUT_END' in middle and 'ERR_END' not in middle and '\ufffd' not in middle,
             'final_multilingual_exact':'你 Русский 🙂 OUT_END' in final and '🙂 你好 ERR_END' in final,
             'final_clean':bool(final) and '\ufffd' not in final,
             'job_exit_confirmed':'exit 0' in final,
-            'bounded_request_count':case['main']==4 and case['requests']<=6,
+            'bounded_request_count':case['main']==5 and case['requests']<=7,
             'workspace_sentinel_unchanged':(workspace/'sentinel').read_bytes()==b'unchanged',
             'execution_route_confirmed':(daemon.poll() is None and ('using the running rookd at '+base).encode() in err.read_bytes()) if name=='daemon' else b'using the running rookd at ' not in err.read_bytes(),
         }
@@ -180,7 +197,7 @@ url='http://127.0.0.1:{server.server_port}/{name}/v1'
     report['server_errors']=errors
     report['checks']['no_model_protocol_errors']=not errors
     report['checks']['binary_pair_unchanged']=all(sha(bins[name])==row['sha256'] for name,row in report['binaries'].items())
-    corrupt={'partial_clean','final_multilingual_exact','final_clean'}
+    corrupt={'partial_clean','stdout_before_stderr_exact','final_multilingual_exact','final_clean'}
     if args.expect_corruption:
         assert all(not row['checks'][key] for row in report['cases'].values() for key in corrupt),report['cases']
         assert all(value for key,value in report['checks'].items() if not any(key.endswith('_'+field) for field in corrupt))
