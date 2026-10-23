@@ -320,9 +320,13 @@ impl<'a> AgentLoop<'a> {
                 _ => before,
             };
         }
-        if split < 2
-            && previous.is_none()
-            && !entries[..split].iter().any(|e| e.label == crate::attachments::LABEL)
+        // A previous summary is carried only when another source span leaves
+        // context. Re-summarising it alone advances no boundary and can replace
+        // verified history with a fallback when the needless request fails.
+        if split == 0
+            || (split < 2
+                && previous.is_none()
+                && !entries[..split].iter().any(|e| e.label == crate::attachments::LABEL))
         {
             return Err(CoreError::Other("not enough history to compact".into()));
         }

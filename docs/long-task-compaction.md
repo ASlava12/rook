@@ -36,3 +36,26 @@ The endpoint supplies a controlled summary after its actual input is checked.
 This proves the engine's transport, replacement, source-boundary and persistence
 contracts. It does not establish how accurately a particular model summarizes
 real multi-day work; that requires inspecting a separate real-model run.
+
+## A retained tail is not a new summary span
+
+If the complete remaining tail is retained, compaction has no new source span
+to replace. This remains true when a previous summary exists. Rook refuses that
+attempt before asking the summarizer and leaves both the previous summary and
+its source boundary unchanged. No additional compaction record is saved.
+
+Previously, an existing summary bypassed the insufficient-history guard even
+with an empty new span. A second request spent tokens without advancing the
+boundary; a provider failure could also replace the carried summary with a
+fallback describing the failed request. The actual AgentLoop regression first
+creates a valid summary, then checks repeated attempts with the retained tail
+and with one additional short message. It verifies one physical summary request,
+one saved compaction, and the unchanged previous summary/boundary. Existing
+coverage checks that later history can still be compacted and carries the
+previous summary into the new request.
+
+Pi's `prepareCompaction` at pinned revision
+`482c1381a00d8d00bc81697e4a980c593db6803e` provided the audit prompt: it declines
+preparations without messages to summarize. The Rook guard is independent and
+retains its existing failed-attempt observations; it adds no new public event
+type or context-window policy.

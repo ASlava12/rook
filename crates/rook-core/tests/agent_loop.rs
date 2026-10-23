@@ -5681,6 +5681,41 @@ async fn nothing_worth_compacting_records_no_compaction() {
     assert!(entries.iter().all(|e| e.kind != "compaction"), "{entries:?}");
 }
 
+/// Keeping the entire remaining tail must not rewrite a previous summary or
+/// charge another model request without advancing the compacted boundary.
+#[tokio::test]
+async fn repeated_compaction_without_a_new_prefix_preserves_the_previous_summary() {
+    let f = fixture();
+    let session = long_session(&f, 40);
+    let provider = ScriptedProvider::new(vec![reply("Preserve the verified parser decisions.")]);
+    let requests = provider.share();
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), session);
+    agent.set_window_for_test(4_000);
+    agent.compact_now().await;
+    let previous = f.rook.last_compaction(session).unwrap();
+    assert!(previous.0 > 0 && previous.1.is_some(), "setup must actually compact history");
+    assert_eq!(requests.lock().unwrap().len(), 1);
+
+    for append_short_message in [false, true] {
+        if append_short_message {
+            f.rook.log(session, rook_store::EventKind::UserMessage, "", "continue").unwrap();
+        }
+        agent.compact_now().await;
+        assert_eq!(requests.lock().unwrap().len(), 1, "no new prefix warrants another model request");
+        assert_eq!(f.rook.last_compaction(session).unwrap(), previous, "the carried summary is unchanged");
+        assert_eq!(
+            f.rook
+                .transcript(session, 0, usize::MAX, 4096)
+                .unwrap()
+                .iter()
+                .filter(|entry| entry.kind == "compaction")
+                .count(),
+            1,
+            "an empty span cannot establish another compaction"
+        );
+    }
+}
+
 /// A live model filled both fields of every call with the same instruction —
 /// differing only in whether the function name wore backticks — and both were
 /// taken: every sub-task ran twice, for twice the tokens and twice the wait,
