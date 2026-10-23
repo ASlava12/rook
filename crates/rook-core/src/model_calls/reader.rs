@@ -243,7 +243,7 @@ fn content_eligible(request: &Value, response: &Value) -> std::result::Result<()
             || !id(&tool["name"], 128)
             || !tool["description"].is_string()
             || !(tool["parameters"].is_object() || tool["parameters"].is_boolean())
-            || !advertised.insert(tool["name"].as_str().unwrap())
+            || !advertised.insert(tool["name"].as_str().ok_or("invalid_tool_definitions")?)
         {
             return Err("invalid_tool_definitions");
         }
@@ -253,8 +253,8 @@ fn content_eligible(request: &Value, response: &Value) -> std::result::Result<()
         if !message(m) {
             return Err("unsupported_content_shape");
         }
-        let role = m["role"].as_str().unwrap();
-        let tc = m["tool_calls"].as_array().unwrap();
+        let role = m["role"].as_str().ok_or("unsupported_content_shape")?;
+        let tc = m["tool_calls"].as_array().ok_or("unsupported_content_shape")?;
         if role == "tool" {
             if !tc.is_empty() || !m["tool_call_id"].as_str().is_some_and(|id| pending.remove(id)) {
                 return Err("orphan_tool_result");
@@ -270,7 +270,7 @@ fn content_eligible(request: &Value, response: &Value) -> std::result::Result<()
                 if !c["arguments"].is_object() {
                     return Err("invalid_tool_arguments");
                 }
-                if !pending.insert(c["id"].as_str().unwrap()) {
+                if !pending.insert(c["id"].as_str().ok_or("invalid_tool_history")?) {
                     return Err("duplicate_tool_call_id");
                 }
             }
@@ -283,7 +283,7 @@ fn content_eligible(request: &Value, response: &Value) -> std::result::Result<()
     if !message(reply) || reply["role"] != "assistant" || !reply["tool_call_id"].is_null() {
         return Err("unsupported_content_shape");
     }
-    let tc = reply["tool_calls"].as_array().unwrap();
+    let tc = reply["tool_calls"].as_array().ok_or("unsupported_content_shape")?;
     match response["stop_reason"].as_str() {
         Some("ToolUse") if !tc.is_empty() => {
             let mut seen = BTreeSet::new();
@@ -291,10 +291,10 @@ fn content_eligible(request: &Value, response: &Value) -> std::result::Result<()
                 if !call["arguments"].is_object() {
                     return Err("invalid_tool_arguments");
                 }
-                if !advertised.contains(call["name"].as_str().unwrap()) {
+                if !advertised.contains(call["name"].as_str().ok_or("unsupported_content_shape")?) {
                     return Err("unadvertised_tool");
                 }
-                if !seen.insert(call["id"].as_str().unwrap()) {
+                if !seen.insert(call["id"].as_str().ok_or("unsupported_content_shape")?) {
                     return Err("duplicate_tool_call_id");
                 }
             }
@@ -511,16 +511,27 @@ pub fn read(rook: &Rook, session: u128, request: &ReadRequest) -> Result<Artifac
         let input = joined.input.as_ref().map(|i| info(&i.event, &i.row.request, i.row.payload_bytes));
         let output = joined.output.as_ref().map(|o| info(&o.event, &o.row.reply, o.row.payload_bytes));
         if request.format == Format::Dataset && eligible {
+            let (
+                Some(purpose),
+                Some(physical),
+                Some(input),
+                Some(output),
+                Some(input_value),
+                Some(output_value),
+            ) = (joined.purpose, dispatch.clone(), input, output, input_value, output_value)
+            else {
+                return Err(bad("eligible model-call pair is missing its confirmed source context"));
+            };
             artifact.examples.push(Example {
                 format: "rook-canonical-visible-pair-v1".into(),
                 session: artifact.session.clone(),
                 attempt: attempt.clone(),
-                purpose: joined.purpose.unwrap(),
-                dispatch: dispatch.clone().unwrap(),
-                input: input.unwrap(),
-                output: output.unwrap(),
-                request: input_value.unwrap(),
-                response: output_value.unwrap(),
+                purpose,
+                dispatch: physical,
+                input,
+                output,
+                request: input_value,
+                response: output_value,
                 target: "response_only".into(),
                 review_required: true,
                 quality: "unlabelled".into(),
