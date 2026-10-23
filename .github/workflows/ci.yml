@@ -13,10 +13,10 @@ jobs:
   test:
     name: test ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    # The Windows gate passed in 43 minutes, then the job expired while saving
-    # its build cache. Leave cleanup time without extending the gate's own
-    # ceiling: a wedged test still stops at the bounded step below.
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 60 || 45 }}
+    # Native frontend probes precede the 45-minute workspace gate. macOS hit
+    # the old job limit after only 23 minutes of that gate. Budget both phases
+    # and cache cleanup while keeping the workspace gate's existing ceiling.
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
