@@ -1,7 +1,7 @@
 # Rook
 
-[Rook 0.21.16](docs/releases/0.21.16.md): opt-in model-call snapshots with bounded local review/export,
-and compiler-checked maintained Rust documentation examples.
+[Rook 0.21.17](docs/releases/0.21.17.md): intact Unicode in background command output,
+linear wrapping of long TUI text and Windows skill caches beneath nested home paths.
 
 [Domain network policy with OS containment](docs/domain-network-policy.md).
 
