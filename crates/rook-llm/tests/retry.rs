@@ -552,6 +552,42 @@ async fn an_account_out_of_credit_is_not_waited_out() {
     assert!(refused.to_string().contains("insufficient_quota"), "and it says why: {refused}");
 }
 
+#[tokio::test]
+async fn zai_balance_1113_is_not_retried_for_completions_or_stream_opening() {
+    for anthropic in [false, true] {
+        for streaming in [false, true] {
+            let (url, seen) = always(
+            "429 Too Many Requests",
+            r#"{"type":"error","error":{"type":"rate_limit_error","code":"1113","message":"[1113][Insufficient balance or no resource package. Please recharge.]"}}"#,
+        )
+        .await;
+            let provider: Box<dyn Provider> = if anthropic {
+                let config = rook_llm::anthropic::Config::new(
+                    url.trim_end_matches("/v1").to_string(),
+                    "owned-key".into(),
+                    "owned-model",
+                );
+                Box::new(Retrying::new(Box::new(
+                    rook_llm::anthropic::Anthropic::new("owned-zai", "owned-model", config).unwrap(),
+                )))
+            } else {
+                Box::new(provider(url))
+            };
+            let error = if streaming {
+                match provider.stream(Request::new(Vec::new())).await {
+                    Err(error) => error,
+                    Ok(_) => panic!("the owned provider refused this stream"),
+                }
+            } else {
+                provider.complete(Request::new(Vec::new())).await.unwrap_err()
+            };
+            assert_eq!(seen.load(Ordering::SeqCst), 1, "this balance cannot recover by waiting");
+            assert!(error.to_string().contains("1113"));
+            assert!(error.to_string().contains("Insufficient balance"));
+        }
+    }
+}
+
 /// The other spelling of it, which arrives as a 400 the retry already declines
 /// to repeat — asserted so that the two stay told apart by what they say rather
 /// than by which of the rules happens to catch them.

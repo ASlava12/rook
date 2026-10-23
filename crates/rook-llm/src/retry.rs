@@ -71,8 +71,8 @@ fn worth_asking_again(error: &LlmError) -> bool {
 /// Both of those matter, which is why this is one question with one answer
 /// rather than a condition written twice.
 ///
-/// There is no single thing to look for, because the two providers do not
-/// agree. OpenAI sends `insufficient_quota`, which is a code and is matched as
+/// There is no single thing to look for, because providers do not agree.
+/// OpenAI sends `insufficient_quota`, which is a code and is matched as
 /// one. Anthropic sends `invalid_request_error` and puts the reason only in the
 /// message, so that one is matched on the sentence. Prose, and knowingly:
 /// matching a whole phrase that means exactly one thing is not the mistake of
@@ -88,6 +88,25 @@ pub(crate) fn out_of_credit(error: &LlmError) -> bool {
         .iter()
         .any(|code| said.contains(code))
         || said.contains("credit balance is too low")
+        || (*status == 429 && zai_empty_balance(body))
+}
+
+/// Z.ai calls exhausted balance a rate limit. Require its structured business
+/// code and explicit message; rolling package limits also mention balance but
+/// can reset without account changes. Bound JSON parsing for custom providers.
+fn zai_empty_balance(body: &str) -> bool {
+    if body.len() > 16 * 1024 {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else { return false };
+    let Some(error) = value.get("error") else { return false };
+    let code = error.get("code");
+    let known_code = code.and_then(serde_json::Value::as_str) == Some("1113")
+        || code.and_then(serde_json::Value::as_u64) == Some(1113);
+    known_code
+        && error.get("message").and_then(serde_json::Value::as_str).is_some_and(|message| {
+            message.to_ascii_lowercase().contains("insufficient balance or no resource package")
+        })
 }
 
 /// Whether a refusal carries a code that means *no* rather than *later*.
@@ -562,6 +581,46 @@ mod tests {
     use futures_util::StreamExt;
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
+
+    #[test]
+    fn zai_balance_requires_a_documented_structured_refusal() {
+        for code in [serde_json::json!("1113"), serde_json::json!(1113)] {
+            let body = serde_json::json!({"error":{"type":"rate_limit_error","code":code,
+                "message":"[1113][Insufficient balance or no resource package. Please recharge.]"}})
+            .to_string();
+            let error = LlmError::Status { status: 429, body, retry_after: Some(Duration::from_secs(120)) };
+            assert!(out_of_credit(&error));
+            assert!(!worth_asking_again(&error), "a Retry-After cannot add balance");
+        }
+    }
+
+    #[test]
+    fn zai_temporary_windows_and_unproven_bodies_keep_transient_recovery() {
+        let message = "Insufficient balance or no resource package. Please recharge.";
+        let mut bodies = Vec::new();
+        for code in ["1302", "1305", "1308", "1310", "1313", "1316", "1317", "1318", "1319", "1320", "1321"] {
+            bodies.push(serde_json::json!({"error":{"code":code,"message":message}}).to_string());
+        }
+        bodies.extend([
+            serde_json::json!({"error":{"code":"1113","message":"Rate limit reached; resets soon."}})
+                .to_string(),
+            serde_json::json!({"error":{"message":message}}).to_string(),
+            serde_json::json!({"code":"1113","message":message}).to_string(),
+            serde_json::json!({"error":{"code":"11130","message":message}}).to_string(),
+            serde_json::json!({"error":{"code":"1113","message":message,"padding":"x".repeat(16*1024)}})
+                .to_string(),
+            format!("not JSON: 1113 {message}"),
+        ]);
+        for body in bodies {
+            let error = LlmError::Status { status: 429, body, retry_after: None };
+            assert!(!out_of_credit(&error), "{error}");
+            assert!(worth_asking_again(&error), "unproven account failure must retain retry eligibility");
+        }
+        let body = serde_json::json!({"error":{"code":"1113","message":message}}).to_string();
+        let other_status = LlmError::Status { status: 503, body, retry_after: None };
+        assert!(!out_of_credit(&other_status));
+        assert!(worth_asking_again(&other_status));
+    }
 
     #[derive(Default)]
     struct WaitLog {
