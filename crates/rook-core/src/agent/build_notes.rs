@@ -5,7 +5,6 @@ use super::AgentLoop;
 fn error_codes(outcome: &rook_tools::ToolOutcome) -> Vec<String> {
     if !outcome.is_error
         || outcome.meta.get("cargo_command").and_then(|v| v.as_bool()) != Some(true)
-        || outcome.meta.get("processes_stopped").and_then(|v| v.as_bool()) != Some(true)
         || !outcome.meta.get("exit_code").and_then(|v| v.as_i64()).is_some_and(|n| n > 0)
         || outcome.meta.get("execution_uncertain").and_then(|v| v.as_bool()) == Some(true)
     {
@@ -83,7 +82,6 @@ mod tests {
         assert_eq!(error_codes(&outcome(raw)), ["E0382", "E0308"]);
         for (key, value) in [
             ("cargo_command", serde_json::json!(false)),
-            ("processes_stopped", serde_json::json!(false)),
             ("exit_code", serde_json::json!(0)),
             ("execution_uncertain", serde_json::json!(true)),
             ("cargo_diagnostic_bytes", serde_json::json!(65537)),
@@ -96,6 +94,16 @@ mod tests {
             error_codes(&truncated),
             ["E0382", "E0308"],
             "visible diagnostics survive display condensation without a complete-output claim"
+        );
+    }
+
+    #[test]
+    fn a_completed_output_prefix_can_offer_advice_without_certifying_descendants() {
+        let result = outcome("exit 101\nerror[E0382]: moved value").with("processes_stopped", false);
+        assert_eq!(
+            error_codes(&result),
+            ["E0382"],
+            "advice about received output does not certify process cleanup or a successful fix"
         );
     }
     #[test]

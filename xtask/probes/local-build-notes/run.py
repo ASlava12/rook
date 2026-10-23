@@ -205,7 +205,7 @@ try:
             ROOK_LOG='error',ROOK_LOCAL_HINTS_KEY='owned-no-external-key',PATH=str(root/'tools')+os.pathsep+system_paths)
         code,out,err=run([str(seed),'seed',str(home),source_url],'seed-'+name,env,workspace)
         assert code==0 and b'OWNED_DOCS_SEED' in out,err[-2000:]
-        (home/'config.toml').write_text(f"[agent]\nmodel='fixture'\ninstall_servers=false\nplan_first=false\none_script=false\nmax_steps=12\n[memory]\nenabled=false\n[sandbox]\nstance='autonomous'\nisolate='off'\nmax_output_bytes=8192\nmax_spill_bytes=1048576\n[shell_undo]\nenabled=true\n[web]\nenabled=true\nsearch='searxng'\nsearch_url='http://127.0.0.1:{spy.server_port}'\ntimeout_secs=1\n[server]\nport=0\n[models.fixture]\napi='openai'\nmodel='owned-hints'\nkey='env:ROOK_LOCAL_HINTS_KEY'\ncontext_window=131072\nurl='http://127.0.0.1:{model.server_port}/{name}/v1'\n",encoding='utf-8')
+        (home/'config.toml').write_text(f"[agent]\nmodel='fixture'\ninstall_servers=false\nplan_first=false\none_script=false\nmax_steps=12\n[memory]\nenabled=false\n[sandbox]\nstance='autonomous'\nisolate='off'\nmax_output_bytes=8192\nmax_spill_bytes=1048576\n[web]\nenabled=true\nsearch='searxng'\nsearch_url='http://127.0.0.1:{spy.server_port}'\ntimeout_secs=1\n[server]\nport=0\n[models.fixture]\napi='openai'\nmodel='owned-hints'\nkey='env:ROOK_LOCAL_HINTS_KEY'\ncontext_window=131072\nurl='http://127.0.0.1:{model.server_port}/{name}/v1'\n",encoding='utf-8')
         for binary,record in binaries.items():
             code,out,err=run([record['path'],'--version'],'version-'+name+'-'+binary,env,workspace,30)
             assert code==0

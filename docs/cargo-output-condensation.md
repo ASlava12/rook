@@ -64,8 +64,13 @@ colored and JSON diagnostics are not parsed. There is no extra model call or
 network request. A citation describes the kept topic and version; it does not
 establish the cause of the failure, identify a dependency, or certify a fix.
 
-Timeouts, uncertain execution, live descendants, wrappers, background commands,
-editor terminals and remote execution do not get these notes. Display
+Timeouts, uncertain execution, wrappers, background commands,
+editor terminals and remote execution do not get these notes.
+The command's result may still report live descendants; advice quotes received
+output and does not certify their termination. An absent diagnostic prefix is
+never replaced by text from later receipts or hooks. The original capture may
+remain incomplete after pipe retirement; a positive exit and an observed prefix
+permit advisory citation without asserting a complete capture. Display
 condensation can retain an observed diagnostic without making the original
 capture complete. The diagnostic prefix excludes later receipts and hook prose.
 Notes are added after cycle/progress comparison, and do not count as progress.

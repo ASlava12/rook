@@ -7762,7 +7762,6 @@ fn bounded_local_docs_refuse_large_sets_and_mark_neighbor_budget_omissions() {
 async fn cargo_failure_appends_cited_local_build_notes_once_per_error() {
     let mut config = Config::default();
     config.sandbox.isolate = rook_tools::isolate::Mode::Off;
-    config.shell_undo.enabled = true;
     let f = fixture_with(config);
     std::fs::write(
         f.rook.workspace.join("Cargo.toml"),

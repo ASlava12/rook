@@ -577,7 +577,7 @@ impl Tool for RunCommand {
         .with("processes_stopped", processes_stopped)
         .with("isolation", contained);
         outcome = removed.annotate(outcome);
-        if drained {
+        if code > 0 {
             outcome = outcome.with("cargo_diagnostic_bytes", cargo_diagnostic_bytes);
         }
         // Only complete captured output can establish an unchanged command
