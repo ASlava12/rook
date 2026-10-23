@@ -1,8 +1,8 @@
 # Rook
 
-[Rook 0.21.13](docs/releases/0.21.13.md): independent LSP discovery probes run up to four at once;
-Anthropic image-only messages retain valid blocks and cache boundaries;
-interrupted release downloads resume with checked ranges and full digest verification.
+[Rook 0.21.14](docs/releases/0.21.14.md): direct local foreground Cargo results omit routine progress before the display cap,
+retain original captures and offer `output="raw"`;
+`crate_api` selects an unambiguous locked version, checks its cached archive and reports incomplete source scans.
 
 [Domain network policy with OS containment](docs/domain-network-policy.md).
 
