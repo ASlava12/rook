@@ -103,10 +103,15 @@ impl Tool for CrateApi {
 
 /// Public signatures, in file order, with the `impl` they belong to.
 fn collect(source: &Path, entity: Option<&str>, out: &mut Vec<String>) -> bool {
+    let root = source.join("src");
+    // Walkers follow their root even with follow_links disabled. Admit the
+    // root separately so a symlink/junction cannot silently change the source.
+    if !std::fs::symlink_metadata(&root).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink()) {
+        return true;
+    }
     let mut incomplete = false;
     let mut files: Vec<PathBuf> = Vec::new();
-    for (index, entry) in ignore::WalkBuilder::new(source.join("src")).max_depth(Some(16)).build().enumerate()
-    {
+    for (index, entry) in ignore::WalkBuilder::new(root).max_depth(Some(16)).build().enumerate() {
         if index == 4096 {
             incomplete = true;
             break;

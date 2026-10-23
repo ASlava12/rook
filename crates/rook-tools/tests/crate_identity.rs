@@ -206,3 +206,42 @@ fn oversized_source_is_reported_as_incomplete() {
     assert!(!out.is_error && out.truncated && out.meta["scan_incomplete"] == true, "{}", out.content);
     assert!(!out.content.contains("pub struct NotAdmitted"));
 }
+
+#[test]
+fn a_linked_source_root_is_not_followed() {
+    let out = invoke(&[("2.0.0", REGISTRY, B)], json!({"crate":"owned-example"}), |r| {
+        seed(r, "registry-a", "2.0.0", B, "ReplacedSource");
+        let source = r.join("home/registry/src/registry-a/owned-example-2.0.0/src");
+        std::fs::remove_file(source.join("lib.rs")).unwrap();
+        std::fs::remove_dir(&source).unwrap();
+        let outside = r.join("outside-cache");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("lib.rs"), "pub struct OutsideCacheRoot;\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &source).unwrap();
+        #[cfg(windows)]
+        {
+            // mklink treats forward slashes as switches, including ones
+            // retained by joins inside an otherwise absolute Windows path.
+            let windows_path = |path: &Path| {
+                let text = path.to_string_lossy().replace('/', "\\");
+                text.strip_prefix("\\\\?\\").unwrap_or(&text).to_owned()
+            };
+            let mut command = std::process::Command::new("cmd.exe");
+            rook_contain::quietly(&mut command);
+            let result = command
+                .args(["/d", "/c", "mklink", "/J"])
+                .arg(windows_path(&source))
+                .arg(windows_path(&outside))
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "owned junction creation failed: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+    });
+    assert!(!out.content.contains("OutsideCacheRoot"), "{}", out.content);
+    assert!(!out.is_error && out.truncated && out.meta["scan_incomplete"] == true, "{}", out.content);
+}

@@ -47,18 +47,22 @@ def run(command,env,cwd,name,timeout=120):
     finally: result=finish(child,capture)
     return result
 def snapshot(directory):
-    entries=sorted(directory.rglob('*'));assert len(entries)<=64
-    result={};total=0
-    for p in entries:
-        key=p.relative_to(directory).as_posix()
-        if p.is_symlink(): result[key]={'link':os.readlink(p)}
-        elif p.is_dir(): result[key]={'directory':True}
-        else:
-            total+=p.stat().st_size;assert total<=1024*1024
-            result[key]={'sha256':sha(p)}
+    result={};total=0;pending=[directory]
+    while pending:
+        with os.scandir(pending.pop()) as entries:
+            for entry in entries:
+                assert len(result)<64
+                p=Path(entry.path);key=p.relative_to(directory).as_posix()
+                # Include Windows junctions on Python versions before is_junction.
+                reparse=bool(getattr(p.lstat(),'st_file_attributes',0)&0x400)
+                if p.is_symlink() or reparse: result[key]={'link':os.readlink(p)}
+                elif entry.is_dir(follow_symlinks=False): result[key]={'directory':True};pending.append(p)
+                else:
+                    total+=p.stat().st_size;assert total<=1024*1024
+                    result[key]={'sha256':sha(p)}
     return result
-def seed(cache,registry,version,marker):
-    package='owned-example-'+version
+def seed(cache,registry,version,marker,name='owned-example'):
+    package=name+'-'+version
     body=('pub struct '+marker+';\n').encode()
     raw=io.BytesIO()
     with tarfile.open(fileobj=raw,mode='w') as archive:
@@ -89,13 +93,13 @@ class Model(http.server.BaseHTTPRequestHandler):
                     kind='classifier' if classifier else 'verifier'
                     record[kind]+=1;assert record[kind]==1;index=-1
                 else:
-                    index=record['main'];record['main']+=1;assert index<3
+                    index=record['main'];record['main']+=1;assert index<4
                     if index==0:
                         spec=next(t['function'] for t in request['tools'] if t['function']['name']=='crate_api')
                         record['catalog']=spec['parameters']['properties'].get('version',{}).get('type')=='string'
-                    if index==2: record['tools']=[{'id':m.get('tool_call_id'),'content':content(m['content'])} for m in request['messages'] if m.get('role')=='tool']
-            if index in [0,1]:
-                arguments={'crate':'owned-example'}
+                    if index==3: record['tools']=[{'id':m.get('tool_call_id'),'content':content(m['content'])} for m in request['messages'] if m.get('role')=='tool']
+            if index in [0,1,2]:
+                arguments={'crate':'owned-linked' if index==2 else 'owned-example'}
                 if index==1: arguments['version']='2.0.0'
                 delta={'role':'assistant','tool_calls':[{'index':0,'id':'owned-'+str(index),'type':'function','function':{'name':'crate_api','arguments':json.dumps(arguments)}}]};ending='tool_calls'
             else: delta={'role':'assistant','content':'{"action":"finish"}' if classifier else 'VERDICT: unproven' if verifier else 'OWNED_CRATE_IDENTITY_DONE'};ending='stop'
@@ -124,8 +128,17 @@ try:
         seed(cache,'registry-a','2.0.0','WrongSource')
         two=seed(cache,'registry-b','2.0.0','RightVersion')
         (workspace/'Cargo.lock').write_text('version = 4\n'+''.join('\n[[package]]\nname = "owned-example"\nversion = "'+v+'"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "'+c+'"\n' for v,c in [('1.0.0',one),('2.0.0',two)]),encoding='utf-8')
+        linked=seed(cache,'registry-link','1.0.0','UnlinkedOriginal','owned-linked')
+        with (workspace/'Cargo.lock').open('a',encoding='utf-8') as sink: sink.write('\n[[package]]\nname = "owned-linked"\nversion = "1.0.0"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "'+linked+'"\n')
+        linked_root=cache/'registry/src/registry-link/owned-linked-1.0.0/src'
+        (linked_root/'lib.rs').unlink();linked_root.rmdir()
+        outside=case/'outside-cache';outside.mkdir();(outside/'lib.rs').write_text('pub struct OutsideCacheRoot;\n',encoding='utf-8')
+        if os.name=='nt':
+            result=subprocess.run(['cmd.exe','/d','/c','mklink','/J',str(linked_root),str(outside)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=20,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+            assert result.returncode==0,'owned source junction creation failed'
+        else: linked_root.symlink_to(outside,target_is_directory=True)
         (workspace/'Cargo.toml').write_text('[package]\nname="owned-project"\nversion="0.1.0"\n[dependencies]\nowned-example="=2.0.0"\n',encoding='utf-8')
-        before={'workspace':snapshot(workspace),'cache':snapshot(cache)}
+        before={'workspace':snapshot(workspace),'cache':snapshot(cache),'outside':snapshot(outside)}
         system=str(Path(os.environ['SystemRoot'])/'System32') if os.name=='nt' else '/usr/bin:/bin'
         env=dict(os.environ,CARGO_HOME=str(cache),ROOK_HOME=str(home),ROOK_CONFIG_DIR=str(home),ROOK_BUILTIN_SKILLS=str(root/'empty-skills'),ROOK_CRATE_KEY='owned',ROOK_LOG='error',PATH=str(root/'tools')+os.pathsep+system)
         (home/'config.toml').write_text("[agent]\nmodel='fixture'\ninstall_servers=false\nplan_first=false\none_script=false\nmax_steps=4\n[memory]\nenabled=false\n[sandbox]\nstance='autonomous'\nisolate='off'\n[server]\nport=0\n[models.fixture]\napi='openai'\nmodel='owned-crate'\nkey='env:ROOK_CRATE_KEY'\ncontext_window=131072\nurl='http://127.0.0.1:"+str(server.server_port)+"/"+name+"/v1'\n",encoding='utf-8')
@@ -148,21 +161,23 @@ try:
             daemon.terminate();daemon.wait(timeout=10);finish(daemon,capture);daemon=capture=None
         with lock: record=json.loads(json.dumps(records[name]))
         tools={t['id']:t['content'] for t in record['tools']}
-        report['cases'].append({'name':name,'completed':completed,'record':record,'tools':tools,'unchanged':before=={'workspace':snapshot(workspace),'cache':snapshot(cache)}})
+        report['cases'].append({'name':name,'completed':completed,'record':record,'tools':tools,'unchanged':before=={'workspace':snapshot(workspace),'cache':snapshot(cache),'outside':snapshot(outside)}})
     cases={c['name']:c for c in report['cases']}
     report['checks']={
         'cli_ambiguity_refused':'Multiple locked versions' in cases['cli']['tools'].get('owned-0',''),
         'daemon_ambiguity_refused':'Multiple locked versions' in cases['daemon']['tools'].get('owned-0',''),
         'cli_exact_locked_version':'RightVersion' in cases['cli']['tools'].get('owned-1',''),
         'daemon_exact_locked_version':'RightVersion' in cases['daemon']['tools'].get('owned-1',''),
+        'cli_source_root_link_refused':'Source scan incomplete' in cases['cli']['tools'].get('owned-2','') and 'OutsideCacheRoot' not in cases['cli']['tools'].get('owned-2',''),
+        'daemon_source_root_link_refused':'Source scan incomplete' in cases['daemon']['tools'].get('owned-2','') and 'OutsideCacheRoot' not in cases['daemon']['tools'].get('owned-2',''),
         'wrong_cached_source_ignored':all('WrongSource' not in c['tools'].get('owned-1','') and 'WrongVersion' not in c['tools'].get('owned-1','') for c in report['cases']),
         'version_argument_advertised':all(c['record']['catalog'] for c in report['cases']),
         'normal_completion_both':all(c['completed'] for c in report['cases']),
-        'exact_bounded_model_requests':not errors and len(paths)==10 and all(c['record']['main']==3 and c['record']['classifier']==1 and c['record']['verifier']==1 and len(c['tools'])==2 for c in report['cases']),
+        'exact_bounded_model_requests':not errors and len(paths)==12 and all(c['record']['main']==4 and c['record']['classifier']==1 and c['record']['verifier']==1 and len(c['tools'])==3 for c in report['cases']),
         'workspaces_and_caches_unchanged':all(c['unchanged'] for c in report['cases']),
         'binaries_and_fixture_unchanged':all(sha(b['path'])==b['sha256'] for b in binaries.values()) and sha(helper)==helper_hash and all(sha(scripts/n)==v for n,v in inputs.items()),
     }
-    assert len(report['checks'])==10
+    assert len(report['checks'])==12
     report['status']='passed' if all(report['checks'].values()) else 'failed'
 except BaseException as error:
     report['failure']=type(error).__name__+': '+str(error)[:2000]

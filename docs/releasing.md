@@ -182,7 +182,8 @@ establish real-model performance or arbitrary Cargo log compatibility.
 
 When local crate API selection changes, run the
 [owned crate identity fixture](../xtask/probes/crate-identity/README.md) against
-the extracted host CLI/daemon pair. Require all ten flags, including ambiguity
+the extracted host CLI/daemon pair. Require all twelve flags, including source-root
+link refusal, ambiguity
 refusal, explicit version selection, wrong-cache exclusion, normal model/tool
 completion and unchanged workspace/cache trees and binary bytes.
 
