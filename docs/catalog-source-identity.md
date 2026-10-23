@@ -1,5 +1,28 @@
 # Separate caches for separate skill sources
 
+On Windows, catalog Git commands enable `core.longpaths` for that command only.
+When the cached `.git/config` path reaches 240 UTF-16 units, Git works in a
+private system temporary directory: some Git startup paths reject a long
+repository path before reading that option. A successful shallow clone is
+copied to a prepared directory beside the cache, then replaces it with rollback
+on a failed rename. Refresh uses the same exact configured source and prepares
+a fresh clone. A warm search continues to reuse the cache without Git or HTTP.
+
+Preparation uses the existing bounded file-tree reader: 2,000 entries, 64 MiB
+in total and 8 MiB per file. These are copy limits, not a network-download or
+whole-operation deadline. Failed clone/copy preparation leaves the old cache
+intact; unexpected non-cache destinations are refused. If replacement and
+restoration both fail, the error identifies the retained previous directory.
+Git's temporary working path must remain within its supported startup limits.
+No global/system Git configuration or installed skill is changed by discovery.
+The native Windows fixture covers 14 deep-home conditions, including refused
+refresh, copy-ceiling failure and unknown-destination preservation. Another
+10 conditions cover long pack paths while config remains below the bootstrap
+threshold, and the usual 10 cover a normal home. Source/config path lengths are
+checked in UTF-16 units. Two publication tests separately require rollback of
+an existing cache and absence of a ready cache after a failed first publication.
+See the [Git for Windows FAQ](https://github.com/git-for-windows/git-for-windows.github.io/blob/main/content/faq.md).
+
 Remote skill discovery used a readable directory made by replacing URL
 punctuation with hyphens. Different addresses such as `/a/b` and `/a-b` therefore
 shared a cache. A controlled published 0.21.9 CLI search returned the first

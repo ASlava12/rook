@@ -9,6 +9,26 @@ python3 xtask/probes/catalog-source-identity/run.py --bin-dir /path/to/package/b
 ```
 
 Three temporary Git repositories expose skills at loopback smart-HTTP
+paths. On Windows, add `--long-home` to put the private catalog home below two
+additional directory segments and exercise clone/fetch/install/update beyond
+Git's legacy path limit. Fixture preparation uses its own command-local
+long-path option; inspection parses actual cached config bytes through Git's
+stdin reader to avoid repeating the bootstrap failure in the inspector.
+The tested CLI receives an isolated Git environment with zero inherited config
+overrides. All ten conditions remain required. Long-home mode also requires
+exact cache preservation after a refused refresh and offline reuse after that
+refusal. An unexpected non-cache destination must remain intact and refuse
+replacement before making a network request. A refresh whose checkout exceeds
+the copy ceiling must also retain the previous cache. CI retains the fourteen-condition
+Windows receipt separately.
+
+`--medium-home` instead exercises pack paths of at least 260 UTF-16 units with
+all config paths below 240 units. This case requires the original ten conditions
+and exercises command-local long-path support without the staging fallback.
+The two nested-home flags are mutually exclusive. CI retains both reports in
+the Windows path artifact; the normal-home scenario still runs on all hosts.
+
+The repositories use
 paths `/a/b`, `/a-b` and `/a/b.git`. The first and third also offer a same-named
 skill with distinct manifest/resource bytes. The fixture seeds a legacy lossy-name cache from the
 first repository, then invokes `rook skills search` for a cold search, a warm

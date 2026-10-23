@@ -172,6 +172,22 @@ fn fetch(source: &str, refresh: bool) -> Result<PathBuf> {
     }
 
     let into = paths::sources_cache().join(cache_name(source));
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        // Leave room for Git's configuration/bootstrap paths. Long object
+        // names in shorter roots are handled by the command-local opt-in.
+        if into.join(".git/config").as_os_str().encode_wide().count() >= 240 {
+            if refresh || !into.join(".git").is_dir() {
+                if let Some(parent) = into.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|source| CoreError::Io { path: parent.into(), source })?;
+                }
+                fetch_windows(source, &into)?;
+            }
+            return Ok(into);
+        }
+    }
     if into.join(".git").is_dir() {
         if refresh {
             git(&["fetch", "--depth", "1", "origin", "HEAD"], Some(&into))?;
@@ -186,6 +202,69 @@ fn fetch(source: &str, refresh: bool) -> Result<PathBuf> {
     // otherwise reach git in the position where it reads options.
     git(&["clone", "--depth", "1", "--", source, &into.display().to_string()], None)?;
     Ok(into)
+}
+
+/// Git for Windows can fail to read .git/config before core.longpaths takes
+/// effect. Keep Git's work in private temporary storage, then publish the
+/// complete bounded cache on its own filesystem. A failed refresh keeps the
+/// previous cache; source addresses and directory identities stay unchanged.
+#[cfg(windows)]
+fn fetch_windows(source: &str, into: &Path) -> Result<()> {
+    let existed = match into.symlink_metadata() {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            if !into.join(".git").is_dir()
+                && std::fs::read_dir(into)
+                    .map_err(|source| CoreError::Io { path: into.into(), source })?
+                    .next()
+                    .is_some()
+            {
+                return Err(CoreError::Other(format!(
+                    "skill cache destination is not a Git cache or empty directory: {}",
+                    into.display()
+                )));
+            }
+            true
+        }
+        Ok(_) => {
+            return Err(CoreError::Other(format!(
+                "skill cache destination is not a real directory: {}",
+                into.display()
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(source) => return Err(CoreError::Io { path: into.into(), source }),
+    };
+    let temporary = tempfile::Builder::new()
+        .prefix("rk-git-")
+        .tempdir()
+        .map_err(|source| CoreError::Io { path: std::env::temp_dir(), source })?;
+    let repository = temporary.path().join("repo");
+    git(&["clone", "--depth", "1", "--", source, &repository.display().to_string()], None)?;
+    let parent = into.parent().ok_or_else(|| CoreError::Other("skill cache has no parent".into()))?;
+    let stage =
+        tempfile::tempdir_in(parent).map_err(|source| CoreError::Io { path: parent.into(), source })?;
+    let prepared = stage.path().join("prepared");
+    copy_tree(&repository, &prepared, &mut Budget::new())?;
+    publish_cache(stage, &prepared, into, existed)
+}
+
+#[cfg(windows)]
+fn publish_cache(stage: tempfile::TempDir, prepared: &Path, into: &Path, existed: bool) -> Result<()> {
+    let backup = stage.path().join("previous");
+    if existed {
+        std::fs::rename(into, &backup).map_err(|source| CoreError::Io { path: into.into(), source })?;
+    }
+    if let Err(error) = std::fs::rename(prepared, into) {
+        if existed && let Err(restore) = std::fs::rename(&backup, into) {
+            let kept = stage.keep();
+            return Err(CoreError::Other(format!(
+                "skill cache replacement failed ({error}); restore failed ({restore}); previous files retained in {}",
+                kept.display()
+            )));
+        }
+        return Err(CoreError::Io { path: into.into(), source: error });
+    }
+    Ok(())
 }
 
 /// The readable label is only a hint; the complete configured source owns the
@@ -221,6 +300,11 @@ fn cache_name(source: &str) -> String {
 fn git(args: &[&str], cwd: Option<&Path>) -> Result<()> {
     let mut command = std::process::Command::new("git");
     rook_contain::quietly(&mut command);
+    // Our hashed cache name can push a nested Windows home past MAX_PATH.
+    // Scope the Git-for-Windows opt-in to this operation, without rewriting
+    // the user's Git configuration or changing source identity.
+    #[cfg(windows)]
+    command.args(["-c", "core.longpaths=true"]);
     command.args(args);
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
@@ -295,6 +379,32 @@ fn copy_tree(from: &Path, to: &Path, budget: &mut Budget) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{Offered, cache_name, matching, source_identity};
+
+    #[test]
+    #[cfg(windows)]
+    fn a_failed_cache_publication_restores_the_previous_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("cache");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("sentinel"), b"previous cache").unwrap();
+        let stage = tempfile::tempdir_in(root.path()).unwrap();
+        let missing = stage.path().join("missing-prepared-directory");
+        assert!(super::publish_cache(stage, &missing, &target, true).is_err());
+        assert_eq!(std::fs::read(target.join("sentinel")).unwrap(), b"previous cache");
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 1);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_failed_first_publication_does_not_leave_a_ready_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("cache");
+        let stage = tempfile::tempdir_in(root.path()).unwrap();
+        let missing = stage.path().join("missing-prepared-directory");
+        assert!(super::publish_cache(stage, &missing, &target, false).is_err());
+        assert!(!target.exists());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
 
     fn offering(name: &str, description: &str) -> Offered {
         Offered {

@@ -51,7 +51,21 @@ jobs:
         run: python3 xtask/probes/lsp-discovery-parallel/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-lsp-probe-pool.json"
       - name: exact remote skill-source identity
         shell: bash
-        run: python3 xtask/probes/catalog-source-identity/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-catalog-identity.json"
+        run: |
+          python3 xtask/probes/catalog-source-identity/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-catalog-identity.json"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            python3 xtask/probes/catalog-source-identity/run.py --bin-dir target/debug --tmp-root "$RUNNER_TEMP" --medium-home --output "$RUNNER_TEMP/rook-catalog-medium-home.json"
+            python3 xtask/probes/catalog-source-identity/run.py --bin-dir target/debug --tmp-root "$RUNNER_TEMP" --long-home --output "$RUNNER_TEMP/rook-catalog-long-home.json"
+          fi
+      - name: Windows long-home catalog receipt
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: catalog-long-home-windows-latest
+          path: |
+            ${{ runner.temp }}/rook-catalog-medium-home.json
+            ${{ runner.temp }}/rook-catalog-long-home.json
+          if-no-files-found: error
       - name: ACP null and default payloads
         shell: bash
         run: python3 xtask/probes/acp-null/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-acp-null.json"
