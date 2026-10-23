@@ -1,4 +1,5 @@
-//! Observing one physical generation without collecting its text or reasoning.
+//! Physical generation evidence, with optional borrowed content observation.
+//! Ordinary observers retain constant-space facts without copying content.
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -47,6 +48,19 @@ pub trait Attempt: Send {
     fn trace_context(&self) -> Option<(crate::TraceContext, bool)> {
         None
     }
+    /// Optional canonical request observation after admission and before the
+    /// physical provider is entered. The default does not clone or serialize.
+    /// A refusal prevents generation; the admitted attempt is interrupted.
+    /// This is a Rook request, not a claim about encoded HTTP bytes.
+    fn capture_request(&mut self, _request: &Request) -> Result<()> {
+        Ok(())
+    }
+    /// Borrow an unchanged streaming delta. Opt-in consumers must bound their
+    /// own copying and keep content omissions distinct from attempt outcomes.
+    fn capture_delta(&mut self, _delta: &Delta) {}
+    /// The non-streaming counterpart. Terminal status and actual completion
+    /// evidence arrive separately through `finish`, never inferred from text.
+    fn capture_response(&mut self, _response: &crate::Response) {}
     fn finish(&mut self, status: AttemptStatus, facts: &AttemptFacts) -> Result<()>;
 }
 
@@ -58,10 +72,15 @@ struct Guard {
 }
 
 impl Guard {
-    fn new(observer: &dyn AttemptObserver, dispatch: Option<&Dispatch>) -> Result<Self> {
+    fn new(observer: &dyn AttemptObserver, dispatch: Option<&Dispatch>, request: &Request) -> Result<Self> {
         let sink = observer.start(dispatch)?;
         let trace = crate::RequestTrace::new(sink.trace_context());
-        Ok(Self { sink: Some(sink), facts: AttemptFacts::default(), metadata_seen: false, trace })
+        // Construct the drop guard first: a content admission error must not
+        // leave a silently open physical-attempt record or enter the provider.
+        let mut guard =
+            Self { sink: Some(sink), facts: AttemptFacts::default(), metadata_seen: false, trace };
+        guard.sink.as_mut().expect("new attempt sink").capture_request(request)?;
+        Ok(guard)
     }
 
     fn finish(&mut self, status: AttemptStatus) -> Result<()> {
@@ -73,6 +92,9 @@ impl Guard {
     }
 
     fn delta(&mut self, delta: &Delta) {
+        if let Some(sink) = self.sink.as_mut() {
+            sink.capture_delta(delta);
+        }
         match delta {
             Delta::ResponseMetadata { usage_reported, completion_confirmed } => {
                 self.metadata_seen = true;
@@ -119,10 +141,13 @@ pub(crate) async fn complete<P: Provider + ?Sized>(
     observer: Arc<dyn AttemptObserver>,
 ) -> Result<Completion> {
     let dispatch = provider.dispatch_identity();
-    let mut guard = Guard::new(observer.as_ref(), dispatch.as_ref())?;
+    let mut guard = Guard::new(observer.as_ref(), dispatch.as_ref(), &request)?;
     request.trace = guard.trace.clone();
     match provider.complete_with_metadata(request).await {
         Ok(completed) => {
+            if let Some(sink) = guard.sink.as_mut() {
+                sink.capture_response(&completed.response);
+            }
             guard.facts = AttemptFacts {
                 usage: Some(completed.response.usage.clone()),
                 usage_reported: completed.usage_reported,
@@ -151,7 +176,7 @@ pub(crate) async fn stream<P: Provider + ?Sized>(
     observer: Arc<dyn AttemptObserver>,
 ) -> Result<ResponseStream> {
     let dispatch = provider.dispatch_identity();
-    let mut guard = Guard::new(observer.as_ref(), dispatch.as_ref())?;
+    let mut guard = Guard::new(observer.as_ref(), dispatch.as_ref(), &request)?;
     request.trace = guard.trace.clone();
     match provider.stream(request).await {
         Ok(stream) => Ok(Box::pin(Observed { stream, guard, ended: false })),
@@ -438,5 +463,166 @@ mod tests {
             assert_eq!(ends.len(), 1, "a failed ending must leave its admission pending");
             assert_eq!(ends[0].0, AttemptStatus::Completed);
         }
+    }
+
+    #[derive(Default)]
+    struct ContentLog {
+        request: Mutex<Vec<serde_json::Value>>,
+        deltas: Mutex<Vec<Delta>>,
+        responses: Mutex<Vec<Response>>,
+        reject_request: bool,
+    }
+    struct ContentRecorder {
+        log: Arc<Log>,
+        content: Arc<ContentLog>,
+    }
+    struct ContentSink {
+        inner: Box<dyn Attempt>,
+        log: Arc<Log>,
+        content: Arc<ContentLog>,
+    }
+    impl AttemptObserver for ContentRecorder {
+        fn start(&self, dispatch: Option<&Dispatch>) -> Result<Box<dyn Attempt>> {
+            Ok(Box::new(ContentSink {
+                inner: Recorder(self.log.clone()).start(dispatch)?,
+                log: self.log.clone(),
+                content: self.content.clone(),
+            }))
+        }
+    }
+    impl Attempt for ContentSink {
+        fn capture_request(&mut self, request: &Request) -> Result<()> {
+            assert_eq!(self.log.starts.load(Ordering::SeqCst), 1);
+            assert!(self.log.ends.lock().unwrap().is_empty());
+            self.content.request.lock().unwrap().push(serde_json::to_value(request).unwrap());
+            if self.content.reject_request {
+                Err(LlmError::Other("content admission refused".into()))
+            } else {
+                Ok(())
+            }
+        }
+        fn capture_delta(&mut self, delta: &Delta) {
+            assert!(self.log.ends.lock().unwrap().is_empty());
+            self.content.deltas.lock().unwrap().push(delta.clone());
+        }
+        fn capture_response(&mut self, response: &Response) {
+            assert!(self.log.ends.lock().unwrap().is_empty());
+            self.content.responses.lock().unwrap().push(response.clone());
+        }
+        fn finish(&mut self, status: AttemptStatus, facts: &AttemptFacts) -> Result<()> {
+            self.inner.finish(status, facts)
+        }
+    }
+
+    fn with_content(mode: Mode, reject: bool) -> (Leaf, Arc<dyn AttemptObserver>, Arc<Log>, Arc<ContentLog>) {
+        let log = Arc::new(Log::default());
+        let content = Arc::new(ContentLog { reject_request: reject, ..Default::default() });
+        let observer = Arc::new(ContentRecorder { log: log.clone(), content: content.clone() });
+        let leaf = Leaf { mode, log: log.clone(), calls: Arc::new(AtomicUsize::new(0)) };
+        (leaf, observer, log, content)
+    }
+
+    #[tokio::test]
+    async fn optional_content_observation_keeps_the_exact_canonical_request_and_stream() {
+        let (leaf, observer, log, content) = with_content(Mode::Complete, false);
+        let mut request = Request::new(vec![Message::system("policy one"), Message::user("visible input")]);
+        request.tools.push(crate::ToolSpec {name:"read".into(),description:"read the selected file".into(),parameters:serde_json::json!({"type":"object","properties":{"file":{"type":"string"}},"required":["file"]})});
+        request.effort = Some(crate::Effort::Low);
+        request.max_output_tokens = 257;
+        request.cache_ttl = crate::CacheTtl::OneHour;
+        let expected = serde_json::to_value(&request).unwrap();
+        let mut stream = leaf.stream_observed(request, observer).await.unwrap();
+        let mut delivered = Vec::new();
+        while let Some(delta) = stream.next().await {
+            delivered.push(delta.unwrap());
+        }
+        assert_eq!(content.request.lock().unwrap().as_slice(), [expected]);
+        let captured = content.deltas.lock().unwrap();
+        assert_eq!(captured.len(), delivered.len());
+        assert_eq!(captured.len(), 4);
+        assert!(matches!(&captured[0],Delta::ReasoningDone(block) if block["signature"]=="native-signature"));
+        assert!(
+            matches!(&delivered[0],Delta::ReasoningDone(block) if block["signature"]=="native-signature")
+        );
+        assert!(matches!(&captured[1],Delta::Text(text) if text=="answer"));
+        assert!(content.responses.lock().unwrap().is_empty());
+        assert_eq!(log.ends.lock().unwrap()[0].0, AttemptStatus::Completed);
+        assert_eq!(leaf.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn nonstreaming_content_and_completion_evidence_remain_separate() {
+        for (mode, status) in
+            [(Mode::Complete, AttemptStatus::Completed), (Mode::MissingMarker, AttemptStatus::Incomplete)]
+        {
+            let (leaf, observer, log, content) = with_content(mode, false);
+            let response = leaf.complete_observed(request(), observer).await.unwrap();
+            assert_eq!(content.request.lock().unwrap().len(), 1);
+            assert_eq!(content.responses.lock().unwrap().len(), 1);
+            assert_eq!(
+                content.responses.lock().unwrap()[0].message.content,
+                response.response.message.content
+            );
+            assert!(content.deltas.lock().unwrap().is_empty());
+            assert_eq!(log.ends.lock().unwrap()[0].0, status);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_content_admission_refusal_interrupts_the_saved_attempt_without_entering_the_provider() {
+        for streamed in [false, true] {
+            let (leaf, observer, log, content) = with_content(Mode::Complete, true);
+            let error = if streamed {
+                leaf.stream_observed(request(), observer).await.err().unwrap()
+            } else {
+                leaf.complete_observed(request(), observer).await.unwrap_err()
+            };
+            assert!(error.to_string().contains("content admission refused"));
+            assert_eq!(leaf.calls.load(Ordering::SeqCst), 0);
+            assert_eq!(content.request.lock().unwrap().len(), 1);
+            assert!(content.deltas.lock().unwrap().is_empty());
+            assert!(content.responses.lock().unwrap().is_empty());
+            let ends = log.ends.lock().unwrap();
+            assert_eq!(ends.len(), 1);
+            assert_eq!(ends[0].0, AttemptStatus::Interrupted);
+            assert!(!ends[0].1.completion_confirmed);
+        }
+    }
+
+    #[tokio::test]
+    async fn captured_content_never_promotes_failed_incomplete_or_dropped_streams_to_completed() {
+        for (mode, status) in [
+            (Mode::Error, AttemptStatus::Failed),
+            (Mode::MissingMarker, AttemptStatus::Incomplete),
+            (Mode::Partial, AttemptStatus::Interrupted),
+        ] {
+            let (leaf, observer, log, content) = with_content(mode, false);
+            let mut stream = leaf.stream_observed(request(), observer).await.unwrap();
+            for _ in 0..4 {
+                stream.next().await.unwrap().unwrap();
+            }
+            if !matches!(mode, Mode::Partial) {
+                while let Some(delta) = stream.next().await {
+                    if delta.is_err() {
+                        break;
+                    }
+                }
+            }
+            drop(stream);
+            assert_eq!(content.deltas.lock().unwrap().len(), 4);
+            let ends = log.ends.lock().unwrap();
+            assert_eq!(ends.len(), 1);
+            assert_eq!(ends[0].0, status);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_nonstreaming_error_has_a_captured_request_but_no_invented_reply() {
+        let (leaf, observer, log, content) = with_content(Mode::Error, false);
+        assert!(leaf.complete_observed(request(), observer).await.is_err());
+        assert_eq!(content.request.lock().unwrap().len(), 1);
+        assert!(content.responses.lock().unwrap().is_empty());
+        assert!(content.deltas.lock().unwrap().is_empty());
+        assert_eq!(log.ends.lock().unwrap()[0].0, AttemptStatus::Failed);
     }
 }

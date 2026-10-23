@@ -999,6 +999,8 @@ pub struct SandboxConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TelemetryConfig {
+    /// Opt-in local canonical model-call snapshots; never an uploader.
+    pub model_calls: crate::model_calls::Settings,
     /// Nothing leaves the machine. Present so the answer is discoverable rather
     /// than a question.
     pub upload: bool,
@@ -1289,6 +1291,7 @@ fn append_lists(merged: &mut toml::Table, project: &toml::Table) {
 impl Default for TelemetryConfig {
     fn default() -> Self {
         Self {
+            model_calls: Default::default(),
             upload: false,
             propagate_trace: false,
             log_level: "warn".into(),

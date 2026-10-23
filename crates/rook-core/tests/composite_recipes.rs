@@ -170,6 +170,52 @@ async fn run(f: &Fixture, model: Arc<Script>) -> rook_core::Result<rook_core::ag
     agent.options = options();
     agent.run("PARENT_ONLY_SECRET").await
 }
+
+#[tokio::test]
+async fn recording_override_is_inherited_by_frozen_child_recipes() {
+    for enabled in [false, true] {
+        let mut f = Fixture::new(MAIN, A, B);
+        f.rook.config.telemetry.model_calls.enabled = !enabled;
+        let model =
+            Arc::new(Script::new(json!({"mode":"sequential","stages":[{"id":"first","recipe":"a"}]})));
+        let mut agent = AgentLoop::new(&f.rook, model, f.session);
+        agent.options = options();
+        agent.options.record_model_calls = Some(enabled);
+        let result = agent.run("Inspect the selected recipe.").await.unwrap();
+        assert!(!result.delegated.is_empty());
+        for id in std::iter::once(f.session)
+            .chain(result.delegated.iter().map(|id| rook_store::parse_session_id(id).unwrap()))
+        {
+            let count = f
+                .rook
+                .store
+                .events(id, 0, 256)
+                .unwrap()
+                .iter()
+                .filter(|e| e.record.label == "rook:model-call-input:v1")
+                .count();
+            let purposes: Vec<_> = f
+                .rook
+                .store
+                .events(id, 0, 256)
+                .unwrap()
+                .iter()
+                .filter(|e| e.record.label == "rook:model-call-input:v1")
+                .map(|e| {
+                    let row: Value =
+                        serde_json::from_slice(&f.rook.store.get(&e.record.body).unwrap()).unwrap();
+                    row["purpose"].clone()
+                })
+                .collect();
+            assert_eq!(
+                count > 0,
+                enabled,
+                "recording selection was lost: session={id}, parent={}, enabled={enabled}, purposes={purposes:?}",
+                f.session
+            );
+        }
+    }
+}
 #[tokio::test]
 async fn sequential_subrecipes_keep_frozen_definitions_separate_contexts_output_sources_and_child_lineage() {
     let f = Fixture::new(MAIN, A, B);

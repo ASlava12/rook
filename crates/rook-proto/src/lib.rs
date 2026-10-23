@@ -137,6 +137,9 @@ pub enum Attachment {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TurnOptions {
+    /// Explicit local model-call recording override. Omitted preserves config.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_model_calls: Option<bool>,
     pub recipe: Option<RecipeInvocation>,
     pub attachments: Vec<Attachment>,
     /// Relative to the session workspace; never chosen by the model.
@@ -147,7 +150,14 @@ pub struct TurnOptions {
 
 impl Default for TurnOptions {
     fn default() -> Self {
-        Self { attachments: Vec::new(), recipe: None, output: None, output_schema: None, schema_retries: 2 }
+        Self {
+            record_model_calls: None,
+            attachments: Vec::new(),
+            recipe: None,
+            output: None,
+            output_schema: None,
+            schema_retries: 2,
+        }
     }
 }
 

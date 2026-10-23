@@ -43,6 +43,8 @@ pub(super) struct Bounds {
 }
 
 pub(super) struct Crew<'a> {
+    model_call_budget: std::sync::Arc<crate::model_calls::Budget>,
+    record_model_calls: Option<bool>,
     rook: &'a Rook,
     provider: std::sync::Arc<dyn Provider>,
     vault: std::sync::Arc<crate::secrets::Vault>,
@@ -304,6 +306,8 @@ impl Crew<'_> {
             // What the call asked for, or what the turn is using.
             let chosen = bounds.provider.clone().unwrap_or_else(|| self.provider.clone());
             let mut child = AgentLoop::new(rook, chosen, session);
+            child.model_call_budget = self.model_call_budget.clone();
+            child.options.record_model_calls = self.record_model_calls;
             for value in rook_tools::Secrets::redactions(self.vault.as_ref()) {
                 child.vault.also_hide(&value);
             }
@@ -359,7 +363,12 @@ impl Crew<'_> {
             child.max_steps = bounds.steps.unwrap_or(self.max_steps);
             child.max_turn_tokens = bounds.tokens;
             child.by = bounds.by;
-            child.prepared_recipe = bounds.recipe;
+            child.prepared_recipe = bounds.recipe.map(|mut recipe| {
+                // Frozen stages were prepared before this child inherited its
+                // user's recording choice. Recipe defaults cannot replace it.
+                recipe.options.record_model_calls = self.record_model_calls;
+                recipe
+            });
             if let Some(schema) = &bounds.result_schema {
                 child.options.output_schema = Some(schema.clone());
                 child.options.schema_retries = 0;
@@ -881,6 +890,12 @@ impl<'a> AgentLoop<'a> {
     /// while they run, and a future holding `&self` freezes it.
     pub(super) fn crew(&self, left_to_spend: u64) -> Crew<'a> {
         Crew {
+            model_call_budget: self.model_call_budget.clone(),
+            record_model_calls: Some(
+                self.turn_options()
+                    .record_model_calls
+                    .unwrap_or(self.rook.config.telemetry.model_calls.enabled),
+            ),
             rook: self.rook,
             provider: self.provider.clone(),
             vault: self.vault.clone(),

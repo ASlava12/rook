@@ -294,6 +294,11 @@ fn display(rook: &Rook, event: &Event) -> Result<Option<Vec<u8>>> {
         ) {
             return Ok(Some(crate::provider_history::preview()));
         }
+        if matches!(event.record.label.as_str(), crate::model_calls::INPUT | crate::model_calls::OUTCOME) {
+            return Ok(Some(
+                b"[local model-call snapshot; content requires explicit model-call inspection]".to_vec(),
+            ));
+        }
         if event.record.label == crate::tool_images::LABEL {
             return Ok(Some(crate::tool_images::preview(rook, event)?.into_bytes()));
         }

@@ -561,6 +561,7 @@ pub type FollowUpModel<'a> =
     dyn Fn() -> Result<(std::sync::Arc<dyn Provider>, rook_llm::Effort)> + Send + Sync + 'a;
 
 pub struct AgentLoop<'a> {
+    model_call_budget: std::sync::Arc<crate::model_calls::Budget>,
     retry_status: tokio::sync::watch::Sender<Option<rook_proto::activity::ProviderWait>>,
     execution: Option<std::sync::Weak<crate::execution::Journal>>,
     reserved_execution: Option<std::sync::Arc<crate::execution::Journal>>,
@@ -698,12 +699,27 @@ pub struct AgentLoop<'a> {
 }
 
 impl<'a> AgentLoop<'a> {
+    fn inherit_recording(&self, child: &mut AgentLoop<'a>) {
+        child.model_call_budget = self.model_call_budget.clone();
+        child.options.record_model_calls = Some(
+            self.turn_options().record_model_calls.unwrap_or(self.rook.config.telemetry.model_calls.enabled),
+        );
+    }
+
     fn attempt_observer(
         &self,
         purpose: crate::model_route::Purpose,
     ) -> std::sync::Arc<dyn rook_llm::AttemptObserver> {
         observe::model(
-            crate::model_attempt::observer(self.rook, self.session, self.vault.clone(), purpose),
+            crate::model_attempt::observer_with_capture(
+                self.rook,
+                self.session,
+                self.vault.clone(),
+                purpose,
+                std::sync::Arc::new(crate::model_route::Prices::new(&self.rook.config)),
+                Some(self.model_call_budget.clone()),
+                self.turn_options().record_model_calls,
+            ),
             self.observer.clone(),
             self.session,
             self.retry_status.clone(),
@@ -780,6 +796,7 @@ impl<'a> AgentLoop<'a> {
         let budget = crate::compaction_policy::budget(&rook.config, provider.configured_source(), window);
         let (routing, routing_invalid) = routing::settings(provider.as_ref());
         Self {
+            model_call_budget: crate::model_calls::Budget::new(rook.config.telemetry.model_calls),
             execution: None,
             retry_status: tokio::sync::watch::channel(None).0,
             reserved_execution: None,

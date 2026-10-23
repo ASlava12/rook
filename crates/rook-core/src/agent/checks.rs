@@ -565,6 +565,7 @@ impl<'a> AgentLoop<'a> {
         async move {
             let mut accounting = crate::model_delegation::Guard::start(self.rook, self.session, session)?;
             let mut child = AgentLoop::new(self.rook, self.provider.clone(), session);
+            self.inherit_recording(&mut child);
             child.depth = self.depth + 1;
             child.by = self.by;
             child.max_turn_secs = self.max_turn_secs;

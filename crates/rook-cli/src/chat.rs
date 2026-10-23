@@ -103,6 +103,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("output", "[path|off]", "save the final answer inside the workspace"),
     ("schema", "[file|off]", "validate the final answer against JSON Schema"),
     ("schema-retries", "[0..3]", "format-only correction attempts"),
+    ("record-model-calls", "on|off|config", "local model-call recording for next turns"),
     ("followup", "<text>", "queue a new turn after the current turn or goal finishes"),
     ("queue", "", "inspect pending messages; the TUI opens an editable queue"),
     ("retry", "", "resend a saved daemon prompt with its original ID (daemon mode)"),

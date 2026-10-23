@@ -449,6 +449,39 @@ impl Vault {
         }
         out
     }
+
+    /// The same known-value masking, with a ceiling on every intermediate
+    /// copy. A recording which cannot fit stays omitted, never unmasked.
+    pub(crate) fn redact_bounded(&self, text: &str, limit: usize) -> Option<String> {
+        if text.len() > limit {
+            return None;
+        }
+        let handed = self.handed_out.lock().unwrap_or_else(|e| e.into_inner());
+        let mut output = text.to_owned();
+        for value in handed.iter().filter(|value| value.len() >= 6) {
+            if !output.contains(value.as_str()) {
+                continue;
+            }
+            let mut masked = String::new();
+            let mut offset = 0;
+            for (start, _) in output.match_indices(value.as_str()) {
+                let slice = &output[offset..start];
+                if slice.len().saturating_add(9) > limit.saturating_sub(masked.len()) {
+                    return None;
+                }
+                masked.push_str(slice);
+                masked.push_str("${secret}");
+                offset = start + value.len();
+            }
+            let tail = &output[offset..];
+            if tail.len() > limit.saturating_sub(masked.len()) {
+                return None;
+            }
+            masked.push_str(tail);
+            output = masked;
+        }
+        Some(output)
+    }
 }
 
 /// Run a command for its output, trimmed. Nothing is logged, and the value goes

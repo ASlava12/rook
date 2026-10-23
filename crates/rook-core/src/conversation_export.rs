@@ -31,7 +31,15 @@ impl Profile {
             Self::ShareTools => {
                 matches!(entry.kind.as_str(), "user" | "assistant" | "tool-call" | "tool-result")
             }
-            Self::Archive => !(entry.kind == "note" && entry.label == crate::provider_history::LABEL),
+            Self::Archive => {
+                !(entry.kind == "note"
+                    && matches!(
+                        entry.label.as_str(),
+                        crate::provider_history::LABEL
+                            | crate::model_calls::INPUT
+                            | crate::model_calls::OUTCOME
+                    ))
+            }
         }
     }
 }

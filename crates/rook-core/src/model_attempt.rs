@@ -129,6 +129,19 @@ pub(crate) fn observer_with_prices(
     purpose: Purpose,
     prices: Arc<crate::model_route::Prices>,
 ) -> Arc<dyn rook_llm::AttemptObserver> {
+    observer_with_capture(rook, session, vault, purpose, prices, None, None)
+}
+
+pub(crate) fn observer_with_capture(
+    rook: &Rook,
+    session: u128,
+    vault: Arc<Vault>,
+    purpose: Purpose,
+    prices: Arc<crate::model_route::Prices>,
+    budget: Option<Arc<crate::model_calls::Budget>>,
+    enabled: Option<bool>,
+) -> Arc<dyn rook_llm::AttemptObserver> {
+    let settings = rook.config.telemetry.model_calls;
     Arc::new(Observer {
         store: rook.store.clone(),
         session,
@@ -136,6 +149,11 @@ pub(crate) fn observer_with_prices(
         purpose,
         prices,
         propagate_trace: rook.config.telemetry.propagate_trace,
+        capture: if enabled.unwrap_or(settings.enabled) {
+            Some(budget.unwrap_or_else(|| crate::model_calls::Budget::new(settings)))
+        } else {
+            None
+        },
     })
 }
 
@@ -146,6 +164,7 @@ struct Observer {
     purpose: Purpose,
     prices: Arc<crate::model_route::Prices>,
     propagate_trace: bool,
+    capture: Option<Arc<crate::model_calls::Budget>>,
 }
 
 impl rook_llm::AttemptObserver for Observer {
@@ -181,6 +200,7 @@ impl rook_llm::AttemptObserver for Observer {
             started: Instant::now(),
             prices: self.prices.clone(),
             propagate_trace: self.propagate_trace,
+            capture: self.capture.as_ref().map(crate::model_calls::Capture::new),
         }))
     }
 }
@@ -193,13 +213,44 @@ struct Active {
     started: Instant,
     prices: Arc<crate::model_route::Prices>,
     propagate_trace: bool,
+    capture: Option<crate::model_calls::Capture>,
 }
 
 impl rook_llm::Attempt for Active {
+    fn capture_request(&mut self, request: &rook_llm::Request) -> rook_llm::Result<()> {
+        if let Some(capture) = &mut self.capture {
+            capture
+                .request(
+                    &self.store,
+                    self.session,
+                    &self.record.id,
+                    self.record.purpose,
+                    request,
+                    &self.vault,
+                )
+                .map_err(|_| rook_llm::LlmError::Other("cannot save admitted model-call snapshot".into()))?;
+        }
+        Ok(())
+    }
+    fn capture_delta(&mut self, delta: &rook_llm::Delta) {
+        if let Some(capture) = &mut self.capture {
+            capture.delta(delta, &self.vault);
+        }
+    }
+    fn capture_response(&mut self, response: &rook_llm::Response) {
+        if let Some(capture) = &mut self.capture {
+            capture.response(response, &self.vault);
+        }
+    }
     fn trace_context(&self) -> Option<(rook_llm::TraceContext, bool)> {
         self.record.trace.clone().map(|trace| (trace, self.propagate_trace))
     }
     fn finish(&mut self, status: AttemptStatus, facts: &AttemptFacts) -> rook_llm::Result<()> {
+        if let Some(mut capture) = self.capture.take() {
+            capture
+                .finish(&self.store, self.session, &self.record.id, &self.vault)
+                .map_err(|_| rook_llm::LlmError::Other("cannot save model-call outcome snapshot".into()))?;
+        }
         self.record.state = match status {
             AttemptStatus::Completed => State::Completed,
             AttemptStatus::Failed => State::Failed,
@@ -308,6 +359,7 @@ mod tests {
         let session = rook.start_session("attempt history").unwrap();
         let vault = Arc::new(Vault::empty());
         let observer = Observer {
+            capture: None,
             propagate_trace: false,
             store: rook.store.clone(),
             session,
@@ -370,6 +422,7 @@ mod tests {
         let vault = Arc::new(Vault::empty());
         vault.also_hide("private-token");
         let recorder = Observer {
+            capture: None,
             propagate_trace: false,
             store: rook.store.clone(),
             session,

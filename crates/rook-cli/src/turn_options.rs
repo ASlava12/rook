@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 
 #[derive(clap::Args)]
 pub(crate) struct TurnArgs {
+    /// Record model calls locally for this turn; =false overrides enabled config.
+    #[arg(long, num_args=0..=1, require_equals=true, default_missing_value="true")]
+    record_model_calls: Option<bool>,
     /// Attach a local PNG, JPEG, WebP or GIF (repeatable, up to 2 MiB each).
     #[arg(long = "image")]
     images: Vec<PathBuf>,
@@ -58,6 +61,7 @@ impl TurnArgs {
             .map(|(p, image)| rook_core::attachments::from_file(p, image))
             .collect::<rook_core::Result<Vec<_>>>()?;
         Ok(rook_proto::TurnOptions {
+            record_model_calls: self.record_model_calls,
             attachments,
             output: self.output,
             output_schema: schema,
@@ -81,13 +85,32 @@ pub(crate) fn configure(command: &str, options: &mut TurnOptions) -> Option<anyh
     let (name, value) = command.split_once(char::is_whitespace).unwrap_or((command, ""));
     if !matches!(
         name,
-        "output" | "schema" | "schema-retries" | "recipe" | "attach-image" | "attach-context" | "attachments"
+        "output"
+            | "schema"
+            | "schema-retries"
+            | "recipe"
+            | "attach-image"
+            | "attach-context"
+            | "attachments"
+            | "record-model-calls"
     ) {
         return None;
     }
     Some((|| {
         let value = value.trim();
         match name {
+            "record-model-calls" => {
+                options.record_model_calls = match value {
+                    "on" => Some(true),
+                    "off" => Some(false),
+                    "config" => None,
+                    _ => anyhow::bail!("use /record-model-calls on, off or config"),
+                };
+                return Ok(format!(
+                    "Local model-call recording for next turns: {}. Saved content still needs review before export.\n",
+                    value
+                ));
+            }
             "attachments" if value == "clear" => options.attachments.clear(),
             "attach-image" | "attach-context" if !value.is_empty() => {
                 anyhow::ensure!(
@@ -140,8 +163,44 @@ pub(crate) fn for_turn(options: &mut TurnOptions) -> TurnOptions {
 mod tests {
     use super::*;
 
+    #[test]
+    fn recording_is_an_explicit_preserved_turn_override() {
+        let mut options = TurnOptions::default();
+        assert_eq!(options.record_model_calls, None);
+        for (value, expected) in [("on", Some(true)), ("off", Some(false)), ("config", None)] {
+            configure(&format!("record-model-calls {value}"), &mut options).unwrap().unwrap();
+            assert_eq!(for_turn(&mut options).record_model_calls, expected);
+            assert_eq!(options.record_model_calls, expected);
+        }
+        assert!(configure("record-model-calls maybe", &mut options).unwrap().is_err());
+    }
+
+    #[test]
+    fn cli_recording_flags_preserve_default_enable_and_disable_without_consuming_the_prompt() {
+        use clap::Parser;
+        for (args, expected) in [
+            (vec!["rook", "run", "check"], None),
+            (vec!["rook", "run", "--record-model-calls", "check"], Some(true)),
+            (vec!["rook", "run", "--record-model-calls=false", "check"], Some(false)),
+        ] {
+            let cli = crate::args::Cli::try_parse_from(args).unwrap();
+            let Some(crate::args::Command::Run { prompt, output, .. }) = cli.command else {
+                panic!("not a run");
+            };
+            assert_eq!(prompt, ["check"]);
+            let options = output.load().unwrap();
+            assert_eq!(options.record_model_calls, expected);
+            let wire = serde_json::to_value(&options).unwrap();
+            assert_eq!(wire.get("record_model_calls"), expected.map(serde_json::Value::Bool).as_ref());
+        }
+        assert!(
+            crate::args::Cli::try_parse_from(["rook", "run", "--record-model-calls=maybe", "check"]).is_err()
+        );
+    }
+
     fn arguments(path: &Path) -> TurnArgs {
         TurnArgs {
+            record_model_calls: None,
             images: Vec::new(),
             contexts: Vec::new(),
             recipe: None,

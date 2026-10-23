@@ -61,6 +61,7 @@ pub mod mention;
 pub mod message_queue;
 mod model_accounting;
 mod model_attempt;
+pub mod model_calls;
 pub mod model_catalog;
 mod model_delegation;
 pub mod model_route;
