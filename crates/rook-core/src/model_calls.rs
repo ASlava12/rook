@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize, Serializer, ser::SerializeSeq};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 
+mod reader;
+pub use reader::{Artifact, Call, CaptureInfo, Example, Format, ReadRequest, read};
+
 pub(crate) const INPUT: &str = "rook:model-call-input:v1";
 pub(crate) const OUTCOME: &str = "rook:model-call-outcome:v1";
 pub(crate) const MAX_RECORD_BYTES: usize = 1024 * 1024 + 4096;
@@ -95,6 +98,7 @@ pub enum Omitted {
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Omissions {
     pub images: usize,
     pub provider_state: usize,
@@ -108,6 +112,7 @@ impl Omissions {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Payload {
     pub value: Option<Value>,
     pub omitted: Option<Omitted>,
@@ -239,6 +244,7 @@ fn payload(value: &impl Serialize, limit: usize, vault: &Vault, omissions: Omiss
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct InputRecord {
     pub version: u8,
     pub attempt: String,
@@ -248,6 +254,7 @@ pub(crate) struct InputRecord {
     pub request: Payload,
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct OutcomeRecord {
     pub version: u8,
     pub attempt: String,

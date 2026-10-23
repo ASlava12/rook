@@ -7,11 +7,14 @@ use rook_store::Store;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
-struct FixtureModel(Arc<Mutex<Vec<Value>>>);
+struct FixtureModel(Arc<Mutex<Vec<Value>>>, &'static str);
 #[async_trait]
 impl Provider for FixtureModel {
     fn id(&self) -> &str {
         "owned-scripted"
+    }
+    fn dispatch_identity(&self) -> Option<rook_llm::Dispatch> {
+        rook_llm::Dispatch::bounded("owned-scripted", "fixture-model", true)
     }
     fn context_window(&self) -> usize {
         65536
@@ -23,11 +26,7 @@ impl Provider for FixtureModel {
             .any(|m| m.content.contains("Classify whether an assistant's proposed last reply"));
         self.0.lock().unwrap().push(serde_json::to_value(&request).unwrap());
         Ok(Response {
-            message: Message::assistant(if classifier {
-                r#"{"action":"finish"}"#
-            } else {
-                "The requested inspection is complete."
-            }),
+            message: Message::assistant(if classifier { r#"{"action":"finish"}"# } else { self.1 }),
             stop_reason: StopReason::EndTurn,
             usage: Usage { input_tokens: 10, output_tokens: 5, ..Default::default() },
             model: "owned-scripted".into(),
@@ -53,7 +52,7 @@ async fn actual_turn_flag_records_exact_requests_and_purposes_without_adding_mod
         let rook = open(root.path());
         let owner = rook.start_session("owned capture control").unwrap();
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let provider = Arc::new(FixtureModel(seen.clone()));
+        let provider = Arc::new(FixtureModel(seen.clone(), "The requested inspection is complete."));
         let mut agent = AgentLoop::new(&rook, provider, owner);
         agent.options.record_model_calls = Some(enabled);
         agent.max_steps = 4;
@@ -105,4 +104,33 @@ async fn actual_turn_flag_records_exact_requests_and_purposes_without_adding_mod
     }
     assert_eq!(counts[0], counts[1], "recording adds no model call");
     assert_eq!(json!(counts), json!([2, 2]));
+}
+
+#[tokio::test]
+async fn actual_turn_masks_known_connection_secret_before_saved_outcome_and_dataset_selection() {
+    let root = tempfile::tempdir().unwrap();
+    let rook = open(root.path());
+    let owner = rook.start_session("owned secret probe").unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let provider = Arc::new(FixtureModel(seen, "The result contains owned-private-token."));
+    let mut agent = AgentLoop::new(&rook, provider, owner);
+    agent.options.record_model_calls = Some(true);
+    agent.hide_connection_secret("owned-private-token");
+    agent.run("Inspect the owned example and finish.").await.unwrap();
+    let records = rook
+        .model_calls(
+            owner,
+            &rook_core::model_calls::ReadRequest {
+                format: rook_core::model_calls::Format::Records,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let main =
+        records.calls.iter().find(|c| c.purpose == Some(rook_core::model_route::Purpose::Main)).unwrap();
+    assert!(main.output.as_ref().unwrap().known_secret_redacted);
+    assert!(!main.eligible);
+    assert!(main.exclusions.iter().any(|s| s == "output_was_redacted"));
+    assert!(!String::from_utf8(records.bytes().unwrap()).unwrap().contains("owned-private-token"));
+    assert_eq!(main.response.as_ref().unwrap()["message"]["content"], "The result contains ${secret}.");
 }

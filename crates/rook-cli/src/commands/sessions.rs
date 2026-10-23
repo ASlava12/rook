@@ -325,6 +325,33 @@ pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, js
         }
         return Ok(());
     }
+    if let SessionCmd::ModelCalls { id, from, through, purpose, format, output } = &cmd {
+        let format = serde_json::from_value(serde_json::Value::String(format.clone()))?;
+        anyhow::ensure!(
+            output.is_some() || format == rook_core::model_calls::Format::Preview,
+            "records and dataset exports require --output NEW_FILE; use --format preview for metadata"
+        );
+        let purpose = purpose
+            .as_ref()
+            .map(|p| serde_json::from_value(serde_json::Value::String(p.clone())))
+            .transpose()?;
+        let report = source.model_calls(
+            source.session_named(id, workspace)?,
+            &rook_core::model_calls::ReadRequest { from: *from, through: *through, purpose, format },
+        )?;
+        match output {
+            Some(path) => {
+                super::model_calls::save(&report, path)?;
+                println!(
+                    "{}",
+                    serde_json::json!({"path":path,"from":report.from,"through":report.through,
+                    "calls":report.calls.len(),"eligible":report.eligible,"exclusions":report.exclusions})
+                );
+            }
+            None => println!("{}", String::from_utf8(report.bytes()?)?),
+        }
+        return Ok(());
+    }
     if let SessionCmd::ExportHtml { id, from, through, output, profile, preview } = &cmd {
         let session = source.session_named(id, workspace)?;
         let profile = rook_core::conversation_export::Profile::parse(profile).map_err(anyhow::Error::msg)?;
@@ -543,6 +570,7 @@ pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, js
         | SessionCmd::Environment { .. }
         | SessionCmd::Learning { .. }
         | SessionCmd::ExportHtml { .. }
+        | SessionCmd::ModelCalls { .. }
         | SessionCmd::Attention { .. }
         | SessionCmd::Model { .. }
         | SessionCmd::LastAnswer { .. }

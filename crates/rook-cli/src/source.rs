@@ -209,6 +209,21 @@ impl Source {
         Ok(self.conversation_export(session, &request)?.preview_json()?)
     }
 
+    pub fn model_calls(
+        &self,
+        session: u128,
+        request: &rook_core::model_calls::ReadRequest,
+    ) -> Result<rook_core::model_calls::Artifact> {
+        match self {
+            Self::Local(rook) => Ok(rook.model_calls(session, request)?),
+            Self::Daemon(d) => d.request_bounded(
+                &format!("/api/sessions/{}/model-calls", rook_store::format_session_id(session)),
+                Some(&serde_json::to_value(request)?),
+                4 * 1024 * 1024,
+            ),
+        }
+    }
+
     pub fn conversation_export(
         &self,
         session: u128,

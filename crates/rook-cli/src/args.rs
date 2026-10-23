@@ -659,6 +659,23 @@ pub(crate) enum SessionCmd {
         #[arg(long)]
         limit: Option<usize>,
     },
+    /// Inspect recorded model calls, or export them to a new local JSON file.
+    ModelCalls {
+        id: String,
+        #[arg(long, default_value_t = 0)]
+        from: u64,
+        /// Inclusive saved event boundary; the current prefix is frozen by default.
+        #[arg(long)]
+        through: Option<u64>,
+        #[arg(long, value_parser = ["main", "checking", "completion_check", "output_repair", "compaction", "aside", "final_answer", "branch_summary", "learning"])]
+        purpose: Option<String>,
+        /// Preview prints metadata; records includes payloads; dataset selects complete visible pairs for review.
+        #[arg(long, default_value = "preview", value_parser = ["preview", "records", "dataset"])]
+        format: String,
+        /// Required for records/dataset. Existing files are never replaced.
+        #[arg(long)]
+        output: Option<std::path::PathBuf>,
+    },
     /// Save selected conversation events as a standalone local HTML review file.
     ExportHtml {
         id: String,

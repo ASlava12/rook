@@ -8,9 +8,9 @@ pub(crate) const LABEL: &str = "rook:model-route:v1";
 pub(crate) const MAX_BYTES: usize = 4096;
 pub(crate) const AUX_LABEL: &str = "rook:model-aux:v1";
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum Purpose {
+pub enum Purpose {
     Main,
     Checking,
     CompletionCheck,

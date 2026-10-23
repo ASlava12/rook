@@ -7,6 +7,9 @@
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
+#[path = "fixtures/model_call_cli.rs"]
+mod model_call_cli;
+
 struct Rook {
     home: tempfile::TempDir,
     workspace: tempfile::TempDir,

@@ -165,6 +165,14 @@ impl Drop for Writing<'_> {
 }
 
 impl Rook {
+    /// Inspect recorded physical model calls within one frozen event range.
+    pub fn model_calls(
+        &self,
+        session: u128,
+        request: &crate::model_calls::ReadRequest,
+    ) -> Result<crate::model_calls::Artifact> {
+        crate::model_calls::read(self, session, request)
+    }
     /// An explicit provider limit, else its own learned window, else its
     /// assumption. The display name is deliberately not a connection identity.
     pub fn window_to_budget(&self, provider: &dyn rook_llm::Provider) -> usize {

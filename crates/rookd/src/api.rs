@@ -88,6 +88,10 @@ pub fn router(state: Shared) -> Router {
             post(conversation_export).layer(axum::extract::DefaultBodyLimit::max(4096)),
         )
         .route(
+            "/api/sessions/{id}/model-calls",
+            post(model_calls).layer(axum::extract::DefaultBodyLimit::max(4096)),
+        )
+        .route(
             "/api/sessions/{id}/model-selection",
             get(model_selection).post(select_model).layer(axum::extract::DefaultBodyLimit::max(4096)),
         )
@@ -886,6 +890,24 @@ async fn conversation_export(
     history_read(s, move |r| {
         let _permit = permit;
         r.conversation_export(session, &request)
+    })
+    .await
+}
+
+async fn model_calls(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Json(request): Json<rook_core::model_calls::ReadRequest>,
+) -> ApiResult<rook_core::model_calls::Artifact> {
+    let session = session_id(&id)?;
+    static READS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+        std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
+    let permit = READS.clone().try_acquire_owned().map_err(|_| {
+        Fail(StatusCode::TOO_MANY_REQUESTS, ApiError::new("busy", "model-call reader is busy; try again"))
+    })?;
+    history_read(s, move |r| {
+        let _permit = permit;
+        r.model_calls(session, &request)
     })
     .await
 }
