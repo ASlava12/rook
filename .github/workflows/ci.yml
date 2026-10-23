@@ -106,6 +106,13 @@ jobs:
         shell: bash
         timeout-minutes: 3
         run: python3 xtask/probes/background-utf8/run.py --bin-dir target/debug --tmp-root "$RUNNER_TEMP" --output "$RUNNER_TEMP/rook-background-utf8.json"
+      - name: background UTF-8 receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: background-utf8-${{ matrix.os }}
+          path: ${{ runner.temp }}/rook-background-utf8.json
+          if-no-files-found: error
       - name: macOS process-group lifecycle
         if: matrix.os == 'macos-latest'
         run: cargo test --locked -p rook-contain process::tests -- --nocapture
