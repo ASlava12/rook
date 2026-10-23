@@ -180,6 +180,12 @@ commands, preserved diagnostics/exit codes and workspace
 boundaries. The helper emits controlled compiler-shaped output; it does not
 establish real-model performance or arbitrary Cargo log compatibility.
 
+When local crate API selection changes, run the
+[owned crate identity fixture](../xtask/probes/crate-identity/README.md) against
+the extracted host CLI/daemon pair. Require all ten flags, including ambiguity
+refusal, explicit version selection, wrong-cache exclusion, normal model/tool
+completion and unchanged workspace/cache trees and binary bytes.
+
 After the source gates and downloaded-draft checks pass, publish that same
 draft, without rebuilding or replacing its tested archives:
 

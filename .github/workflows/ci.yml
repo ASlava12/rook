@@ -90,6 +90,9 @@ jobs:
         run: |
           rustfmt --edition 2024 --check xtask/probes/cargo-output/helper.rs
           python3 xtask/probes/cargo-output/run.py --bin-dir target/debug --tmp-root "$RUNNER_TEMP" --output "$RUNNER_TEMP/rook-cargo-output.json"
+      - name: locked crate API identity
+        shell: bash
+        run: python3 xtask/probes/crate-identity/run.py --bin-dir target/debug --tmp-root "$RUNNER_TEMP" --output "$RUNNER_TEMP/rook-crate-identity.json"
       - name: bounded environment probes
         shell: bash
         run: python3 xtask/probes/environment-startup/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-environment-probes.json"
