@@ -1,8 +1,8 @@
 # Rook
 
-[Rook 0.21.14](docs/releases/0.21.14.md): direct local foreground Cargo results omit routine progress before the display cap,
-retain original captures and offer `output="raw"`;
-`crate_api` selects an unambiguous locked version, checks its cached archive and reports incomplete source scans.
+[Rook 0.21.15](docs/releases/0.21.15.md): Cargo failures can cite kept Rust error documentation, once per code per turn;
+`docs` offers bounded `local_only` cache reads and respects explicit versions across nearby topics.
+These hints add no model or documentation-fetch request.
 
 [Domain network policy with OS containment](docs/domain-network-policy.md).
 
