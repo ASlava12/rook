@@ -60,6 +60,30 @@ value the vault has handed out this turn is taken back out of what a command
 printed, a page said, a file held or an MCP server answered — one rule, one
 place, rather than one per tool.
 
+Known values of at least six bytes are also masked in the exact single-level
+JSON and Rust debug string representations used by tool arguments and quoted
+diagnostics. Longer matching values are processed before their registered
+prefixes. This prevents ordinary serialization from bypassing known-value
+masking or leaving a longer credential's suffix visible. The bounded recording
+path applies the same patterns and refuses an output whose replacements exceed
+its limit. Escaped pattern bodies are built within the input text's byte length;
+a longer pattern cannot match it. Review-source masking keeps its existing raw
+value and line-preservation rules.
+
+The actual AgentLoop regression uses an artificial quoted/backslash credential
+and inspects the saved tool arguments, result and next provider request. Unit
+controls cover overlapping registrations, control characters, Unicode and byte
+limits. This extends exact known-value matching; it does not recognize unknown
+credentials, arbitrary encodings or repeatedly nested string serialization.
+
+The live continuation uses a masked message copy too. The main request boundary
+also scrubs known values from message text such as the workspace sketch, including
+values resolved during the current turn. Tool execution keeps the original
+arguments so a masked path does not change which file is read. Signed reasoning
+is withheld when its visible message is changed, using the same rule as saved
+provider state. A separate execution control verifies the successful file read
+and masked context in both the first and subsequent main requests.
+
 **A value is resolved when it is used and held for the turn.** The vault is
 built per turn and dropped with it, so a value fetched for one turn is not in
 memory for the next. A `cmd:` secret nobody asked for is never resolved at all.

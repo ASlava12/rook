@@ -859,6 +859,74 @@ async fn skill_source_failures_reach_actual_model_context_without_leaking_known_
 }
 
 #[tokio::test]
+async fn quoted_known_secrets_are_masked_in_skill_calls_results_and_later_requests() {
+    let mut f = fixture();
+    let empty_source = tempfile::tempdir().unwrap();
+    f.rook.config.skill_sources = vec![empty_source.path().display().to_string()];
+    let secret = r#"owned-"quoted"\credential"#;
+    let session = f.rook.start_session("escaped skill query").unwrap();
+    let provider = ScriptedProvider::new(vec![
+        call("find_skill", serde_json::json!({"query":secret})),
+        reply("No skill matched."),
+    ]);
+    let seen = provider.share();
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), session);
+    agent.hide_connection_secret(secret);
+    agent.run("look for the supplied skill query").await.unwrap();
+
+    let entries = f.rook.transcript(session, 0, 100, 4096).unwrap();
+    let saved_call = entries.iter().find(|e| e.kind == "tool-call" && e.label == "find_skill").unwrap();
+    let saved_arguments: serde_json::Value = serde_json::from_str(&saved_call.body).unwrap();
+    assert_eq!(saved_arguments["query"], "${secret}", "JSON escaping must not defeat masking");
+    let saved_result = entries.iter().find(|e| e.kind == "tool-result" && e.label == "find_skill").unwrap();
+    assert!(saved_result.body.contains("${secret}"), "debug-quoted query must also be masked");
+    let requests = seen.lock().unwrap();
+    let later = requests.last().unwrap();
+    assert!(later.messages.iter().any(|m| m.role == Role::Tool && m.content.contains("${secret}")));
+    assert!(
+        later.messages.iter().flat_map(|m| &m.tool_calls).any(|c| c.arguments["query"] == "${secret}"),
+        "later tool arguments: {:?}",
+        later.messages.iter().flat_map(|m| &m.tool_calls).map(|c| &c.arguments).collect::<Vec<_>>()
+    );
+    let escaped = serde_json::to_string(secret).unwrap();
+    for entry in entries.iter().filter(|e| matches!(e.kind.as_str(), "tool-call" | "tool-result")) {
+        assert!(
+            !entry.body.contains(&escaped[1..escaped.len() - 1]),
+            "encoded credential remains in history"
+        );
+    }
+}
+
+#[tokio::test]
+async fn masking_context_does_not_change_executed_tool_arguments() {
+    let f = fixture();
+    let secret = "owned-execution-credential";
+    std::fs::write(f.workspace.path().join(secret), "owned file read succeeded").unwrap();
+    let session = f.rook.start_session("masked path").unwrap();
+    let provider = ScriptedProvider::new(vec![
+        call("read_file", serde_json::json!({"path":secret})),
+        reply("Read the requested file."),
+    ]);
+    let seen = provider.share();
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), session);
+    agent.hide_connection_secret(secret);
+    agent.run("read the requested path").await.unwrap();
+    let requests = seen.lock().unwrap();
+    let later = requests.last().unwrap();
+    assert!(
+        later
+            .messages
+            .iter()
+            .any(|m| m.role == Role::Tool && m.content.contains("owned file read succeeded"))
+    );
+    assert!(later.messages.iter().flat_map(|m| &m.tool_calls).any(|c| c.arguments["path"] == "${secret}"));
+    assert!(
+        requests.iter().all(|r| r.messages.iter().all(|m| !m.content.contains(secret))),
+        "the workspace sketch must not expose the known value before the call either"
+    );
+}
+
+#[tokio::test]
 async fn a_plain_turn_is_logged_end_to_end() {
     let f = fixture();
     let session = f.rook.start_session("test").unwrap();
