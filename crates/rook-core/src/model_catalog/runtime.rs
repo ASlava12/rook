@@ -177,6 +177,10 @@ impl Observed {
 
 #[async_trait]
 impl Provider for Observed {
+    fn visit_connection_secrets(&self, visitor: &mut dyn FnMut(&str)) {
+        self.inner.visit_connection_secrets(visitor);
+    }
+
     fn id(&self) -> &str {
         self.inner.id()
     }

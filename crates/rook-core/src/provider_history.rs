@@ -67,6 +67,36 @@ fn redact(value: &mut serde_json::Value, vault: &Vault) -> bool {
     }
 }
 
+/// A model-visible copy. Execution keeps the original tool arguments; live
+/// continuation and persisted opaque state must obey the same masking rule.
+pub(crate) fn redacted_message(message: &Message, vault: &Vault) -> Result<(Message, bool)> {
+    let mut safe = message.clone();
+    let withheld = redact_message(&mut safe, vault)?;
+    Ok((safe, withheld))
+}
+
+pub(crate) fn redact_message(message: &mut Message, vault: &Vault) -> Result<bool> {
+    let content = vault.redact(&message.content);
+    let mut visible_changed = content != message.content;
+    message.content = content;
+    if message.tool_call_id.as_ref().is_some_and(|id| vault.redact(id) != *id) {
+        return Err(CoreError::Other("provider call identifiers contain a known secret".into()));
+    }
+    for call in &mut message.tool_calls {
+        if vault.redact(&call.id) != call.id || vault.redact(&call.name) != call.name {
+            return Err(CoreError::Other("provider call identifiers contain a known secret".into()));
+        }
+        visible_changed |= redact(&mut call.arguments, vault);
+    }
+    // A changed visible envelope invalidates its signed reasoning too.
+    let withheld = visible_changed
+        || (!message.reasoning.is_empty() && redact(&mut serde_json::to_value(&message.reasoning)?, vault));
+    if withheld {
+        message.reasoning.clear();
+    }
+    Ok(withheld)
+}
+
 /// Persist before effects. An atomic pair prevents a transcript answer without
 /// its provider state (or a state with an absent visible answer) after a crash.
 pub(crate) fn record(
@@ -103,24 +133,11 @@ pub(crate) fn record(
     let max = limit(rook)?;
     // Check size before cloning/redacting a potentially large response.
     crate::persistence::encode_with_limit(&response.message, max)?;
-    let mut message = response.message.clone();
-    validate(&message)?;
-    message.content = vault.redact(&message.content);
-    let mut visible_changed = message.content != response.message.content;
-    for call in &mut message.tool_calls {
-        if vault.redact(&call.id) != call.id || vault.redact(&call.name) != call.name {
-            return Err(CoreError::Other("provider call identifiers contain a known secret".into()));
-        }
-        visible_changed |= redact(&mut call.arguments, vault);
-    }
+    validate(&response.message)?;
     // A redacted signature is not a signature. If any plaintext inside the
     // opaque envelope contains a known secret, discard the entire envelope;
     // the sanitized visible text and original call IDs still survive.
-    let mut state = serde_json::to_value(&message.reasoning)?;
-    let withheld = redact(&mut state, vault) || visible_changed;
-    if withheld {
-        message.reasoning.clear();
-    }
+    let (message, withheld) = redacted_message(&response.message, vault)?;
     let bytes = crate::persistence::encode_with_limit(&message, max)?;
     let state = NewEvent::new(EventKind::Note, Kind::Message, &bytes).label(LABEL);
     let seq = match route {

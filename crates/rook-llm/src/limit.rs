@@ -108,6 +108,10 @@ impl Limited {
 
 #[async_trait]
 impl Provider for Limited {
+    fn visit_connection_secrets(&self, visitor: &mut dyn FnMut(&str)) {
+        self.inner.visit_connection_secrets(visitor);
+    }
+
     fn id(&self) -> &str {
         self.inner.id()
     }

@@ -780,6 +780,7 @@ impl<'a> AgentLoop<'a> {
             tracing::warn!("secrets are unreadable, so none are offered: {e}");
             crate::secrets::Vault::empty()
         }));
+        provider.visit_connection_secrets(&mut |value| vault.also_hide(value));
         tool_ctx.secrets = Some(vault.clone());
         tool_ctx.execution = Some(std::sync::Arc::new(rook_tools::environments::Context {
             settings: rook.config.execution_environment.clone(),
@@ -1370,6 +1371,14 @@ impl<'a> AgentLoop<'a> {
             {
                 anchor = None;
             }
+            // Context sources and newly resolved credentials can change during
+            // a turn. Mask the live model copy as well as the saved journal,
+            // before budgeting or sending it. Execution arguments stay separate.
+            for message in &mut messages {
+                if crate::provider_history::redact_message(message, &self.vault)? {
+                    anchor = None;
+                }
+            }
             let used = measured(&messages, anchor);
             on_progress(Progress::Context { used, size: self.budget.window });
             if used > self.budget.usable() {
@@ -1669,6 +1678,7 @@ impl<'a> AgentLoop<'a> {
                     ..response.message.clone()
                 },
             };
+            let (carried, _) = crate::provider_history::redacted_message(&carried, &self.vault)?;
 
             // What the message carries decides, not what the provider said
             // about it: a dialect that reported `stop` beside two calls had
@@ -1929,7 +1939,9 @@ impl<'a> AgentLoop<'a> {
             // it, which every dialect rejects — so the model's mistake would
             // come back as an opaque error from the provider, after the work had
             // been done twice.
-            let mut asked = carried.clone();
+            // The model-visible copy is masked. Tool execution still needs
+            // the original paths/arguments supplied for this call.
+            let mut asked = Message { tool_calls: response.message.tool_calls.clone(), ..carried.clone() };
             let mut dropped: Vec<(String, String)> = Vec::new();
             let mut seen = std::collections::BTreeSet::new();
             asked.tool_calls.retain(|call| {
@@ -1939,7 +1951,7 @@ impl<'a> AgentLoop<'a> {
                 }
                 first
             });
-            messages.push(asked.clone());
+            messages.push(crate::provider_history::redacted_message(&asked, &self.vault)?.0);
 
             for call in &asked.tool_calls {
                 // Pausing during one call must not execute the rest of a batch

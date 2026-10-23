@@ -573,6 +573,12 @@ pub trait Provider: Send + Sync {
     /// `provider/model`, as written in config.
     fn id(&self) -> &str;
 
+    /// Register credentials already held by the transport for host-side
+    /// masking. This never resolves a source again or enters request/model
+    /// metadata. Wrappers forward it, and routing providers visit every leaf.
+    /// Custom providers may instead let their host register secrets directly.
+    fn visit_connection_secrets(&self, _visitor: &mut dyn FnMut(&str)) {}
+
     /// The configured source selected by the host, independent of its display model ID.
     fn configured_source(&self) -> Option<&str> {
         None

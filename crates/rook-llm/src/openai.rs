@@ -83,6 +83,12 @@ impl OpenAiCompatible {
 
 #[async_trait]
 impl Provider for OpenAiCompatible {
+    fn visit_connection_secrets(&self, visitor: &mut dyn FnMut(&str)) {
+        if let Some(key) = &self.config.api_key {
+            visitor(key);
+        }
+    }
+
     fn id(&self) -> &str {
         &self.id
     }

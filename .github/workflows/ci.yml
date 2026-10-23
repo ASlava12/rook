@@ -149,6 +149,21 @@ jobs:
           name: zai-balance-${{ matrix.os }}
           path: ${{ runner.temp }}/rook-zai-balance.json
           if-no-files-found: error
+      - name: known connection credential masking
+        shell: bash
+        timeout-minutes: 4
+        env:
+          ROOK_PROBE_SOURCE: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          python3 xtask/probes/quoted-secrets/run.py --bin-dir target/debug --tmp-root "$RUNNER_TEMP" --output "$RUNNER_TEMP/rook-quoted-secrets.json" --expect-version "$version" --source "$ROOK_PROBE_SOURCE" --stage development
+      - name: known connection credential receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quoted-secrets-${{ matrix.os }}
+          path: ${{ runner.temp }}/rook-quoted-secrets.json
+          if-no-files-found: error
       - name: macOS process-group lifecycle
         if: matrix.os == 'macos-latest'
         run: cargo test --locked -p rook-contain process::tests -- --nocapture

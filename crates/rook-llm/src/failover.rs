@@ -251,6 +251,12 @@ macro_rules! first_that_answers {
 
 #[async_trait]
 impl Provider for Failover {
+    fn visit_connection_secrets(&self, visitor: &mut dyn FnMut(&str)) {
+        for candidate in &self.candidates {
+            candidate.visit_connection_secrets(visitor);
+        }
+    }
+
     /// The preferred one's, which is what a person configured and what the
     /// warnings are written against. Which one actually served a request is in
     /// the log line for the ones that did not.

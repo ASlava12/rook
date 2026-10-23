@@ -437,14 +437,9 @@ impl Vault {
     pub fn redact(&self, text: &str) -> String {
         let handed = self.handed_out.lock().unwrap_or_else(|e| e.into_inner());
         let mut out = text.to_string();
-        for value in handed.iter() {
-            // Short values would match half the output of anything. A secret
-            // this short is not one, and saying so beats mangling a transcript.
-            if value.len() < 6 {
-                continue;
-            }
-            if out.contains(value.as_str()) {
-                out = out.replace(value.as_str(), "${secret}");
+        for pattern in redaction_patterns(&handed, text.len()) {
+            if out.contains(pattern.as_ref()) {
+                out = out.replace(pattern.as_ref(), "${secret}");
             }
         }
         out
@@ -458,20 +453,20 @@ impl Vault {
         }
         let handed = self.handed_out.lock().unwrap_or_else(|e| e.into_inner());
         let mut output = text.to_owned();
-        for value in handed.iter().filter(|value| value.len() >= 6) {
-            if !output.contains(value.as_str()) {
+        for pattern in redaction_patterns(&handed, text.len()) {
+            if !output.contains(pattern.as_ref()) {
                 continue;
             }
             let mut masked = String::new();
             let mut offset = 0;
-            for (start, _) in output.match_indices(value.as_str()) {
+            for (start, _) in output.match_indices(pattern.as_ref()) {
                 let slice = &output[offset..start];
                 if slice.len().saturating_add(9) > limit.saturating_sub(masked.len()) {
                     return None;
                 }
                 masked.push_str(slice);
                 masked.push_str("${secret}");
-                offset = start + value.len();
+                offset = start + pattern.len();
             }
             let tail = &output[offset..];
             if tail.len() > limit.saturating_sub(masked.len()) {
@@ -481,6 +476,78 @@ impl Vault {
             output = masked;
         }
         Some(output)
+    }
+}
+
+/// Known values can reach saved text through JSON arguments or debug-quoted
+/// diagnostics. Match those exact standard representations too, longest first
+/// so a registered prefix cannot leave the remainder of a longer value behind.
+fn redaction_patterns(values: &[String], limit: usize) -> Vec<std::borrow::Cow<'_, str>> {
+    let mut patterns = Vec::new();
+    // Preserve the existing minimum: tiny values would mask ordinary prose.
+    for value in values.iter().filter(|value| (6..=limit).contains(&value.len())) {
+        patterns.push(std::borrow::Cow::Borrowed(value.as_str()));
+        let mut json = QuotedBody::new(limit);
+        if serde_json::to_writer(&mut json, value).is_ok()
+            && let Some(encoded) = json.finish()
+            && encoded != *value
+        {
+            patterns.push(std::borrow::Cow::Owned(encoded));
+        }
+        let mut debug = QuotedBody::new(limit);
+        if std::fmt::write(&mut debug, format_args!("{value:?}")).is_ok()
+            && let Some(encoded) = debug.finish()
+            && encoded != *value
+        {
+            patterns.push(std::borrow::Cow::Owned(encoded));
+        }
+    }
+    patterns.sort_unstable_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    patterns.dedup();
+    patterns
+}
+
+/// Capture the inside of a standard quoted string without ever constructing
+/// an escaped copy larger than the text being scrubbed. One pending byte keeps
+/// the closing quote out of the body. A longer pattern cannot match that text.
+struct QuotedBody {
+    body: Vec<u8>,
+    limit: usize,
+    started: bool,
+    pending: Option<u8>,
+}
+impl QuotedBody {
+    fn new(limit: usize) -> Self {
+        Self { body: Vec::new(), limit, started: false, pending: None }
+    }
+    fn finish(self) -> Option<String> {
+        (self.started && self.pending == Some(b'"')).then(|| String::from_utf8(self.body).ok()).flatten()
+    }
+}
+impl std::io::Write for QuotedBody {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        for &byte in bytes {
+            if !self.started {
+                if byte != b'"' {
+                    return Err(std::io::Error::other("expected a quoted string"));
+                }
+                self.started = true;
+            } else if let Some(previous) = self.pending.replace(byte) {
+                if self.body.len() == self.limit {
+                    return Err(std::io::Error::other("escaped pattern exceeds input length"));
+                }
+                self.body.push(previous);
+            }
+        }
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+impl std::fmt::Write for QuotedBody {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        std::io::Write::write_all(self, text.as_bytes()).map_err(|_| std::fmt::Error)
     }
 }
 
@@ -581,6 +648,62 @@ impl rook_tools::Secrets for Vault {
     }
     fn value(&self, name: &str) -> Option<String> {
         Vault::value(self, name)
+    }
+}
+
+#[cfg(test)]
+mod quoted_redaction_tests {
+    use super::Vault;
+
+    #[test]
+    fn known_values_are_masked_in_raw_json_and_debug_forms() {
+        for value in [
+            r#"owned-"quoted"\credential"#,
+            "owned-new\nline\r\tcredential",
+            "owned-control-\u{1}-credential",
+            "owned-Русский-界-credential",
+        ] {
+            let vault = Vault::empty();
+            vault.also_hide(value);
+            let text = format!("raw={value};json={};debug={value:?}", serde_json::to_string(value).unwrap());
+            let expected = "raw=${secret};json=\"${secret}\";debug=\"${secret}\"";
+            assert_eq!(vault.redact(&text), expected);
+            assert_eq!(vault.redact_bounded(&text, text.len().max(expected.len())), Some(expected.into()));
+        }
+    }
+
+    #[test]
+    fn overlapping_values_are_masked_completely_in_both_registration_orders() {
+        let prefix = "owned-prefix";
+        let complete = r#"owned-prefix"quoted"\suffix"#;
+        for values in [[prefix, complete], [complete, prefix]] {
+            let vault = Vault::empty();
+            for value in values {
+                vault.also_hide(value);
+            }
+            let text = format!("{complete} {} {complete:?}", serde_json::to_string(complete).unwrap());
+            let expected = "${secret} \"${secret}\" \"${secret}\"";
+            assert_eq!(vault.redact(&text), expected);
+            assert_eq!(vault.redact_bounded(&text, text.len()), Some(expected.into()));
+        }
+    }
+
+    #[test]
+    fn escaped_pattern_at_the_exact_input_limit_is_masked_and_expansion_stays_bounded() {
+        let vault = Vault::empty();
+        let value = r#"owned-"quoted"\credential"#;
+        vault.also_hide(value);
+        let quoted = serde_json::to_string(value).unwrap();
+        let inside = &quoted[1..quoted.len() - 1];
+        assert_eq!(vault.redact_bounded(inside, inside.len()), Some("${secret}".into()));
+        assert_eq!(vault.redact_bounded(inside, inside.len() - 1), None);
+        let short = Vault::empty();
+        short.also_hide("abcdef");
+        assert_eq!(short.redact_bounded("abcdef", 8), None);
+        assert_eq!(short.redact_bounded("abcdef", 9), Some("${secret}".into()));
+        let irrelevant = Vault::empty();
+        irrelevant.also_hide("a\n\n\n\nb");
+        assert_eq!(irrelevant.redact_bounded("unrelated", 9), Some("unrelated".into()));
     }
 }
 

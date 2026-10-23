@@ -24,6 +24,31 @@ fn naming(name: &str, source: ModelSource) -> Config {
     config
 }
 
+#[test]
+fn resolved_connection_credentials_survive_named_selection_limits_retries_and_fallbacks() {
+    let mut config = Config::default();
+    let sources = [
+        ("primary", "openai", "owned-openai-credential"),
+        ("alternate", "anthropic", "owned-anthropic-credential"),
+        ("responses", "responses", "owned-responses-credential"),
+        ("google", "google", "owned-google-credential"),
+    ];
+    for (name, api, key) in sources {
+        let mut source = serving(api, "http://127.0.0.1:9/v1", key);
+        source.parallel = Some(1);
+        config.models.insert(name.into(), source);
+    }
+    config.agent.fallbacks.main = Some(vec!["alternate".into(), "responses".into(), "google".into()]);
+    let provider = rook_core::models::provider_for(&config, &Vault::empty(), "primary").unwrap();
+    let mut actual = Vec::new();
+    provider.visit_connection_secrets(&mut |value| actual.push(value.to_owned()));
+    actual.sort();
+    let mut expected: Vec<_> = sources.iter().map(|(_, _, key)| key.to_string()).collect();
+    expected.sort();
+    assert_eq!(actual, expected, "every physical credential must reach the host after wrappers");
+    assert_eq!(provider.configured_source(), Some("primary"));
+}
+
 /// The whole point of the table: an endpoint the environment has no variable
 /// for. There is one `LMSTUDIO_HOST`, so before this there was one machine.
 #[test]
