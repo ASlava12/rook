@@ -6491,26 +6491,31 @@ fn named(reference: &str) -> String {
 /// as often Russian as English, and slicing a byte count through one of those
 /// is a panic.
 fn wrapped(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
     let mut out = Vec::new();
     for paragraph in text.split('\n') {
         let mut line = String::new();
+        let mut line_chars = 0;
         for word in paragraph.split(' ') {
-            let room = width.saturating_sub(line.chars().count());
-            if !line.is_empty() && word.chars().count() + 1 > room {
+            let mut remaining = word.chars().count();
+            if !line.is_empty() && remaining + 1 > width.saturating_sub(line_chars) {
                 out.push(std::mem::take(&mut line));
+                line_chars = 0;
             }
             if !line.is_empty() {
                 line.push(' ');
+                line_chars += 1;
             }
-            // A word longer than the pane is cut where the pane ends rather
-            // than pushing the rest of the line off it.
-            let mut word: String = word.to_string();
-            while word.chars().count() > width {
-                let head: String = word.chars().take(width).collect();
-                out.push(head.clone());
-                word = word.chars().skip(width).collect();
+            // Visit the word once instead of copying and recounting its entire
+            // remaining suffix for every display row.
+            let mut start = 0;
+            for (at, _) in word.char_indices().skip(width).step_by(width) {
+                out.push(word[start..at].to_string());
+                start = at;
+                remaining -= width;
             }
-            line.push_str(&word);
+            line.push_str(&word[start..]);
+            line_chars += remaining;
         }
         out.push(line);
     }
@@ -8542,6 +8547,25 @@ and the next line"
         let long = wrapped("ααααααααααααααααα", 8);
         assert!(long.iter().all(|line| line.chars().count() <= 8), "{long:?}");
         assert_eq!(long.concat(), "ααααααααααααααααα");
+    }
+
+    #[test]
+    fn wrapping_keeps_spacing_paragraphs_and_multibyte_split_boundaries() {
+        assert_eq!(wrapped("ab  cd\n\nя🙂界 xyz", 4), ["ab ", "cd", "", "я🙂界", "xyz"]);
+        assert_eq!(wrapped("   ab  ", 4), ["ab  "]);
+        assert_eq!(wrapped("аб🙂xyz", 2), ["аб", "🙂x", "yz"]);
+        assert_eq!(wrapped("a\n", 8), ["a", ""]);
+        assert_eq!(wrapped("", 8), [""]);
+        assert_eq!(wrapped("a🙂b", 0), ["a", "🙂", "b"]);
+    }
+
+    #[test]
+    fn wrapping_a_large_unicode_word_keeps_each_character_once() {
+        let text = "界".repeat(65_536);
+        let rows = wrapped(&text, 8);
+        assert_eq!(rows.len(), 8192);
+        assert!(rows.iter().all(|row| row.chars().count() == 8));
+        assert_eq!(rows.concat(), text);
     }
 
     /// A minute of nothing on the screen is a build running, a model thinking,
