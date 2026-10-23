@@ -53,3 +53,22 @@ Verification uses ordinary `RunCommand` admission in the tools jobs suite,
 and a TUI regression preserving a busy draft. The native R17 probe additionally
 checks API/CLI busy-owner parity and actual browser controls against an isolated
 daemon. These observations do not kill, retry or recover work automatically.
+
+## Background command text
+
+Background commands decode stdout and stderr separately. A UTF-8 character split
+between pipe reads waits for its remaining bytes instead of becoming replacement
+characters or being interpreted through the Windows code page. At most three
+unfinished bytes are retained per pipe. While they are pending, a job read can
+end just before that character.
+
+EOF, a read error or cancellation flushes any unfinished bytes through the
+existing best-effort text conversion. Invalid bytes keep the existing platform
+fallback; this is not a declaration of an arbitrary command's encoding. Display
+head/tail bounds and raw capture/redaction rules continue to apply. Received-byte
+counts and quiet time track actual pipe activity, including unfinished characters;
+flushing retained text does not count as new activity.
+
+The jobs tests exercise every split of multilingual UTF-8 text, one-byte reads,
+independent simultaneous pipes, display bounds, invalid-byte fallback, EOF,
+read errors and cancellation.

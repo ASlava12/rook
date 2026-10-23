@@ -555,6 +555,61 @@ impl Printed {
     }
 }
 
+/// Keep at most the unfinished UTF-8 suffix between reads of one pipe.
+/// Invalid bytes retain the platform's existing best-effort decoding.
+#[derive(Default)]
+struct PipeText {
+    pending: Vec<u8>,
+}
+
+impl PipeText {
+    fn feed(&mut self, bytes: &[u8], mut emit: impl FnMut(&str)) {
+        if self.pending.is_empty() {
+            self.decode(bytes, &mut emit);
+        } else {
+            let mut joined = std::mem::take(&mut self.pending);
+            joined.extend_from_slice(bytes);
+            self.decode(&joined, &mut emit);
+        }
+    }
+
+    fn decode(&mut self, bytes: &[u8], emit: &mut impl FnMut(&str)) {
+        match std::str::from_utf8(bytes) {
+            Ok(text) => emit(text),
+            Err(error) if error.error_len().is_none() => {
+                let split = error.valid_up_to();
+                emit(&rook_contain::printed(&bytes[..split]));
+                self.pending.extend_from_slice(&bytes[split..]);
+            }
+            Err(_) => emit(&rook_contain::printed(bytes)),
+        }
+    }
+
+    fn finish(&mut self, mut emit: impl FnMut(&str)) {
+        let pending = std::mem::take(&mut self.pending);
+        if !pending.is_empty() {
+            emit(&rook_contain::printed(&pending));
+        }
+    }
+}
+
+struct PipeDisplay<'a> {
+    text: PipeText,
+    output: &'a Arc<Mutex<Printed>>,
+    cap: usize,
+}
+
+impl Drop for PipeDisplay<'_> {
+    fn drop(&mut self) {
+        // EOF, read errors and cancellation can leave a partial character.
+        // Flushing retained text is not fresh activity from the child.
+        let mut printed = self.output.lock().unwrap_or_else(|e| e.into_inner());
+        let heard = printed.heard;
+        self.text.finish(|text| printed.push(text, self.cap));
+        printed.heard = heard;
+    }
+}
+
 async fn drain(
     stream: &mut Option<impl tokio::io::AsyncRead + Unpin>,
     into: &Arc<Mutex<Printed>>,
@@ -563,20 +618,19 @@ async fn drain(
 ) {
     let Some(stream) = stream else { return };
     let mut chunk = vec![0u8; 16 * 1024];
+    let mut decoder = PipeDisplay { text: PipeText::default(), output: into, cap };
     while let Ok(n) = stream.read(&mut chunk).await {
         if n == 0 {
-            return;
+            break;
         }
         if let Some(spill) = spill {
             spill.lock().unwrap_or_else(|e| e.into_inner()).write(&chunk[..n]);
         }
-        // Decoded a read at a time, which is what this has to be: a background
-        // command is read for hours and what it printed is asked for while it
-        // runs. `printed` forgives a character split across the boundary rather
-        // than reading the chunk as the wrong encoding because of it.
         let mut printed = into.lock().unwrap_or_else(|e| e.into_inner());
         printed.received = printed.received.saturating_add(n as u64);
-        printed.push(&rook_contain::printed(&chunk[..n]), cap);
+        // A partial code point is activity even before it becomes display text.
+        printed.heard = Some(std::time::Instant::now());
+        decoder.text.feed(&chunk[..n], |text| printed.push(text, cap));
     }
 }
 
@@ -702,4 +756,167 @@ fn describe(job: &Job) -> String {
         _ => String::new(),
     };
     format!("{} [{state}]{group} {}", job.id, job.command)
+}
+
+#[cfg(test)]
+mod stream_text_tests {
+    use super::*;
+    use std::{
+        collections::VecDeque,
+        pin::Pin,
+        task::{Context, Poll},
+    };
+    use tokio::io::{AsyncRead, ReadBuf};
+
+    struct Chunks(VecDeque<Vec<u8>>);
+    impl AsyncRead for Chunks {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            into: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            if let Some(bytes) = self.0.pop_front() {
+                assert!(bytes.len() <= into.remaining());
+                into.put_slice(&bytes);
+            }
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn background_output_preserves_utf8_at_every_read_boundary() {
+        let text = "ASCII Русский 你好 🙂 end";
+        for split in 1..text.len() {
+            let bytes = text.as_bytes();
+            let mut stream = Some(Chunks(VecDeque::from([bytes[..split].to_vec(), bytes[split..].to_vec()])));
+            let output = Arc::new(Mutex::new(Printed::default()));
+            drain(&mut stream, &output, 4096, None).await;
+            let printed = output.lock().unwrap();
+            assert_eq!(printed.received, bytes.len() as u64);
+            assert_eq!(printed.seen(), text, "split at byte {split}");
+        }
+    }
+
+    #[tokio::test]
+    async fn background_output_preserves_utf8_in_one_byte_reads() {
+        let text = "Русский 你好 🙂";
+        let mut stream = Some(Chunks(text.as_bytes().iter().map(|b| vec![*b]).collect()));
+        let output = Arc::new(Mutex::new(Printed::default()));
+        drain(&mut stream, &output, 4096, None).await;
+        assert_eq!(output.lock().unwrap().seen(), text);
+
+        let mut decoder = PipeText::default();
+        let mut bounded = Printed::default();
+        for byte in "🙂".repeat(4096).as_bytes() {
+            decoder.feed(&[*byte], |text| bounded.push(text, 128));
+            assert!(decoder.pending.len() <= 3);
+            assert!(bounded.seen().len() < 256);
+        }
+        decoder.finish(|text| bounded.push(text, 128));
+        assert!(bounded.seen().contains("bytes elided"));
+        assert!(!bounded.seen().contains(char::REPLACEMENT_CHARACTER));
+    }
+
+    struct FailsAfter(Option<Vec<u8>>);
+    impl AsyncRead for FailsAfter {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            into: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            match self.0.take() {
+                Some(bytes) => {
+                    into.put_slice(&bytes);
+                    Poll::Ready(Ok(()))
+                }
+                None => Poll::Ready(Err(std::io::Error::other("owned pipe failure"))),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn background_output_flushes_incomplete_utf8_on_eof_or_read_error() {
+        let bytes = b"valid \xf0\x9f";
+        let expected = rook_contain::printed(bytes);
+        let eof = Arc::new(Mutex::new(Printed::default()));
+        drain(&mut Some(Chunks(VecDeque::from([bytes.to_vec()]))), &eof, 4096, None).await;
+        assert_eq!(eof.lock().unwrap().seen(), expected);
+        let error = Arc::new(Mutex::new(Printed::default()));
+        drain(&mut Some(FailsAfter(Some(bytes.to_vec()))), &error, 4096, None).await;
+        assert_eq!(error.lock().unwrap().seen(), expected);
+        assert_eq!(error.lock().unwrap().received, bytes.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn background_output_retains_platform_fallback_for_invalid_bytes() {
+        let bytes = [0x8e, 0xe8, 0xa8, 0xa1, 0xaa, 0xa0];
+        let expected = format!("ASCII {}", rook_contain::printed(&bytes));
+        let mut stream = Some(Chunks(VecDeque::from([b"ASCII ".to_vec(), bytes.to_vec()])));
+        let output = Arc::new(Mutex::new(Printed::default()));
+        drain(&mut stream, &output, 4096, None).await;
+        assert_eq!(output.lock().unwrap().seen(), expected);
+    }
+
+    async fn received(output: &Arc<Mutex<Printed>>, count: u64) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while output.lock().unwrap().received != count {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn background_pipes_keep_separate_utf8_state_and_count_partial_activity() {
+        use tokio::io::AsyncWriteExt;
+        let (out_read, mut out_write) = tokio::io::duplex(16);
+        let (err_read, mut err_write) = tokio::io::duplex(16);
+        let output = Arc::new(Mutex::new(Printed::default()));
+        let out = output.clone();
+        let err = output.clone();
+        let out_task = tokio::spawn(async move { drain(&mut Some(out_read), &out, 4096, None).await });
+        let err_task = tokio::spawn(async move { drain(&mut Some(err_read), &err, 4096, None).await });
+        out_write.write_all(&[0xe4]).await.unwrap();
+        received(&output, 1).await;
+        {
+            let printed = output.lock().unwrap();
+            assert!(printed.seen().is_empty());
+            assert!(printed.quiet_for().is_some(), "a partial character is real pipe activity");
+        }
+        err_write.write_all(b"stderr ").await.unwrap();
+        received(&output, 8).await;
+        assert_eq!(output.lock().unwrap().seen(), "stderr ");
+        out_write.write_all(&[0xbd, 0xa0]).await.unwrap();
+        received(&output, 10).await;
+        assert_eq!(output.lock().unwrap().seen(), "stderr 你");
+        drop(out_write);
+        drop(err_write);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            out_task.await.unwrap();
+            err_task.await.unwrap();
+        })
+        .await
+        .unwrap();
+        assert_eq!(output.lock().unwrap().received, 10);
+    }
+
+    #[tokio::test]
+    async fn cancelled_background_reads_flush_partial_text_without_fresh_activity() {
+        use tokio::io::AsyncWriteExt;
+        let (reader, mut writer) = tokio::io::duplex(16);
+        let output = Arc::new(Mutex::new(Printed::default()));
+        let into = output.clone();
+        let reading = tokio::spawn(async move { drain(&mut Some(reader), &into, 4096, None).await });
+        writer.write_all(b"E \xf0").await.unwrap();
+        received(&output, 3).await;
+        let heard = output.lock().unwrap().heard;
+        assert_eq!(output.lock().unwrap().seen(), "E ");
+        reading.abort();
+        assert!(reading.await.unwrap_err().is_cancelled());
+        let printed = output.lock().unwrap();
+        assert_eq!(printed.seen(), "E �");
+        assert_eq!(printed.heard, heard, "flushing does not reset the inactivity clock");
+        assert_eq!(printed.received, 3);
+    }
 }
