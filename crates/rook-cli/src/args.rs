@@ -860,6 +860,9 @@ pub(crate) enum SkillCmd {
         /// Fetch the sources again before looking.
         #[arg(long)]
         refresh: bool,
+        /// Include source failures with JSON results as {items, errors}.
+        #[arg(long, requires = "json")]
+        diagnostics: bool,
     },
     /// Install a skill a source offers, by name.
     Install {

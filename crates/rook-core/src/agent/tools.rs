@@ -529,7 +529,7 @@ impl<'a> AgentLoop<'a> {
             let query = call.arguments.get("query").and_then(|q| q.as_str()).unwrap_or_default();
             let Some(name) = call.arguments.get("install").and_then(|n| n.as_str()) else {
                 // Searching reads; only installing writes.
-                let text = self.skills_matching(query);
+                let text = self.vault.redact(&self.skills_matching(query));
                 self.rook.log(self.session, EventKind::ToolResult, FIND_SKILL, &text).ok();
                 return (text, false);
             };
@@ -547,6 +547,7 @@ impl<'a> AgentLoop<'a> {
                         "installed skill {name:?} to {}. Load it to see what it says.",
                         path.display()
                     );
+                    let message = self.vault.redact(&message);
                     self.rook.log(self.session, EventKind::Note, FIND_SKILL, &message).ok();
                     (message, false)
                 }
@@ -561,6 +562,7 @@ impl<'a> AgentLoop<'a> {
                     if !query.is_empty() {
                         message.push_str(&format!("\n\n{}", self.skills_matching(query)));
                     }
+                    let message = self.vault.redact(&message);
                     self.rook.log(self.session, EventKind::Error, FIND_SKILL, &message).ok();
                     (message, true)
                 }
@@ -1168,31 +1170,101 @@ impl<'a> AgentLoop<'a> {
     }
 
     fn skills_matching(&self, query: &str) -> String {
-        let (offered, errors) = self.rook.skills_offered(query, false);
-        let listed: Vec<String> = offered
-            .iter()
-            .take(10)
-            .map(|o| format!("- {}: {}", o.name, o.description.chars().take(160).collect::<String>()))
-            .collect();
-        if !listed.is_empty() {
-            return format!(
-                "{}\n\nInstall one by name with `install`, or write your own.",
-                listed.join("\n")
-            );
+        let (mut offered, mut errors) = self.rook.skills_offered(query, false);
+        // Mask before previews split a long credential into fragments that
+        // would no longer match the vault's exact-value redaction.
+        for offer in offered.iter_mut().take(10) {
+            offer.name = self.vault.redact(&offer.name);
+            offer.description = self.vault.redact(&offer.description);
         }
+        for error in errors.iter_mut().take(4) {
+            *error = self.vault.redact(error);
+        }
+        skill_search_answer(query, !self.rook.config.skill_sources.is_empty(), &offered, &errors)
+    }
+}
+
+fn skill_search_answer(
+    query: &str,
+    configured: bool,
+    offered: &[crate::catalog::Offered],
+    errors: &[String],
+) -> String {
+    let listed: Vec<String> = offered
+        .iter()
+        .take(10)
+        .map(|o| format!("- {}: {}", o.name, o.description.chars().take(160).collect::<String>()))
+        .collect();
+    let mut answer = if !listed.is_empty() {
+        format!("{}\n\nInstall one by name with `install`, or write your own.", listed.join("\n"))
+    } else if !configured {
         // "No source offers it" and "there are no sources" read the same and
         // are not: the first is an answer, the second is a setting nobody has
         // filled in, and a model told the first goes looking for another name.
-        if self.rook.config.skill_sources.is_empty() {
-            return format!(
-                "there are no skill sources configured, so nothing can be found or installed — \
+        format!(
+            "there are no skill sources configured, so nothing can be found or installed — \
                  add them under `[skill_sources]` in config.toml, or write the skill with \
                  `{WRITE_SKILL}`."
-            );
+        )
+    } else if errors.is_empty() {
+        format!("no source offers a skill matching {query:?}.")
+    } else {
+        format!("no matches found for {query:?}; unreadable sources could still offer a matching skill.")
+    };
+    if !errors.is_empty() {
+        answer.push_str("\n\nSearch incomplete: some configured skill sources could not be read.");
+        for error in errors.iter().take(4) {
+            answer.push_str("\n- ");
+            answer.push_str(&rook_tools::elide_middle(error, 512));
         }
-        match errors.is_empty() {
-            true => format!("no source offers a skill matching {query:?}."),
-            false => format!("no source offers a skill matching {query:?}. {}", errors.join("; ")),
+        if errors.len() > 4 {
+            answer.push_str(&format!("\n{} additional source errors omitted.", errors.len() - 4));
         }
+    }
+    answer
+}
+
+#[cfg(test)]
+mod skill_search_tests {
+    use super::skill_search_answer;
+
+    #[test]
+    fn partial_skill_search_keeps_matches_and_the_failed_source_reason() {
+        let offered = crate::catalog::Offered {
+            name: "owned-skill".into(),
+            description: "A readable source".into(),
+            source: "owned-source".into(),
+            dir: "owned-directory".into(),
+        };
+        let answer =
+            skill_search_answer("owned", true, &[offered], &["other-source: permission denied".into()]);
+        assert!(answer.contains("- owned-skill: A readable source"));
+        assert!(answer.contains("Search incomplete"));
+        assert!(answer.contains("other-source: permission denied"));
+    }
+
+    #[test]
+    fn an_unreadable_source_does_not_establish_the_absence_of_a_skill() {
+        let answer = skill_search_answer("missing", true, &[], &["source: cannot read".into()]);
+        assert!(!answer.contains("no source offers"));
+        assert!(answer.contains("unreadable sources could still offer"));
+        assert!(answer.contains("source: cannot read"));
+        let empty = skill_search_answer("missing", true, &[], &[]);
+        assert!(empty.contains("no source offers") && !empty.contains("incomplete"));
+        assert!(skill_search_answer("missing", false, &[], &[]).contains("no skill sources configured"));
+    }
+
+    #[test]
+    fn source_diagnostics_keep_both_ends_with_a_bounded_count_and_utf8_size() {
+        let errors: Vec<String> =
+            (0..9).map(|index| format!("source-{index}: {}: denied-{index}", "界".repeat(20_000))).collect();
+        let answer = skill_search_answer("missing", true, &[], &errors);
+        assert!(answer.len() < 4096, "four source diagnostics must fit their bounded budget");
+        for index in 0..4 {
+            assert!(answer.contains(&format!("source-{index}:")));
+            assert!(answer.contains(&format!("denied-{index}")));
+        }
+        assert!(!answer.contains("source-4:"));
+        assert!(answer.contains("5 additional source errors omitted"));
     }
 }

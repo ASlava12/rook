@@ -127,6 +127,17 @@ jobs:
           name: background-utf8-${{ matrix.os }}
           path: ${{ runner.temp }}/rook-background-utf8.json
           if-no-files-found: error
+      - name: skill search source diagnostics
+        shell: bash
+        timeout-minutes: 4
+        run: python3 xtask/probes/skill-search-diagnostics/run.py --bin-dir target/debug --tmp-root "$RUNNER_TEMP" --output "$RUNNER_TEMP/rook-skill-search-diagnostics.json"
+      - name: skill search diagnostic receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: skill-search-diagnostics-${{ matrix.os }}
+          path: ${{ runner.temp }}/rook-skill-search-diagnostics.json
+          if-no-files-found: error
       - name: macOS process-group lifecycle
         if: matrix.os == 'macos-latest'
         run: cargo test --locked -p rook-contain process::tests -- --nocapture
