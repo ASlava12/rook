@@ -927,6 +927,53 @@ async fn masking_context_does_not_change_executed_tool_arguments() {
 }
 
 #[tokio::test]
+async fn provider_connection_credentials_enter_the_agent_vault_without_manual_registration() {
+    const SECRET: &str = r#"owned-"provider"\credential"#;
+    struct Connected(ScriptedProvider);
+    #[async_trait]
+    impl Provider for Connected {
+        fn id(&self) -> &str {
+            "owned-connection"
+        }
+        fn context_window(&self) -> usize {
+            16_000
+        }
+        fn visit_connection_secrets(&self, visitor: &mut dyn FnMut(&str)) {
+            visitor(SECRET);
+        }
+        async fn complete(&self, request: Request) -> rook_llm::Result<Response> {
+            self.0.complete(request).await
+        }
+    }
+    let mut f = fixture();
+    let empty_source = tempfile::tempdir().unwrap();
+    f.rook.config.skill_sources = vec![empty_source.path().display().to_string()];
+    let session = f.rook.start_session("connection registration").unwrap();
+    let script = ScriptedProvider::new(vec![
+        call("find_skill", serde_json::json!({"query":SECRET})),
+        reply("No match."),
+    ]);
+    let seen = script.share();
+    AgentLoop::new(&f.rook, Arc::new(Connected(script)), session)
+        .run("search for the supplied query")
+        .await
+        .unwrap();
+    let entries = f.rook.transcript(session, 0, 100, 4096).unwrap();
+    let call = entries.iter().find(|e| e.kind == "tool-call" && e.label == "find_skill").unwrap();
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&call.body).unwrap()["query"], "${secret}");
+    let requests = seen.lock().unwrap();
+    assert!(
+        requests
+            .last()
+            .unwrap()
+            .messages
+            .iter()
+            .flat_map(|m| &m.tool_calls)
+            .any(|c| c.arguments["query"] == "${secret}")
+    );
+}
+
+#[tokio::test]
 async fn a_plain_turn_is_logged_end_to_end() {
     let f = fixture();
     let session = f.rook.start_session("test").unwrap();

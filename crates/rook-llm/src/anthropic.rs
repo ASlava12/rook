@@ -141,6 +141,10 @@ impl Anthropic {
 
 #[async_trait]
 impl Provider for Anthropic {
+    fn visit_connection_secrets(&self, visitor: &mut dyn FnMut(&str)) {
+        visitor(&self.config.api_key);
+    }
+
     fn id(&self) -> &str {
         &self.id
     }

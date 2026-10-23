@@ -780,6 +780,7 @@ impl<'a> AgentLoop<'a> {
             tracing::warn!("secrets are unreadable, so none are offered: {e}");
             crate::secrets::Vault::empty()
         }));
+        provider.visit_connection_secrets(&mut |value| vault.also_hide(value));
         tool_ctx.secrets = Some(vault.clone());
         tool_ctx.execution = Some(std::sync::Arc::new(rook_tools::environments::Context {
             settings: rook.config.execution_environment.clone(),

@@ -349,6 +349,10 @@ impl Retrying {
 
 #[async_trait]
 impl Provider for Retrying {
+    fn visit_connection_secrets(&self, visitor: &mut dyn FnMut(&str)) {
+        self.inner.visit_connection_secrets(visitor);
+    }
+
     fn id(&self) -> &str {
         self.inner.id()
     }

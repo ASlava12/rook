@@ -84,6 +84,19 @@ is withheld when its visible message is changed, using the same rule as saved
 provider state. A separate execution control verifies the successful file read
 and masked context in both the first and subsequent main requests.
 
+The transport visits credentials it already holds when a new agent vault is
+created. Retry, concurrency, capability, source-selection and fallback wrappers
+forward that registration, including every fallback leaf. Credential helpers
+are not resolved a second time. This closes a gap where provider construction
+registered a key in a temporary vault that the actual turn did not retain.
+The default visitor keeps custom provider implementations source-compatible;
+custom hosts can also use explicit connection-secret registration.
+
+The owned native fixture runs direct CLI and private daemon turns in both the
+OpenAI-compatible and Anthropic transports. It checks 43 conditions, including
+unchanged real authorization headers and masked saved/live context. All four
+transport families and their wrappers also have a credential-forwarding control.
+
 **A value is resolved when it is used and held for the turn.** The vault is
 built per turn and dropped with it, so a value fetched for one turn is not in
 memory for the next. A `cmd:` secret nobody asked for is never resolved at all.
