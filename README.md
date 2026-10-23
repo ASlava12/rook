@@ -1,8 +1,7 @@
 # Rook
 
-[Rook 0.21.15](docs/releases/0.21.15.md): Cargo failures can cite kept Rust error documentation, once per code per turn;
-`docs` offers bounded `local_only` cache reads and respects explicit versions across nearby topics.
-These hints add no model or documentation-fetch request.
+[Rook 0.21.16](docs/releases/0.21.16.md): opt-in model-call snapshots with bounded local review/export,
+and compiler-checked maintained Rust documentation examples.
 
 [Domain network policy with OS containment](docs/domain-network-policy.md).
 

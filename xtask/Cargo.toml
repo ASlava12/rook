@@ -14,7 +14,7 @@ serde_json = "1.0.151"
 semver = "=1.0.28"
 sha2 = "=0.10.9"
 toml = "=1.1.4"
-rook-contain = { path = "../crates/rook-contain", version = "0.21.15" }
+rook-contain = { path = "../crates/rook-contain", version = "0.21.16" }
 tempfile = "3.27.0"
 
 [dev-dependencies]
