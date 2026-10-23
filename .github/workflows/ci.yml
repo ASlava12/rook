@@ -200,6 +200,10 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Each cross container owns its host proc macros and build scripts.
+          # Keep dependency artifacts separate across the target matrix.
+          key: ${{ matrix.target }}
       - uses: taiki-e/install-action@cross
       - run: cross check --workspace --target ${{ matrix.target }}
 
