@@ -768,6 +768,19 @@ impl Rook {
 
     // ------------------------------------------------------- documentation
 
+    /// Bounded offline lookup for manual local-only reads and advisory build notes.
+    pub fn docs_local(
+        &self,
+        topic: &str,
+        version: Option<&str>,
+        question: &str,
+    ) -> Result<crate::docs::LocalLookup> {
+        if topic.len() > 128 || version.is_some_and(|v| v.len() > 128) || question.len() > 2048 {
+            return Err(CoreError::Other("local docs query exceeds its topic/version/question limit".into()));
+        }
+        crate::docs::local_lookup(&self.store, topic, version, question)
+    }
+
     /// The documentation kept for a topic, at a version — `latest` when none
     /// is named, because that is what somebody asking about a technology means
     /// when they do not say.

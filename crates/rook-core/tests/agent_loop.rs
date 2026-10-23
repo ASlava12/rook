@@ -7604,6 +7604,225 @@ async fn local_doc_version_neighbor_result(version: Option<&str>) -> String {
         .join("\n")
 }
 
+async fn local_only_docs_result(kept: bool, refresh: bool) -> String {
+    let mut f = fixture();
+    f.rook.config.web.enabled = false;
+    if kept {
+        f.rook
+            .keep_docs(&rook_core::docs::DocSet::new(
+                "tokio",
+                "1.0",
+                vec![rook_core::docs::Page {
+                    url: "https://example.invalid/tokio/1.0".into(),
+                    title: "Owned runtime".into(),
+                    text:
+                        "OWNED_LOCAL_ONLY Tokio runtime uses asynchronous tasks and explicit spawn handles."
+                            .into(),
+                    ..Default::default()
+                }],
+            ))
+            .unwrap();
+    }
+    let session = f.rook.start_session("owned local-only docs").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call(
+            "docs",
+            serde_json::json!({
+                "topic":"tokio", "version":"1.0", "question":"runtime", "local_only":true, "refresh":refresh
+            }),
+        ),
+        reply("done"),
+    ]));
+    let seen = provider.share();
+    AgentLoop::new(&f.rook, provider, session).run("Read only the local documentation").await.unwrap();
+    let requests = seen.lock().unwrap();
+    requests
+        .last()
+        .unwrap()
+        .messages
+        .iter()
+        .filter(|m| m.role == Role::Tool)
+        .map(|m| m.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[tokio::test]
+async fn local_only_docs_miss_stops_before_source_configuration() {
+    let text = local_only_docs_result(false, false).await;
+    assert!(text.contains("local-only") && text.contains("No network request"), "{text}");
+    assert!(!text.contains("web access is off"), "source clients must not be consulted: {text}");
+}
+
+#[tokio::test]
+async fn local_only_docs_hit_keeps_version_and_citation() {
+    let text = local_only_docs_result(true, false).await;
+    assert!(text.contains("OWNED_LOCAL_ONLY") && text.contains("docs/tokio/1.0"), "{text}");
+    assert!(text.contains("https://example.invalid/tokio/1.0"), "{text}");
+}
+
+#[tokio::test]
+async fn local_only_docs_refresh_is_rejected_before_any_lookup() {
+    let text = local_only_docs_result(true, true).await;
+    assert!(text.contains("local_only and refresh cannot be combined"), "{text}");
+    assert!(!text.contains("OWNED_LOCAL_ONLY"), "{text}");
+}
+
+#[tokio::test]
+async fn local_only_docs_miss_makes_no_request_to_configured_sources() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut f = fixture();
+    f.rook.config.web.enabled = true;
+    f.rook.config.web.search = "searxng".into();
+    f.rook.config.web.search_url = format!("http://{}", listener.local_addr().unwrap());
+    f.rook.config.web.timeout_secs = 1;
+    let session = f.rook.start_session("offline source spy").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call(
+            "docs",
+            serde_json::json!({
+                "topic":"owned missing docs", "local_only":true
+            }),
+        ),
+        reply("done"),
+    ]));
+    let seen = provider.share();
+    AgentLoop::new(&f.rook, provider, session).run("Use local docs only").await.unwrap();
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept()).await.is_err());
+    let requests = seen.lock().unwrap();
+    let text = requests
+        .last()
+        .unwrap()
+        .messages
+        .iter()
+        .filter(|m| m.role == Role::Tool)
+        .map(|m| m.content.as_str())
+        .collect::<String>();
+    assert!(text.contains("No network request"), "{text}");
+}
+
+#[test]
+fn bounded_local_docs_exact_lookup_precedes_ref_inventory_and_checks_identity() {
+    let f = fixture();
+    let page = rook_core::docs::Page {
+        url: "https://example.invalid/rust".into(),
+        title: "Owned".into(),
+        text: "E0382 means a value was moved; borrow it or clone it when that matches ownership semantics."
+            .into(),
+        ..Default::default()
+    };
+    f.rook.keep_docs(&rook_core::docs::DocSet::new("rust errors", "latest", vec![page.clone()])).unwrap();
+    for n in 0..140 {
+        let set = rook_core::docs::DocSet::new(&format!("aaa unrelated {n}"), "latest", vec![page.clone()]);
+        f.rook.keep_docs(&set).unwrap();
+    }
+    let found = f.rook.docs_local("rust errors", None, "E0382").unwrap();
+    assert_eq!(found.set.unwrap().topic, "rust errors");
+    assert!(!found.incomplete);
+    let mut wrong = rook_core::docs::DocSet::new("wrong", "latest", vec![page]);
+    wrong.topic = "wrong".into();
+    let id = wrong.store(&f.rook.store).unwrap();
+    f.rook.store.set_ref("docs/rust-errors/latest", &id).unwrap();
+    let found = f.rook.docs_local("rust errors", None, "E0382").unwrap();
+    assert!(found.set.is_none() && found.incomplete);
+}
+
+#[test]
+fn bounded_local_docs_refuse_large_sets_and_mark_neighbor_budget_omissions() {
+    let f = fixture();
+    let huge = rook_core::docs::DocSet::new(
+        "rust errors",
+        "latest",
+        vec![rook_core::docs::Page { text: "x".repeat(600_000), ..Default::default() }],
+    );
+    f.rook.keep_docs(&huge).unwrap();
+    let found = f.rook.docs_local("rust errors", None, "E0382").unwrap();
+    assert!(found.set.is_none() && found.incomplete);
+    f.rook.forget_docs("rust errors", Some("latest")).unwrap();
+    for n in 0..9 {
+        let text = if n == 8 {
+            "E0382 means the owned value was moved and cannot be used again without cloning."
+        } else {
+            "Unrelated lifetime notes without the requested compiler error code or its explanation."
+        };
+        f.rook
+            .keep_docs(&rook_core::docs::DocSet::new(
+                &format!("rust errors {n}"),
+                "latest",
+                vec![rook_core::docs::Page { text: text.into(), ..Default::default() }],
+            ))
+            .unwrap();
+    }
+    let found = f.rook.docs_local("rust errors", None, "E0382").unwrap();
+    assert!(found.set.is_none() && found.incomplete, "ninth candidate must not be loaded");
+    assert!(f.rook.docs_local(&"x".repeat(129), None, "E0382").is_err());
+}
+
+#[tokio::test]
+async fn cargo_failure_appends_cited_local_build_notes_once_per_error() {
+    let mut config = Config::default();
+    config.sandbox.isolate = rook_tools::isolate::Mode::Off;
+    config.shell_undo.enabled = true;
+    let f = fixture_with(config);
+    std::fs::write(
+        f.rook.workspace.join("Cargo.toml"),
+        "[package]\nname='owned_build_notes'\nversion='0.0.0'\nedition='2024'\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::create_dir(f.rook.workspace.join("src")).unwrap();
+    std::fs::write(
+        f.rook.workspace.join("src/main.rs"),
+        "fn main(){ let x=String::from(\"owned\"); let _y=x; println!(\"{x}\"); }",
+    )
+    .unwrap();
+    f.rook.keep_docs(&rook_core::docs::DocSet::new("rust errors","latest",vec![rook_core::docs::Page {
+        url:"https://example.invalid/rust/E0382".into(),title:"Owned moved value note".into(),
+        text:"E0382: OWNED_MOVE_HINT. A moved value cannot be used again; borrow or clone only when that fits the program's ownership semantics.".into(),..Default::default()
+    }])).unwrap();
+    let session = f.rook.start_session("owned real Cargo failure").unwrap();
+    let args = serde_json::json!({"command":"cargo --color never check --offline --target-dir target/owned-build-notes","timeout_secs":60,"output":"auto"});
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("run_command", args.clone()),
+        call("run_command", args),
+        reply("The build still fails."),
+    ]));
+    let seen = provider.share();
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.allow_everything_not_denied();
+    let outcome = agent.run("Check this owned Rust program twice").await.unwrap();
+    let saved = f
+        .rook
+        .store
+        .events(session, 0, 256)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.record.kind == rook_store::EventKind::ToolResult && e.record.label == "run_command")
+        .map(|e| String::from_utf8(f.rook.store.get(&e.record.body).unwrap()).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(saved.len(), 2, "actual saved results: {saved:?}; outcome: {outcome:?}");
+    let saved_text = saved.join("\n");
+    assert!(saved_text.contains("error[E0382]"), "{saved_text}");
+    assert_eq!(saved_text.matches("[Advisory local documentation:").count(), 1, "{saved_text}");
+    let requests = seen.lock().unwrap();
+    let results = requests
+        .iter()
+        .max_by_key(|r| r.messages.iter().filter(|m| m.role == Role::Tool).count())
+        .unwrap()
+        .messages
+        .iter()
+        .filter(|m| m.role == Role::Tool)
+        .map(|m| m.content.as_str())
+        .collect::<Vec<_>>();
+    let text = results.join("\n");
+    assert!(text.contains("error[E0382]"), "real compiler diagnostic missing: {text}");
+    assert!(
+        text.contains("OWNED_MOVE_HINT") && text.contains("https://example.invalid/rust/E0382"),
+        "{text}"
+    );
+    assert_eq!(text.matches("[Advisory local documentation:").count(), 1, "{text}");
+    assert!(text.contains("not a verified diagnosis or fix"), "{text}");
+}
+
 #[tokio::test]
 async fn local_doc_version_request_does_not_use_another_version_neighbor() {
     let handed = local_doc_version_neighbor_result(Some("7.4")).await;

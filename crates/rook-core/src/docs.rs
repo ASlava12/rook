@@ -23,6 +23,100 @@ use crate::error::Result;
 /// What `latest` means: the newest the sources had when it was read.
 pub const LATEST: &str = "latest";
 
+/// A bounded local read, including omissions rather than an exhaustive-miss claim.
+pub struct LocalLookup {
+    pub set: Option<DocSet>,
+    pub incomplete: bool,
+}
+
+pub(crate) fn limited_reply(text: &str, limit: usize) -> String {
+    const NOTICE: &str = "\n[local documentation result truncated]\n";
+    if text.len() <= limit {
+        return text.to_owned();
+    }
+    if limit < NOTICE.len() {
+        return String::new();
+    }
+    let room = limit.saturating_sub(NOTICE.len());
+    let mut head = room / 3;
+    while !text.is_char_boundary(head) {
+        head -= 1;
+    }
+    let mut tail = text.len() - (room - head);
+    while !text.is_char_boundary(tail) {
+        tail += 1;
+    }
+    format!("{}{NOTICE}{}", &text[..head], &text[tail..])
+}
+
+/// No clients, approvals or fetching. Exact identity is checked before neighbors.
+pub(crate) fn local_lookup(
+    store: &Store,
+    topic: &str,
+    version: Option<&str>,
+    question: &str,
+) -> Result<LocalLookup> {
+    const SET_BYTES: usize = 512 * 1024;
+    const CANDIDATES: usize = 8;
+    let load = |id: &ObjectId, reference: &str| -> Result<DocSet> {
+        let bytes = store.get_limited(id, SET_BYTES, SET_BYTES)?;
+        let set: DocSet = serde_json::from_slice(&bytes)?;
+        if set.topic.len() > 128
+            || set.version.len() > 128
+            || set.pages.len() > 32
+            || set.pages.iter().any(|p| p.url.len() > 2048 || p.title.len() > 512)
+            || self::reference(&set.topic, &set.version) != reference
+            || version.is_some_and(|v| !set.version.eq_ignore_ascii_case(v))
+        {
+            return Err(crate::error::CoreError::Other(
+                "local docs identity or metadata limit refused".into(),
+            ));
+        }
+        Ok(set)
+    };
+    let exact = reference(topic, version.unwrap_or(LATEST));
+    let exact_window = store.list_refs_limited(&exact, 1, 512)?;
+    let mut incomplete = exact_window.incomplete;
+    if let Some((_, id)) = exact_window.refs.into_iter().find(|(name, _)| *name == exact) {
+        return Ok(match load(&id, &exact) {
+            Ok(set) => LocalLookup { set: Some(set), incomplete: false },
+            Err(_) => LocalLookup { set: None, incomplete: true },
+        });
+    }
+    if question.is_empty() {
+        return Ok(LocalLookup { set: None, incomplete });
+    }
+    let window = store.list_refs_limited("docs/", 128, 512)?;
+    incomplete |= window.incomplete;
+    let mut admitted = 0;
+    for (name, id) in window.refs {
+        let Some((near_topic, near_version)) = name.strip_prefix("docs/").and_then(|s| s.rsplit_once('/'))
+        else {
+            incomplete = true;
+            continue;
+        };
+        if reference(topic, near_version) == name
+            || !relates(topic, near_topic)
+            || version.is_some_and(|v| reference(near_topic, v) != name)
+        {
+            continue;
+        }
+        if admitted == CANDIDATES {
+            incomplete = true;
+            break;
+        }
+        admitted += 1;
+        match load(&id, &name) {
+            Ok(set) if !set.passages(question, 1).is_empty() => {
+                return Ok(LocalLookup { set: Some(set), incomplete });
+            }
+            Ok(_) => {}
+            Err(_) => incomplete = true,
+        }
+    }
+    Ok(LocalLookup { set: None, incomplete })
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Page {
     /// Where it was read from, which is what an answer cites beside the local
@@ -499,4 +593,20 @@ pub async fn gather(
         });
     }
     Ok((DocSet::new(topic, version, pages), notes))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn local_reply_limit_includes_notice_and_preserves_utf8() {
+        let text = format!("first {} last", "\u{1f980}".repeat(8192));
+        for limit in [0, 32, 256, 6000, 16384] {
+            let shown = super::limited_reply(&text, limit);
+            assert!(shown.len() <= limit);
+            if limit >= 256 {
+                assert!(shown.starts_with("first ") && shown.ends_with(" last"));
+                assert!(shown.contains("truncated"));
+            }
+        }
+    }
 }

@@ -512,6 +512,9 @@ impl Tool for RunCommand {
         if truncated {
             combined = crate::elide_middle(&combined, ctx.max_output_bytes);
         }
+        // Only the visible process-output prefix, before explanatory envelopes.
+        // This is not a complete-output or goal-progress receipt.
+        let cargo_diagnostic_bytes = format!("exit {code}\n").len() + combined.len();
         combined.push_str(&removed.note());
 
         let kept = settle(spill, truncated);
@@ -570,9 +573,13 @@ impl Tool for RunCommand {
             meta: Default::default(),
         }
         .with("exit_code", code)
+        .with("cargo_command", cargo_output::eligible(&command))
         .with("processes_stopped", processes_stopped)
         .with("isolation", contained);
         outcome = removed.annotate(outcome);
+        if drained {
+            outcome = outcome.with("cargo_diagnostic_bytes", cargo_diagnostic_bytes);
+        }
         // Only complete captured output can establish an unchanged command
         // result. Later presentation notes and undo receipt ids are not output.
         if drained && !truncated {
@@ -599,23 +606,41 @@ impl RunCommand {
 }
 
 fn redact_command_result(outcome: &mut ToolOutcome, value: &str) {
-    let boundary = outcome
-        .meta
-        .get("command_result_bytes")
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|bytes| usize::try_from(bytes).ok())
-        .and_then(|bytes| outcome.content.get(..bytes))
-        .map(|prefix| prefix.replace(value, "[redacted]"));
+    let boundaries = ["command_result_bytes", "cargo_diagnostic_bytes"].map(|key| {
+        let prefix = outcome
+            .meta
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .and_then(|bytes| outcome.content.get(..bytes))
+            .map(|prefix| prefix.replace(value, "[redacted]"));
+        (key, prefix)
+    });
     outcome.content = outcome.content.replace(value, "[redacted]");
-    outcome.meta.remove("command_result_bytes");
-    if let Some(prefix) = boundary.filter(|prefix| outcome.content.starts_with(prefix)) {
-        outcome.meta.insert("command_result_bytes".into(), serde_json::json!(prefix.len()));
+    for (key, prefix) in boundaries {
+        outcome.meta.remove(key);
+        if let Some(prefix) = prefix.filter(|prefix| outcome.content.starts_with(prefix)) {
+            outcome.meta.insert(key.into(), serde_json::json!(prefix.len()));
+        }
     }
 }
 
 #[cfg(test)]
 mod command_result_tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_boundary_tracks_masking_and_refuses_cross_boundary_secrets() {
+        let prefix = "exit 101\nprivate\nerror[E0382]: moved";
+        let mut outcome = ToolOutcome::error(format!("{prefix}\nerror[E0308]: later hook"))
+            .with("cargo_diagnostic_bytes", prefix.len());
+        redact_command_result(&mut outcome, "private");
+        let length = outcome.meta["cargo_diagnostic_bytes"].as_u64().unwrap() as usize;
+        assert_eq!(outcome.content.get(..length), Some("exit 101\n[redacted]\nerror[E0382]: moved"));
+        let mut crossing = ToolOutcome::error("exit 101\nxNOTE").with("cargo_diagnostic_bytes", 10);
+        redact_command_result(&mut crossing, "xNOTE");
+        assert!(!crossing.meta.contains_key("cargo_diagnostic_bytes"));
+    }
 
     #[test]
     fn redaction_preserves_the_output_boundary_before_appended_receipts() {

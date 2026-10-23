@@ -40,6 +40,12 @@ pub use object::{Kind, ObjectId, ObjectMeta};
 pub use schema::{Event, EventKind, EventRecord, FORMAT_VERSION, NewEvent, SessionMeta};
 pub use stats::{KindStats, StoreStats};
 
+/// A prefix window; incomplete includes refused names or invalid object ids.
+pub struct RefWindow {
+    pub refs: Vec<(String, ObjectId)>,
+    pub incomplete: bool,
+}
+
 /// Generate a fresh session id.
 ///
 /// Monotonic within the process, which plain ULIDs are not: they order by
@@ -395,7 +401,28 @@ impl Store {
 
     /// Read an object back, decompressing and verifying its hash.
     pub fn get(&self, id: &ObjectId) -> Result<Vec<u8>> {
-        let meta = self.stat_object(id)?.ok_or_else(|| StoreError::MissingObject(id.short()))?;
+        self.get_admitted(id, None)
+    }
+
+    /// Admit encoded and decoded sizes before copying or decoding the payload.
+    /// Metadata and inline payload are read from the same database snapshot.
+    pub fn get_limited(&self, id: &ObjectId, raw: usize, encoded: usize) -> Result<Vec<u8>> {
+        self.get_admitted(id, Some((raw, encoded)))
+    }
+
+    fn get_admitted(&self, id: &ObjectId, limits: Option<(usize, usize)>) -> Result<Vec<u8>> {
+        let txn = self.db.begin_read()?;
+        let objects = txn.open_table(schema::OBJECTS)?;
+        let record = objects.get(id.as_bytes())?.ok_or_else(|| StoreError::MissingObject(id.short()))?;
+        if limits.is_some() && record.value().len() > 1024 {
+            return Err(StoreError::Encoding("object metadata exceeds the bounded read limit".into()));
+        }
+        let meta: ObjectMeta = postcard::from_bytes(record.value())?;
+        if let Some((raw, encoded)) = limits
+            && (meta.size_raw > raw as u64 || meta.size_stored > encoded as u64)
+        {
+            return Err(StoreError::Encoding("object exceeds the bounded raw/encoded read limit".into()));
+        }
 
         let stored = if meta.external {
             let path = self.object_path(id);
@@ -408,7 +435,6 @@ impl Store {
                 .map_err(|error| StoreError::io(&path, error))?;
             bytes
         } else {
-            let txn = self.db.begin_read()?;
             let blobs = txn.open_table(schema::BLOBS)?;
             let blob = blobs.get(id.as_bytes())?.ok_or_else(|| StoreError::Corrupt {
                 id: id.short(),
@@ -438,10 +464,10 @@ impl Store {
             meta.size_raw as usize,
         )?;
 
-        if ObjectId::of(&data) != *id {
+        if data.len() as u64 != meta.size_raw || ObjectId::of(&data) != *id {
             return Err(StoreError::Corrupt {
                 id: id.short(),
-                reason: "content hash mismatch after decode".into(),
+                reason: "content size or hash mismatch after decode".into(),
             });
         }
         Ok(data)
@@ -707,7 +733,34 @@ impl Store {
     pub fn get_ref(&self, name: &str) -> Result<Option<ObjectId>> {
         let txn = self.db.begin_read()?;
         let refs = txn.open_table(schema::REFS)?;
-        Ok(refs.get(name)?.and_then(|v| ObjectId::from_hex(&hex::encode(v.value()))))
+        Ok(refs.get(name)?.and_then(|v| <[u8; 32]>::try_from(v.value()).ok().map(ObjectId)))
+    }
+
+    /// Seek to a prefix, admitting at most `maximum` rows with one lookahead.
+    /// Oversized names and malformed ids consume a row but are never copied.
+    pub fn list_refs_limited(&self, prefix: &str, maximum: usize, name_bytes: usize) -> Result<RefWindow> {
+        let txn = self.db.begin_read()?;
+        let refs = txn.open_table(schema::REFS)?;
+        let mut window = RefWindow { refs: Vec::new(), incomplete: false };
+        for (seen, entry) in refs.range(prefix..)?.enumerate() {
+            let (key, value) = entry?;
+            if !key.value().starts_with(prefix) {
+                break;
+            }
+            if seen == maximum {
+                window.incomplete = true;
+                break;
+            }
+            let id = <[u8; 32]>::try_from(value.value()).ok().map(ObjectId);
+            if key.value().len() > name_bytes || id.is_none() {
+                window.incomplete = true;
+                continue;
+            }
+            if let Some(id) = id {
+                window.refs.push((key.value().to_owned(), id));
+            }
+        }
+        Ok(window)
     }
 
     pub fn delete_ref(&self, name: &str) -> Result<bool> {

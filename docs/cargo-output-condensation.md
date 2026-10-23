@@ -53,3 +53,41 @@ model-quality benchmark. The [CLI/daemon fixture](../xtask/probes/cargo-output/R
 also checks normal model/tool plumbing and the explicit raw override.
 A separate regression test invokes real `rustc` with a multiline
 `compile_error!` message and requires every diagnostic byte to survive.
+
+## Local build notes
+
+After a completed, unsuccessful direct local foreground Cargo command, Rook can
+append advisory passages from documentation already kept under `rust errors` or
+a related topic. It recognizes at most two plain `error[Edddd]:` codes in the
+first 256 lines of an admitted visible-output prefix of at most 64 KiB. ANSI
+colored and JSON diagnostics are not parsed. There is no extra model call or
+network request. A citation describes the kept topic and version; it does not
+establish the cause of the failure, identify a dependency, or certify a fix.
+
+Timeouts, uncertain execution, live descendants, wrappers, background commands,
+editor terminals and remote execution do not get these notes. Display
+condensation can retain an observed diagnostic without making the original
+capture complete. The diagnostic prefix excludes later receipts and hook prose.
+Notes are added after cycle/progress comparison, and do not count as progress.
+Each code is considered once per turn, with at most sixteen remembered codes;
+a cache miss is silent. Notes are limited to 6,000 bytes.
+
+`docs` also accepts `local_only: true`: it exits on a cache miss before source
+configuration or approval, and rejects combination with `refresh`. Existing
+domain-policy tool restrictions still apply. Explicit versions cannot reuse a
+different version, including on a neighboring topic. The normal fetching mode
+continues to work as before.
+
+Local-only reads prefer an exact reference, admit at most 128 documentation
+reference rows with one lookahead and admit at most eight neighboring sets. Names are limited to
+512 bytes and reference values must be 32-byte object ids. Each set admits at
+most 512 KiB encoded and decoded, before copying or decompression; an external
+payload read permits one refusal byte. These are at most 4 MiB of each admitted
+payload representation across neighbor candidates. Sets permit 32 pages, topic
+and version fields of 128 bytes, URLs of 2,048 bytes and titles of 512 bytes.
+Queries admit 2,048 bytes. The response is limited to 16 KiB. Oversized, invalid
+or omitted entries produce an incomplete-coverage notice. These are bounded
+reader and presentation contracts, not a whole-process memory or latency bound.
+
+The design follows Haico's `src/tools/build_notes.rs` at the same pinned source
+above, independently implemented against Rook's process receipts and kept docs.

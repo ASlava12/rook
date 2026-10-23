@@ -513,7 +513,10 @@ impl<'a> AgentLoop<'a> {
 
         if call.name == DOCS {
             let text = self.documentation(&call.arguments).await;
-            let failed = text.starts_with("could not") || text.starts_with("no ");
+            let failed = text.starts_with("could not")
+                || text.starts_with("no ")
+                || text.starts_with("local_only ")
+                || text.starts_with("local-only documentation could not");
             let kind = match failed {
                 true => EventKind::Error,
                 false => EventKind::ToolResult,
@@ -817,10 +820,15 @@ impl<'a> AgentLoop<'a> {
             self.tools.get(&call.name).and_then(|tool| tool.mcp_source(&call.arguments)),
             &self.vault,
         );
+        // Cycle/progress identity above sees only the typed command result.
+        // Advisory prose cannot make a repeated failure count as new progress.
+        let build_notes =
+            if call.name == "run_command" { self.local_build_notes(&outcome) } else { String::new() };
         let mut text = match self.after_tool(call, &outcome).await {
             Some(extra) => format!("{}\n\n{extra}", outcome.content),
             None => outcome.content,
         };
+        text.push_str(&build_notes);
         if let Some(note) = unprotected {
             text.push_str(&format!("\n\n{note}"));
         }
@@ -1017,6 +1025,40 @@ impl<'a> AgentLoop<'a> {
         let question = args.get("question").and_then(|q| q.as_str()).unwrap_or_default().trim();
         let refresh = args.get("refresh").and_then(|r| r.as_bool()).unwrap_or(false);
         let page = args.get("page").and_then(|p| p.as_u64()).map(|p| p as usize);
+
+        if args.get("local_only").is_some_and(|v| !v.is_boolean()) {
+            return "local_only must be a boolean; no documentation was fetched.".into();
+        }
+        if args.get("local_only").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if refresh {
+                return "local_only and refresh cannot be combined; no lookup or network request was made."
+                    .into();
+            }
+            return match self.rook.docs_local(topic, requested_version, question) {
+                Ok(found) => {
+                    let mut preamble = "local-only documentation. No network request was made.\n".to_string();
+                    if found.incomplete {
+                        preamble.push_str("Local coverage is incomplete: some cached entries were oversized, invalid or beyond the lookup limits.\n");
+                    }
+                    let text = match found.set {
+                        Some(set) => match page {
+                            Some(page) => format!("{preamble}{}", whole_page(&set, page)),
+                            None => answer_from(&set, question, preamble),
+                        },
+                        None => format!(
+                            "{preamble}No matching admitted local documentation for {topic:?} ({version})."
+                        ),
+                    };
+                    crate::docs::limited_reply(&text, 16 * 1024)
+                }
+                Err(error) => crate::docs::limited_reply(
+                    &format!(
+                        "local-only documentation could not be read: {error}. No network request was made."
+                    ),
+                    16 * 1024,
+                ),
+            };
+        }
 
         let kept = match self.rook.docs(topic, Some(version)) {
             Ok(kept) => kept,

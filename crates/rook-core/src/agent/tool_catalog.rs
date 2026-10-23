@@ -155,17 +155,16 @@ impl<'a> AgentLoop<'a> {
         }
         push(ToolSpec {
             name: DOCS.into(),
-            description:
-                "Read local docs; fetch missing ones. Consult before explaining APIs; results cite pages."
-                    .into(),
+            description: "Local docs; optional fetch.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "topic": { "type": "string", "description": "redis, tokio, the http spec" },
+                    "topic": { "type": "string", "description": "Technology" },
                     "version": { "type": "string", "description": "omit for the current one" },
-                    "question": { "type": "string", "description": "Question for passage selection." },
+                    "question": { "type": "string", "description": "Select passages." },
                     "page": { "type": "integer", "description": "Read a numbered result page." },
-                    "refresh": { "type": "boolean", "description": "Refetch." }
+                    "refresh": { "type": "boolean", "description": "Refetch." },
+                    "local_only": { "type": "boolean", "description": "Never fetch." }
                 },
                 "required": ["topic"]
             }),

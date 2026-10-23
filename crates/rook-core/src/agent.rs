@@ -26,6 +26,7 @@
 mod acp;
 mod acp_tools;
 mod budget;
+mod build_notes;
 mod capabilities;
 mod checker_history;
 mod checks;
@@ -570,6 +571,7 @@ pub struct AgentLoop<'a> {
     /// Delivery must remain bounded and must not wait while an engine lock is held.
     pub observer: Option<std::sync::Arc<dyn observe::Observer>>,
     launched_job: std::sync::Mutex<Option<String>>,
+    build_note_errors: std::sync::Mutex<std::collections::BTreeSet<String>>,
     tool_execution_uncertain: std::sync::atomic::AtomicBool,
     tool_cycles: std::sync::Mutex<Option<tool_cycles::Guard>>,
     tool_cycle_outcome: std::sync::Mutex<Option<[u8; 32]>>,
@@ -784,6 +786,7 @@ impl<'a> AgentLoop<'a> {
             submission_key: None,
             observer: None,
             launched_job: Default::default(),
+            build_note_errors: Default::default(),
             tool_execution_uncertain: Default::default(),
             tool_cycles: Default::default(),
             tool_cycle_outcome: Default::default(),
@@ -1039,6 +1042,7 @@ impl<'a> AgentLoop<'a> {
         prompt: &str,
         mut on_progress: F,
     ) -> Result<TurnOutcome> {
+        self.build_note_errors.get_mut().unwrap_or_else(|e| e.into_inner()).clear();
         // Capture the admitted pair, never a newer queued selection. Frontend
         // defaults cannot overwrite an effort committed with this root model.
         if self.depth == 0

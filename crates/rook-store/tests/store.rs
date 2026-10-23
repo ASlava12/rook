@@ -1,6 +1,51 @@
 use rook_store::{EventKind, Kind, NewEvent, ObjectId, SessionMeta, Store};
 
 #[test]
+fn bounded_objects_admit_raw_and_encoded_sizes_independently() {
+    let (_dir, store) = tmp_store();
+    for bytes in [b"small inline".to_vec(), vec![b'x'; 600_000], noise(200_000, 7)] {
+        let id = store.put(Kind::Docs, &bytes).unwrap();
+        let meta = store.stat_object(&id).unwrap().unwrap();
+        assert_eq!(store.get_limited(&id, bytes.len(), meta.size_stored as usize).unwrap(), bytes);
+        assert!(
+            store
+                .get_limited(&id, bytes.len() - 1, meta.size_stored as usize)
+                .unwrap_err()
+                .to_string()
+                .contains("bounded raw/encoded")
+        );
+        assert!(
+            store
+                .get_limited(&id, bytes.len(), meta.size_stored as usize - 1)
+                .unwrap_err()
+                .to_string()
+                .contains("bounded raw/encoded")
+        );
+        assert_eq!(store.get(&id).unwrap(), bytes, "ordinary reads preserve admitted objects");
+    }
+}
+
+#[test]
+fn bounded_reference_windows_seek_prefix_and_count_refused_rows() {
+    let (_dir, store) = tmp_store();
+    let id = store.put(Kind::Docs, b"owned").unwrap();
+    for name in ["aaa/unrelated", "zzz/unrelated", "docs/a", "docs/b", "docs/c"] {
+        store.set_ref(name, &id).unwrap();
+    }
+    let window = store.list_refs_limited("docs/", 2, 64).unwrap();
+    assert_eq!(window.refs.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["docs/a", "docs/b"]);
+    assert!(window.incomplete);
+    assert!(!store.list_refs_limited("docs/", 3, 64).unwrap().incomplete);
+    assert!(store.list_refs_limited("docs/", 0, 64).unwrap().incomplete);
+    assert!(store.list_refs_limited("missing/", 0, 64).unwrap().refs.is_empty());
+    let long = format!("docs/{}", "d".repeat(4096));
+    store.set_ref(&long, &id).unwrap();
+    let window = store.list_refs_limited("docs/", 4, 64).unwrap();
+    assert_eq!(window.refs.len(), 3);
+    assert!(window.incomplete);
+}
+
+#[test]
 fn forward_ranges_exclude_oversized_metadata_outside_both_frozen_bounds() {
     let (_dir, store) = tmp_store();
     let id = rook_store::new_session_id();
