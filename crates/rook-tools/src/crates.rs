@@ -36,13 +36,12 @@ impl Tool for CrateApi {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "crate_api".into(),
-            description: "Read a locked Rust package's local public API. Select version when ambiguous."
-                .into(),
+            description: "Read a locked Rust package's local API; select version if ambiguous.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "crate": { "type": "string", "description": "package name in Cargo.lock" },
-                    "version": { "type": "string", "description": "exact locked version, if ambiguous" },
+                    "version": { "type": "string", "description": "exact locked version" },
                     "entity": {
                         "type": "string",
                         "description": "a type or trait; its methods come with it"
