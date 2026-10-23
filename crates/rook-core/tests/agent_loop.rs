@@ -809,6 +809,56 @@ async fn a_search_with_no_sources_configured_says_that_rather_than_no_match() {
 }
 
 #[tokio::test]
+async fn skill_source_failures_reach_actual_model_context_without_leaking_known_secrets() {
+    for with_match in [true, false] {
+        let mut f = fixture();
+        let source = tempfile::tempdir().unwrap();
+        let secret =
+            format!("owned-skill-source-credential{}", "x".repeat(if with_match { 0 } else { 1200 }));
+        let missing = source.path().join(&secret);
+        let mut sources = vec![missing.display().to_string()];
+        if with_match {
+            let skill = source.path().join("owned-skill");
+            std::fs::create_dir(&skill).unwrap();
+            std::fs::write(
+                skill.join("SKILL.md"),
+                "---\nname: owned-skill\ndescription: Owned source diagnostic fixture.\n---\nbody\n",
+            )
+            .unwrap();
+            sources.push(source.path().display().to_string());
+        }
+        f.rook.config = Config { skill_sources: sources, ..Default::default() };
+        let session = f.rook.start_session("skill source diagnostics").unwrap();
+        let provider = ScriptedProvider::new(vec![
+            call("find_skill", serde_json::json!({"query":"owned"})),
+            reply("The search is incomplete."),
+        ]);
+        let seen = provider.share();
+        let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), session);
+        agent.hide_connection_secret(&secret);
+        agent.run("look for an owned skill").await.unwrap();
+        let said = f
+            .rook
+            .transcript(session, 0, 100, 4096)
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.label == "find_skill" && entry.kind != "tool-call")
+            .expect("the actual search result was saved");
+        assert!(said.body.contains("Search incomplete"));
+        assert!(!said.body.contains("no source offers"));
+        assert!(said.body.contains("${secret}") && !said.body.contains(&secret), "{}", said.body);
+        assert_eq!(said.body.contains("- owned-skill:"), with_match);
+        let requests = seen.lock().unwrap();
+        assert!(requests.len() >= 2);
+        assert!(requests.iter().all(|r| !serde_json::to_string(&r.messages).unwrap().contains(&secret)));
+        assert!(!said.body.contains(&"x".repeat(32)), "no truncated credential fragments in diagnostics");
+        assert!(requests.iter().any(|r| {
+            r.messages.iter().any(|m| m.role == Role::Tool && m.content.contains("Search incomplete"))
+        }));
+    }
+}
+
+#[tokio::test]
 async fn a_plain_turn_is_logged_end_to_end() {
     let f = fixture();
     let session = f.rook.start_session("test").unwrap();

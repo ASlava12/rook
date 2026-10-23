@@ -331,6 +331,7 @@ installed, and `skills install` says so and prints the path.
 ```sh
 rook skills sources                 # where it looks
 rook skills search pdf              # what those places offer
+rook skills search pdf --json --diagnostics  # results and source failures
 rook skills install pdf             # the whole directory, scripts included
 rook skills update                  # bring the installed ones up to what the source offers
 ```
@@ -342,6 +343,22 @@ write, because it puts instructions on the machine that later sessions follow.
 
 A source needs no index and no API — its skills are read from the `SKILL.md`
 files in it, which is the format everything here already speaks.
+
+`skills search --json` returns the existing array of matches. Add `--diagnostics`
+to receive an object with `items` and `errors`, including an empty error array
+when every source could be read. A failed source can leave partial matches or
+an empty list; its error distinguishes that incomplete search from a successful
+search with no matches. This option requires `--json` and works through the
+daemon as well as directly. Source failures keep the existing successful exit
+status for a completed search; use the `errors` field to check completeness.
+
+The model's `find_skill` result also retains source failures alongside partial
+matches. It reports an incomplete search when no matches could be found while
+some sources were unreadable. At most four diagnostic previews are included,
+each keeping the beginning and end within a 512-byte content budget plus an
+omission marker; additional error counts are reported. Known secrets are masked
+before previews are shortened and before results enter saved history or
+subsequent model requests.
 
 **Updating them without losing what you changed.** `skills update` refreshes
 only what came from a source, and only where nothing here has touched it since.

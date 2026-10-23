@@ -98,7 +98,7 @@ pub(crate) fn cmd_skills(source: &Source, cmd: SkillCmd, workspace: &Path, json:
         }
         return Ok(());
     }
-    if let SkillCmd::Search { query, refresh } = &cmd {
+    if let SkillCmd::Search { query, refresh, diagnostics } = &cmd {
         let (offered, errors) = source.skills_offered(query, *refresh)?;
         {
             if json {
@@ -110,7 +110,12 @@ pub(crate) fn cmd_skills(source: &Source, cmd: SkillCmd, workspace: &Path, json:
                         })
                     })
                     .collect();
-                println!("{}", serde_json::to_string_pretty(&items)?);
+                let result = if *diagnostics {
+                    serde_json::json!({ "items": items, "errors": errors })
+                } else {
+                    serde_json::json!(items)
+                };
+                println!("{}", serde_json::to_string_pretty(&result)?);
                 return Ok(());
             }
             let installed: Vec<String> = source.catalog(workspace)?.iter().map(|c| c.name.clone()).collect();
@@ -124,7 +129,11 @@ pub(crate) fn cmd_skills(source: &Source, cmd: SkillCmd, workspace: &Path, json:
                     ]
                 })
                 .collect();
-            if rows.is_empty() {
+            if rows.is_empty() && !errors.is_empty() {
+                println!(
+                    "no matches found for {query:?}; search incomplete because some sources could not be read"
+                );
+            } else if rows.is_empty() {
                 println!("nothing offered matches {query:?} — `rook skills sources` lists where it looked");
             } else {
                 print!("{}", fmt::table(&["name", "", "description"], &rows));
