@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "articles": [
+    {
+      "id": "ownership",
+      "article": "docs/examples/ownership.md",
+      "manifest": "docs/examples/packages/ownership/Cargo.toml",
+      "lock": "docs/examples/packages/ownership/Cargo.lock",
+      "blocks": 6
+    },
+    {
+      "id": "serde-json",
+      "article": "docs/examples/serde-json.md",
+      "manifest": "docs/examples/packages/serde-json/Cargo.toml",
+      "lock": "docs/examples/packages/serde-json/Cargo.lock",
+      "blocks": 3
+    }
+  ]
+}

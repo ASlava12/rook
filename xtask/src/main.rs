@@ -4,6 +4,7 @@
 //! four-platform target list.
 
 mod bench;
+mod doc_examples;
 mod smoke;
 
 use std::process::{Command, ExitCode};
@@ -90,6 +91,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Task {
+    /// Compile explicitly indexed maintained Rust examples; --run opts into execution.
+    CheckDocs(doc_examples::Options),
     /// fmt + clippy + frontend builds + test, the same gate CI runs.
     Ci,
     /// Print the supported target matrix.
@@ -278,6 +281,7 @@ fn main() -> ExitCode {
 
 fn run() -> Result<()> {
     match Cli::parse().task {
+        Task::CheckDocs(options) => doc_examples::run(options),
         Task::Ci => ci(),
         Task::Targets => {
             println!("{:<32} {:<16} ci", "target", "platform");

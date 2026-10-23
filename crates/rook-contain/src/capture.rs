@@ -71,6 +71,42 @@ pub fn probed_within(command: &mut Command, patience: Duration) -> io::Result<Op
 /// Darwin group cleanup can additionally spend its existing five-second grace.
 /// Job attachment and detached descendants retain [`crate::Group`]'s limits.
 pub fn captured_within(command: &mut Command, patience: Duration, maximum: usize) -> io::Result<Output> {
+    capture(command, patience, maximum, false).map(|result| result.output)
+}
+
+/// A completed capture and the separate facts observed after requesting cleanup.
+#[derive(Debug)]
+pub struct CapturedCommand {
+    pub output: Output,
+    /// Whether the platform accepted the owned-group cleanup signal.
+    pub cleanup_signalled: bool,
+    /// The immediate answer from [`crate::Group::alive`], including its platform
+    /// limits. A terminating group can still be present; unknown is not stopped.
+    pub observed_group_alive: Option<bool>,
+}
+
+/// Capture under the same exit/EOF deadline and byte ceiling as
+/// [`captured_within`], requesting group cleanup as soon as the parent exits.
+///
+/// A checked example can finish while leaving a child or inherited pipe handle.
+/// Cleanup happens while the remaining pipe bytes drain, before awaiting EOF.
+/// The observed command result stays separate from group cleanup facts. This
+/// does not certify the absence of detached processes; [`crate::Group`]'s
+/// ownership limits and Darwin's existing cleanup grace still apply.
+pub fn captured_with_cleanup(
+    command: &mut Command,
+    patience: Duration,
+    maximum: usize,
+) -> io::Result<CapturedCommand> {
+    capture(command, patience, maximum, true)
+}
+
+fn capture(
+    command: &mut Command,
+    patience: Duration,
+    maximum: usize,
+    cleanup: bool,
+) -> io::Result<CapturedCommand> {
     let mut owned = Owned::start(command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()))?;
     let deadline = Instant::now().checked_add(patience).ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "probe patience exceeds the monotonic clock")
@@ -80,6 +116,7 @@ pub fn captured_within(command: &mut Command, patience: Duration, maximum: usize
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let (mut out_eof, mut err_eof) = (false, false);
     let mut status = None;
+    let mut cleanup_signalled = false;
     loop {
         if Instant::now() >= deadline {
             return Err(io::Error::new(io::ErrorKind::TimedOut, "probe exit or output exceeded patience"));
@@ -93,10 +130,18 @@ pub fn captured_within(command: &mut Command, patience: Duration, maximum: usize
         }
         if status.is_none() {
             status = owned.child.try_wait()?;
+            if cleanup && status.is_some() {
+                cleanup_signalled = owned.group.end();
+            }
         }
         if let Some(status) = status.filter(|_| out_eof && err_eof) {
+            let observed_group_alive = if cleanup { owned.group.alive() } else { None };
             owned.finished = true;
-            return Ok(Output { status, stdout: out, stderr: err });
+            return Ok(CapturedCommand {
+                output: Output { status, stdout: out, stderr: err },
+                cleanup_signalled,
+                observed_group_alive,
+            });
         }
         if !progressed {
             std::thread::sleep(
@@ -306,6 +351,15 @@ mod tests {
 
     #[test]
     fn a_successful_status_probe_retires_its_owned_descendant_connection() {
+        assert_descendant_connection_retires(false);
+    }
+
+    #[test]
+    fn a_successful_capture_retires_its_owned_descendant_connection() {
+        assert_descendant_connection_retires(true);
+    }
+
+    fn assert_descendant_connection_retires(capture: bool) {
         let directory = tempfile::tempdir().unwrap();
         let marker = directory.path().join("connected");
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -347,7 +401,13 @@ mod tests {
         parent
             .env("ROOK_OWNED_CAPTURE_MARKER", &marker)
             .env("ROOK_OWNED_CAPTURE_ENDPOINT", address.to_string());
-        assert!(probed_within(&mut parent, Duration::from_secs(15)).unwrap().unwrap().success());
+        if capture {
+            let result = captured_with_cleanup(&mut parent, Duration::from_secs(15), 4096).unwrap();
+            assert!(result.output.status.success());
+            assert!(result.cleanup_signalled, "the descendant must receive the cleanup request");
+        } else {
+            assert!(probed_within(&mut parent, Duration::from_secs(15)).unwrap().unwrap().success());
+        }
         assert!(marker.is_file(), "a real descendant held the connection before its parent exited");
         let (retired, detail) = received.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(retired, "owned connection did not report retirement: {detail}");
@@ -360,6 +420,16 @@ mod tests {
         assert!(output.status.success());
         assert!(String::from_utf8_lossy(&output.stdout).contains("owned version 99.0.1; stdin EOF"));
         assert!(String::from_utf8_lossy(&output.stderr).contains("owned stderr"));
+    }
+
+    #[test]
+    fn capture_cleanup_does_not_replace_exit_or_stream_facts() {
+        let result = captured_with_cleanup(&mut command("normal"), Duration::from_secs(15), 4096).unwrap();
+        assert!(result.output.status.success());
+        assert!(String::from_utf8_lossy(&result.output.stdout).contains("stdin EOF"));
+        assert!(String::from_utf8_lossy(&result.output.stderr).contains("owned stderr"));
+        let refused = captured_with_cleanup(&mut command("refused"), Duration::from_secs(15), 4096).unwrap();
+        assert_eq!(refused.output.status.code(), Some(7));
     }
 
     #[test]

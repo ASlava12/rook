@@ -13,7 +13,7 @@
 //! on the machine. The result of every command says so.
 
 mod capture;
-pub use capture::{captured_within, probed_within};
+pub use capture::{CapturedCommand, captured_with_cleanup, captured_within, probed_within};
 
 #[cfg(target_os = "macos")]
 mod process;

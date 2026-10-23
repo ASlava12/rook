@@ -1,0 +1,12 @@
+[package]
+name = "rook_docs_ownership"
+version = "0.0.0"
+edition = "2024"
+publish = false
+build = false
+autolib = false
+autobins = false
+autotests = false
+autobenches = false
+
+[workspace]

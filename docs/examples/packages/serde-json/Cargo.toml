@@ -1,0 +1,15 @@
+[package]
+name = "rook_docs_serde_json"
+version = "0.0.0"
+edition = "2024"
+publish = false
+build = false
+autolib = false
+autobins = false
+autotests = false
+autobenches = false
+
+[workspace]
+
+[dependencies]
+serde_json = "=1.0.151"
