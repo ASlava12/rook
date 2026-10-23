@@ -187,6 +187,16 @@ link refusal, ambiguity
 refusal, explicit version selection, wrong-cache exclusion, normal model/tool
 completion and unchanged workspace/cache trees and binary bytes.
 
+When local documentation or automatic build notes change, run
+`xtask/probes/local-build-notes/run.py` on the extracted host pair and require
+all fifteen flags. Both ordinary CLI and daemon chat must retain cited,
+deduplicated advice, exact requested-version refusal, local hit/miss/refresh
+behavior, oversized-set omission, bounded model requests and unchanged binary,
+workspace and documentation-object bytes. The helper only seeds/verifies private
+cache data; all source URLs and search endpoints point at the owned loopback
+server. It emits controlled compiler-shaped output and does not measure model
+quality or replace the real Cargo regression test.
+
 After the source gates and downloaded-draft checks pass, publish that same
 draft, without rebuilding or replacing its tested archives:
 

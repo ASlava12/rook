@@ -91,3 +91,20 @@ reader and presentation contracts, not a whole-process memory or latency bound.
 
 The design follows Haico's `src/tools/build_notes.rs` at the same pinned source
 above, independently implemented against Rook's process receipts and kept docs.
+
+The frontend contract can be exercised against a downloaded or development pair:
+
+```sh
+python3 xtask/probes/local-build-notes/run.py --bin-dir /path/to/bin \
+  --tmp-root /owned/short/tmp --build-target /owned/helper-target \
+  --output /owned/local-build-notes.json
+```
+
+It seeds three private documentation objects through a helper using the locked
+store dependency, then drives both normal CLI and daemon WebSocket sessions.
+All fifteen flags must pass. Its two Cargo invocations use an owned
+compiler-shaped executable; the separate registered regression invokes real
+Cargo. The same final fixture fails eleven feature conditions on published
+0.21.14, with four request/exit/identity controls passing. Baseline refreshes
+reach only the owned loopback server, never an external source. No model-quality
+improvement is inferred from this differential.

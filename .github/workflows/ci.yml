@@ -93,6 +93,11 @@ jobs:
       - name: locked crate API identity
         shell: bash
         run: python3 xtask/probes/crate-identity/run.py --bin-dir target/debug --tmp-root "$RUNNER_TEMP" --output "$RUNNER_TEMP/rook-crate-identity.json"
+      - name: local documentation and build notes
+        shell: bash
+        run: |
+          rustfmt --edition 2024 --check xtask/probes/local-build-notes/seed.rs
+          python3 xtask/probes/local-build-notes/run.py --bin-dir target/debug --build-target target --tmp-root "$RUNNER_TEMP" --output "$RUNNER_TEMP/rook-local-build-notes.json"
       - name: bounded environment probes
         shell: bash
         run: python3 xtask/probes/environment-startup/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-environment-probes.json"
