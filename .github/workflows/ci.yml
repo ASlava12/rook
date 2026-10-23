@@ -138,6 +138,17 @@ jobs:
           name: skill-search-diagnostics-${{ matrix.os }}
           path: ${{ runner.temp }}/rook-skill-search-diagnostics.json
           if-no-files-found: error
+      - name: Z.ai balance and temporary rate refusals
+        shell: bash
+        timeout-minutes: 3
+        run: python3 xtask/probes/zai-balance/run.py --bin-dir target/debug --tmp-root "$RUNNER_TEMP" --output "$RUNNER_TEMP/rook-zai-balance.json"
+      - name: Z.ai balance receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zai-balance-${{ matrix.os }}
+          path: ${{ runner.temp }}/rook-zai-balance.json
+          if-no-files-found: error
       - name: macOS process-group lifecycle
         if: matrix.os == 'macos-latest'
         run: cargo test --locked -p rook-contain process::tests -- --nocapture
