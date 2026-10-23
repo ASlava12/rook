@@ -80,7 +80,7 @@ class Server(socketserver.ThreadingTCPServer):
 server=Server(('127.0.0.1',0),Events)
 threading.Thread(target=server.serve_forever,daemon=True).start()
 
-def invoke(command,env,cwd,timeout):
+def invoke(command,env,cwd,timeout,record_doctor=False):
     child=subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
         env=env,cwd=cwd,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
     captures={'stdout':bytearray(),'stderr':bytearray()}
@@ -100,6 +100,10 @@ def invoke(command,env,cwd,timeout):
         for reader in readers: reader.join(timeout=10)
         assert not any(reader.is_alive() for reader in readers),'owned capture reader did not retire'
         child.stdout.close();child.stderr.close()
+    if record_doctor:
+        (directory/'doctor.stdout').write_bytes(captures['stdout'])
+        (directory/'doctor.stderr').write_bytes(captures['stderr'])
+        report['doctor_stderr']=bytes(captures['stderr']).decode('utf-8','replace')
     assert code==0 and not overflow.is_set(),(code,bytes(captures['stdout'])[-2048:],bytes(captures['stderr'])[-2048:])
     return bytes(captures['stdout'])
 
@@ -127,10 +131,10 @@ url='http://127.0.0.1:{server.server_address[1]}/v1'
         path=directory/'tools'/(name+suffix)
         shutil.copy2(helper,path);path.chmod(path.stat().st_mode|0o111)
     env=dict(os.environ,ROOK_HOME=str(directory/'home'),ROOK_CONFIG_DIR=str(directory/'home'),
-        ROOK_BUILTIN_SKILLS=str(directory/'empty'),PATH=str(directory/'tools'),ROOK_LOG='error',
+        ROOK_BUILTIN_SKILLS=str(directory/'empty'),PATH=str(directory/'tools'),ROOK_LOG='error,rook_skills::env=debug',
         ROOK_OWNED_CAPTURE_ADDR='127.0.0.1:'+str(server.server_address[1]))
     started=time.monotonic()
-    actual=json.loads(invoke([str(binary),'--workspace',str(workspace),'--json','doctor'],env,workspace,90))
+    actual=json.loads(invoke([str(binary),'--workspace',str(workspace),'--json','doctor'],env,workspace,90,record_doctor=True))
     finished=time.monotonic_ns()
     report.update(status='completed',seconds=time.monotonic()-started,environment=actual,
         helper_sha256=sha(helper),helper_source_sha256=sha(source))

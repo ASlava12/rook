@@ -36,6 +36,11 @@ The holder keeps its socket through the controlled sleep, so EOF/reset provides
 retirement evidence for this owned case. This does not prove universal process
 containment or close the Windows post-spawn job-attachment race. Reports retain
 actual timings, source/helper/binary hashes, physical calls and event order.
+The fixture enables capture-error diagnostics for inventory probes and retains
+the bounded doctor stderr in its report. A rejected version can therefore be
+distinguished from timeout, output-ceiling and operating-system read failures;
+the eight required conditions remain unchanged. The capture unit tests inject
+an interrupted read and require lossless retry under the original shared cap.
 
 Compiler/doctor output is drained with 64 KiB limits per stream and bounded child
 deadlines. Frames, event/error collections and helper sizes are bounded. A fresh

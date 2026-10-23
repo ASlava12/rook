@@ -159,7 +159,14 @@ fn receive<P: Pipe>(
     eof: &mut bool,
 ) -> io::Result<bool> {
     let mut buffer = [0; 4096];
-    let Some(count) = pipe.ready(&mut buffer)? else { return Ok(false) };
+    // A signal can interrupt the ready read as well as its readiness check.
+    // Let the outer loop retry under the original deadline and byte budget.
+    let count = match pipe.ready(&mut buffer) {
+        Ok(Some(count)) => count,
+        Ok(None) => return Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => return Ok(false),
+        Err(error) => return Err(error),
+    };
     if count == 0 {
         *eof = true;
     } else {
@@ -244,6 +251,59 @@ impl<T: Read> Pipe for T {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[cfg(any(unix, windows))]
+    struct InterruptedPipe {
+        interrupted: bool,
+        body: io::Cursor<Vec<u8>>,
+    }
+
+    #[cfg(any(unix, windows))]
+    impl Read for InterruptedPipe {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if !self.interrupted {
+                self.interrupted = true;
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            self.body.read(buffer)
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    impl Pipe for InterruptedPipe {
+        fn ready(&mut self, buffer: &mut [u8]) -> io::Result<Option<usize>> {
+            self.read(buffer).map(Some)
+        }
+    }
+
+    #[test]
+    #[cfg(any(unix, windows))]
+    fn interrupted_pipe_reads_preserve_bytes_and_retry_without_claiming_eof() {
+        let mut pipe = InterruptedPipe { interrupted: false, body: io::Cursor::new(b"abc".to_vec()) };
+        let mut bytes = b"old".to_vec();
+        let mut eof = false;
+        assert!(!receive(&mut pipe, &mut bytes, 2, 8, &mut eof).unwrap());
+        assert_eq!(bytes, b"old");
+        assert!(!eof);
+        assert!(receive(&mut pipe, &mut bytes, 2, 8, &mut eof).unwrap());
+        assert_eq!(bytes, b"oldabc");
+        assert!(!eof);
+        assert!(receive(&mut pipe, &mut bytes, 2, 8, &mut eof).unwrap());
+        assert!(eof);
+    }
+
+    #[test]
+    #[cfg(any(unix, windows))]
+    fn an_interrupted_read_cannot_reset_the_combined_capture_ceiling() {
+        let mut pipe = InterruptedPipe { interrupted: false, body: io::Cursor::new(b"abc".to_vec()) };
+        let mut bytes = b"old".to_vec();
+        let mut eof = false;
+        assert!(!receive(&mut pipe, &mut bytes, 3, 8, &mut eof).unwrap());
+        let error = receive(&mut pipe, &mut bytes, 3, 8, &mut eof).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(bytes, b"old");
+        assert!(!eof);
+    }
 
     fn command(mode: &str) -> Command {
         let mut command = Command::new(std::env::current_exe().unwrap());

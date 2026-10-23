@@ -14,8 +14,14 @@ The limit is checked before bytes enter retained capture, across both stdout
 and stderr together. Version discovery supplies 64 KiB per command.
 
 A timeout, I/O failure or exceeded ceiling rejects the result, including partial
-version text. Other successful inventory entries retain their versions. Failed
-captures request owned-group/direct-child termination and poll direct-child
+version text. Other successful inventory entries retain their versions. Read
+operations interrupted by a signal are retried by the outer capture loop,
+under the original deadline and shared byte ceiling, without claiming EOF or
+discarding bytes already admitted. Other I/O errors remain failures. With
+`ROOK_LOG=error,rook_skills::env=debug`, rejected inventory captures report their
+program, error kind and OS error code without logging banner contents.
+
+Failed captures request owned-group/direct-child termination and poll direct-child
 reaping for at most one additional second. Process creation and platform signal
 calls remain synchronous. Darwin's existing group cleanup may use an additional
 five-second grace; this is not a deadline for the whole application startup.

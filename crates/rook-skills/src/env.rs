@@ -243,7 +243,14 @@ fn ran_within(command: &mut Command, patience: std::time::Duration) -> Option<st
     // reported from a real one as a swarm of them.
     // A completed parent can leave descendants holding either pipe. Keep EOF
     // under the same patience, and reject banners beyond this metadata ceiling.
-    rook_contain::captured_within(command, patience, 64 * 1024).ok()
+    match rook_contain::captured_within(command, patience, 64 * 1024) {
+        Ok(output) => Some(output),
+        Err(error) => {
+            tracing::debug!(program = ?command.get_program(), kind = ?error.kind(),
+                os_code = ?error.raw_os_error(), %error, "version probe capture unavailable");
+            None
+        }
+    }
 }
 
 /// Pull the first `x.y[.z]` looking token out of a `--version` banner.
