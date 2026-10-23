@@ -7568,6 +7568,76 @@ async fn a_topic_with_no_set_of_its_own_answers_from_the_one_beside_it() {
     assert!(handed.contains("nothing is kept for"), "and not passed off as the topic asked for:\n{handed}");
 }
 
+async fn local_doc_version_neighbor_result(version: Option<&str>) -> String {
+    let mut f = fixture();
+    f.rook.config.web.enabled = false;
+    f.rook.keep_docs(&rook_core::docs::DocSet::new(
+        "redis persistence", "6.2", vec![rook_core::docs::Page {
+            url: "https://example.invalid/redis/6.2/persistence".into(),
+            title: "Owned older Redis documentation".into(),
+            text: "AOF logs every write and is replayed at startup, which is how a restart keeps what was written. OWNED_OLDER_DOC_SET.".into(),
+            ..Default::default()
+        }],
+    )).unwrap();
+    let session = f.rook.start_session("owned explicit documentation version").unwrap();
+    let mut arguments = serde_json::json!({"topic":"redis", "question":"how does aof work"});
+    if let Some(version) = version {
+        arguments["version"] = version.into();
+    }
+    let provider =
+        Arc::new(ScriptedProvider::new(vec![call("docs", arguments), reply("OWNED_DOC_LOOKUP_DONE")]));
+    let seen = provider.share();
+    let out = AgentLoop::new(&f.rook, provider, session)
+        .run("Use the requested documentation version")
+        .await
+        .unwrap();
+    assert!(out.tools_called.contains(&"docs".to_string()));
+    let requests = seen.lock().unwrap();
+    requests
+        .last()
+        .unwrap()
+        .messages
+        .iter()
+        .filter(|m| m.role == Role::Tool)
+        .map(|m| m.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[tokio::test]
+async fn local_doc_version_request_does_not_use_another_version_neighbor() {
+    let handed = local_doc_version_neighbor_result(Some("7.4")).await;
+    assert!(
+        !handed.contains("OWNED_OLDER_DOC_SET"),
+        "An explicitly requested version must not use the older neighbor:\n{handed}"
+    );
+    assert!(!handed.contains("docs/redis-persistence/6.2"), "{handed}");
+}
+
+#[tokio::test]
+async fn local_doc_version_matching_neighbor_retains_its_passage_and_sources() {
+    let handed = local_doc_version_neighbor_result(Some("6.2")).await;
+    assert!(
+        handed.contains("OWNED_OLDER_DOC_SET"),
+        "The existing same-version neighbor behavior is a required control:\n{handed}"
+    );
+    assert!(handed.contains("docs/redis-persistence/6.2"), "{handed}");
+    assert!(handed.contains("https://example.invalid/redis/6.2/persistence"), "{handed}");
+}
+
+#[tokio::test]
+async fn local_doc_version_omitted_still_allows_a_truthfully_named_cached_neighbor() {
+    let handed = local_doc_version_neighbor_result(None).await;
+    assert!(
+        handed.contains("OWNED_OLDER_DOC_SET"),
+        "An omitted version retains existing cache reuse:\n{handed}"
+    );
+    assert!(
+        handed.contains("docs/redis-persistence/6.2"),
+        "The actual cached version remains explicit:\n{handed}"
+    );
+}
+
 /// The goal check is shown what the turn did, not only what it left behind.
 ///
 /// It had the workspace as it stands and a list of files, which cannot tell

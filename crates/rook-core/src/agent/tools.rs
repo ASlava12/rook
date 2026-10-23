@@ -1011,12 +1011,9 @@ impl<'a> AgentLoop<'a> {
         if topic.is_empty() {
             return "docs needs a topic: the technology to look up.".into();
         }
-        let version = args
-            .get("version")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .unwrap_or(crate::docs::LATEST);
+        let requested_version =
+            args.get("version").and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty());
+        let version = requested_version.unwrap_or(crate::docs::LATEST);
         let question = args.get("question").and_then(|q| q.as_str()).unwrap_or_default().trim();
         let refresh = args.get("refresh").and_then(|r| r.as_bool()).unwrap_or(false);
         let page = args.get("page").and_then(|p| p.as_u64()).map(|p| p as usize);
@@ -1041,7 +1038,12 @@ impl<'a> AgentLoop<'a> {
         if kept.is_none()
             && !question.is_empty()
             && let Ok(near) = self.rook.docs_like(topic)
-            && let Some(set) = near.into_iter().find(|set| !set.passages(question, 1).is_empty())
+            && let Some(set) = near
+                .into_iter()
+                // A nearby topic is not permission to substitute another
+                // explicitly requested version. Unversioned reuse stays named.
+                .filter(|set| requested_version.is_none_or(|v| set.version.eq_ignore_ascii_case(v)))
+                .find(|set| !set.passages(question, 1).is_empty())
         {
             let preamble = format!(
                 "nothing is kept for {topic:?} itself, and this answers from {}, which is here. \
