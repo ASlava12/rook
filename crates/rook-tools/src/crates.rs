@@ -19,6 +19,7 @@ use serde_json::json;
 use rook_llm::ToolSpec;
 
 use crate::{Result, Tool, ToolContext, ToolOutcome, arg_str};
+mod identity;
 
 /// Signatures per answer. A crate the size of `syn` has thousands, and a list
 /// nobody can read is not an answer.
@@ -35,13 +36,13 @@ impl Tool for CrateApi {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "crate_api".into(),
-            description: "List what a Rust dependency offers, read from the source this project \
-                          resolved to. Use it instead of recalling a signature."
+            description: "Read a locked Rust package's local public API. Select version when ambiguous."
                 .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "crate": { "type": "string", "description": "as named in Cargo.toml" },
+                    "crate": { "type": "string", "description": "package name in Cargo.lock" },
+                    "version": { "type": "string", "description": "exact locked version, if ambiguous" },
                     "entity": {
                         "type": "string",
                         "description": "a type or trait; its methods come with it"
@@ -54,106 +55,104 @@ impl Tool for CrateApi {
 
     async fn call(&self, ctx: &ToolContext, args: &serde_json::Value) -> Result<ToolOutcome> {
         let wanted = arg_str(args, self.name(), "crate")?;
+        let version = match args.get("version") {
+            None => None,
+            Some(serde_json::Value::String(value)) if !value.trim().is_empty() => Some(value.trim()),
+            Some(_) => return Ok(ToolOutcome::error("version must be a nonempty exact locked version")),
+        };
         let entity = args.get("entity").and_then(|e| e.as_str()).map(str::trim).filter(|e| !e.is_empty());
 
-        let Some(version) = resolved(&ctx.workspace, &wanted) else {
-            return Ok(ToolOutcome::error(format!(
-                "{wanted:?} is not in this project's Cargo.lock — check the name, or add it first"
-            )));
+        let selected = match identity::resolve(&ctx.workspace, &wanted, version) {
+            Ok(selected) => selected,
+            Err(error) => return Ok(ToolOutcome::error(error)),
         };
-        let Some(source) = unpacked(&wanted, &version) else {
-            return Ok(ToolOutcome::error(format!(
-                "{wanted} {version} is not unpacked in the cargo registry — `cargo fetch` puts it \
-                 there. A path or git dependency is not there at all."
-            )));
+        let version = selected.version;
+        let source = match identity::unpacked(&wanted, &version, &selected.checksum) {
+            Ok(source) => source,
+            Err(error) => return Ok(ToolOutcome::error(error)),
         };
 
         let mut found = Vec::new();
-        collect(&source, entity, &mut found);
-        if found.is_empty() {
-            let what = entity.map(|e| format!("{e} in ")).unwrap_or_default();
-            return Ok(ToolOutcome::ok(format!("nothing public found for {what}{wanted} {version}")));
-        }
+        let incomplete = collect(&source, entity, &mut found);
 
         let full = found.len();
         found.truncate(MOST_ITEMS);
         let mut body = format!("{wanted} {version}\n{}\n\n{}", source.display(), found.join("\n"));
+        if found.is_empty() {
+            body.push_str("No public items found in the admitted source.");
+        }
         if full > MOST_ITEMS {
-            body.push_str(&format!("\n\n[{} more; narrow it with `entity`]", full - MOST_ITEMS));
+            body.push_str("\n\n[More items may exist; narrow with `entity`]");
+        }
+        if incomplete {
+            body.push_str("\n\n[Source scan incomplete: a read, traversal or output limit was reached]");
         }
         Ok(ToolOutcome {
             images: Vec::new(),
+            full_bytes: body.len(),
             content: body,
             is_error: false,
-            truncated: full > MOST_ITEMS,
-            full_bytes: 0,
+            truncated: full > MOST_ITEMS || incomplete,
             meta: Default::default(),
         }
         .with("version", version)
+        .with("package_checksum", selected.checksum)
+        .with("scan_incomplete", incomplete)
         .with("items", full))
     }
 }
 
-/// The version this project resolved to, from the nearest `Cargo.lock`.
-///
-/// The lock rather than the manifest: the manifest says `1`, and what is on disk
-/// is `1.0.229`. Walked upward because a crate in a workspace has its own
-/// manifest and the workspace's lock.
-fn resolved(from: &Path, wanted: &str) -> Option<String> {
-    let mut here = Some(from);
-    while let Some(dir) = here {
-        if let Ok(lock) = std::fs::read_to_string(dir.join("Cargo.lock"))
-            && let Some(version) = version_in(&lock, wanted)
-        {
-            return Some(version);
-        }
-        here = dir.parent();
-    }
-    None
-}
-
-fn version_in(lock: &str, wanted: &str) -> Option<String> {
-    let mut named = false;
-    for line in lock.lines().map(str::trim) {
-        if let Some(name) = line.strip_prefix("name = ") {
-            named = name.trim_matches('"') == wanted;
-        } else if named && let Some(version) = line.strip_prefix("version = ") {
-            return Some(version.trim_matches('"').to_string());
-        }
-    }
-    None
-}
-
-/// Where cargo put the source. Registries are named by a hash, so the directory
-/// is searched rather than computed.
-fn unpacked(name: &str, version: &str) -> Option<PathBuf> {
-    let home = std::env::var("CARGO_HOME").map(PathBuf::from).unwrap_or_else(|_| {
-        let user = ["HOME", "USERPROFILE"]
-            .into_iter()
-            .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
-            .unwrap_or_default();
-        PathBuf::from(user).join(".cargo")
-    });
-    let wanted = format!("{name}-{version}");
-    std::fs::read_dir(home.join("registry").join("src"))
-        .ok()?
-        .flatten()
-        .map(|registry| registry.path().join(&wanted))
-        .find(|candidate| candidate.is_dir())
-}
-
 /// Public signatures, in file order, with the `impl` they belong to.
-fn collect(source: &Path, entity: Option<&str>, out: &mut Vec<String>) {
-    let mut files: Vec<PathBuf> = ignore::WalkBuilder::new(source.join("src"))
-        .build()
-        .flatten()
-        .map(|e| e.into_path())
-        .filter(|p| p.extension().is_some_and(|e| e == "rs"))
-        .collect();
+fn collect(source: &Path, entity: Option<&str>, out: &mut Vec<String>) -> bool {
+    let mut incomplete = false;
+    let mut files: Vec<PathBuf> = Vec::new();
+    for (index, entry) in ignore::WalkBuilder::new(source.join("src")).max_depth(Some(16)).build().enumerate()
+    {
+        if index == 4096 {
+            incomplete = true;
+            break;
+        }
+        let Ok(entry) = entry else {
+            incomplete = true;
+            continue;
+        };
+        if entry.depth() == 16 && entry.file_type().is_some_and(|t| t.is_dir()) {
+            incomplete = true;
+        }
+        if !entry.path().extension().is_some_and(|e| e == "rs") {
+            continue;
+        }
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            incomplete = true;
+            continue;
+        }
+        if files.len() == 512 {
+            incomplete = true;
+            break;
+        }
+        files.push(entry.into_path());
+    }
     files.sort();
-
+    let mut remaining = 8 * 1024 * 1024usize;
+    let mut output_bytes = 0usize;
     for file in files {
-        let Ok(text) = std::fs::read_to_string(&file) else { continue };
+        if remaining <= 1 {
+            return true;
+        }
+        let maximum = (256 * 1024).min(remaining - 1);
+        let bytes = match identity::limited(&file, maximum) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                remaining = remaining.saturating_sub(maximum + 1);
+                incomplete = true;
+                continue;
+            }
+        };
+        remaining -= bytes.len();
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            incomplete = true;
+            continue;
+        };
         let mut within: Option<String> = None;
         for line in text.lines() {
             let trimmed = line.trim();
@@ -171,10 +170,18 @@ fn collect(source: &Path, entity: Option<&str>, out: &mut Vec<String>) {
                 None => signature,
             };
             if entity.is_none_or(|e| named.contains(e)) {
+                if named.len() > 4096 || output_bytes + named.len() > 256 * 1024 {
+                    return true;
+                }
+                output_bytes += named.len();
                 out.push(named);
+                if out.len() > MOST_ITEMS {
+                    return incomplete;
+                }
             }
         }
     }
+    incomplete
 }
 
 /// The type an `impl` block is for: `impl<T> Trait for Foo<T>` is about `Foo`.

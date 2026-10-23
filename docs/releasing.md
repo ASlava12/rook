@@ -172,6 +172,12 @@ same-version force update, exact resumed/restarted payloads, bounded attempts,
 refused invalid ranges/digests, complete installation-tree preservation on
 refusal and retained previous files. The provided pair must remain unchanged.
 
+When local crate API selection changes, run the
+[owned crate identity fixture](../xtask/probes/crate-identity/README.md) against
+the extracted host CLI/daemon pair. Require all ten flags, including ambiguity
+refusal, explicit version selection, wrong-cache exclusion, normal model/tool
+completion and unchanged workspace/cache trees and binary bytes.
+
 After the source gates and downloaded-draft checks pass, publish that same
 draft, without rebuilding or replacing its tested archives:
 

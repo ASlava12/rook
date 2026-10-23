@@ -85,6 +85,9 @@ jobs:
       - name: release asset body recovery
         shell: bash
         run: python3 xtask/probes/asset-download-recovery/run.py --bin-dir target/debug --tmp-root "$RUNNER_TEMP" --output "$RUNNER_TEMP/rook-asset-download-recovery.json"
+      - name: locked crate API identity
+        shell: bash
+        run: python3 xtask/probes/crate-identity/run.py --bin-dir target/debug --tmp-root "$RUNNER_TEMP" --output "$RUNNER_TEMP/rook-crate-identity.json"
       - name: bounded environment probes
         shell: bash
         run: python3 xtask/probes/environment-startup/run.py --bin-dir target/debug --output "$RUNNER_TEMP/rook-environment-probes.json"

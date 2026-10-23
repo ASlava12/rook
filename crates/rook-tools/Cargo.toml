@@ -27,6 +27,7 @@ serde_json = "1.0.151"
 sha2 = "0.10.9"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["net", "rt", "process", "fs", "io-util", "time", "macros", "sync"] }
+toml = "1.1.4"
 tracing = "0.1.44"
 tempfile = "3.27.0"
 ulid = "3.0.0"
