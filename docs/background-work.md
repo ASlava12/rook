@@ -72,3 +72,11 @@ flushing retained text does not count as new activity.
 The jobs tests exercise every split of multilingual UTF-8 text, one-byte reads,
 independent simultaneous pipes, display bounds, invalid-byte fallback, EOF,
 read errors and cancellation.
+
+`xtask/probes/background-utf8/run.py` also drives an actual local CLI turn and a
+CLI turn through a private daemon. The child holds unfinished stdout/stderr
+characters until the first job read, then completes multilingual output. Its
+22 checks include the intermediate and final text, exit status, confirmed
+execution route and unchanged workspace sentinel. The same probe has an explicit
+`--expect-corruption` mode to reproduce the failure on an older binary pair;
+ordinary CI requires every check to pass on its newly built pair.
