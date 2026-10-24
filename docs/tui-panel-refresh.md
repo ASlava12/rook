@@ -11,6 +11,10 @@ latest requested selection; an older response cannot replace a newer one.
 Changing the browser selection does not change the active conversation targeted
 by Stop.
 
+`/session <id|last>` resolves the requested session directly, even before the
+first panel snapshot arrives. The subsequent refresh keeps that session selected
+instead of substituting the first row from the session list.
+
 If a read fails, successful previous data for that panel remains visible, with
 the failed panel named in the refresh status and the conversation's display log.
 Changing the selected conversation, skill or documentation set clears details

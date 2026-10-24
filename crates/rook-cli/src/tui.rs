@@ -1814,7 +1814,12 @@ impl App {
             backend: refresh::Backend::of(&self.source),
             workspace: self.source.workspace().to_path_buf(),
             live: self.chat.session,
-            session: self.session_state.selected().and_then(|i| self.sessions.get(i)).map(|s| s.meta.id),
+            session: self
+                .session_state
+                .selected()
+                .and_then(|i| self.sessions.get(i))
+                .map(|s| s.meta.id)
+                .or(self.chat.session),
             skill: self.selected_skill(),
             docs: self
                 .docs_state
@@ -3722,11 +3727,15 @@ impl App {
             return;
         }
         if self.source.daemon_base().is_some() && name == "session" && !rest.trim().is_empty() {
-            match self.source.session_named(rest.trim(), self.source.workspace()) {
-                Ok(id) => {
+            match self
+                .source
+                .session_named(rest.trim(), self.source.workspace())
+                .and_then(|id| self.source.session_metadata(id))
+            {
+                Ok(meta) => {
+                    self.session_state.select(self.sessions.iter().position(|s| s.meta.id == meta.id));
+                    self.continue_known(meta.id, meta.title, meta.next_seq);
                     self.reload();
-                    self.session_state.select(self.sessions.iter().position(|s| s.meta.id == id));
-                    self.continue_selected();
                 }
                 Err(error) => self.chat.push("err", &error.to_string()),
             }

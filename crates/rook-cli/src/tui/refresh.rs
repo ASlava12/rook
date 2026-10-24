@@ -313,8 +313,17 @@ mod tests {
             );
             rook.start_session("first fixture session").unwrap();
             rook.start_session("second fixture session").unwrap();
-            let sessions =
-                serde_json::to_vec(&rook_proto::Page::new(rook.session_summaries().unwrap())).unwrap();
+            let summaries = rook.session_summaries().unwrap();
+            let metadata: Vec<_> = summaries
+                .iter()
+                .map(|s| {
+                    (
+                        format!("/api/sessions/{}", rook_store::format_session_id(s.meta.id)),
+                        serde_json::to_vec(&s.meta).unwrap(),
+                    )
+                })
+                .collect();
+            let sessions = serde_json::to_vec(&rook_proto::Page::new(summaries)).unwrap();
             let stats = serde_json::to_vec(&rook.stats().unwrap()).unwrap();
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
@@ -372,6 +381,8 @@ mod tests {
                         ("404 Not Found", b"old history endpoint")
                     } else if path == "/api/sessions" {
                         ("200 OK", &sessions)
+                    } else if let Some((_, body)) = metadata.iter().find(|(route, _)| route == &path) {
+                        ("200 OK", body)
                     } else if path == "/api/store/stats" {
                         ("200 OK", &stats)
                     } else if path.contains("/changes?") {
@@ -420,6 +431,29 @@ mod tests {
             std::thread::sleep(Duration::from_millis(2));
         }
     }
+    #[test]
+    fn explicit_session_command_works_before_initial_panel_snapshot_is_applied() {
+        let server = Server::new();
+        let sessions = server.source.sessions().unwrap();
+        let rows = rook_core::session_list::rows(&sessions);
+        let requested = sessions[rows.last().unwrap().index].meta.id;
+        assert_ne!(requested, sessions[rows[0].index].meta.id);
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let mut app = App::new(server.source.reader().unwrap(), runtime, true);
+        // Do not poll the initial snapshot: command handling can precede its
+        // delivery regardless of how quickly the daemon answers the worker.
+        assert!(app.sessions.is_empty());
+        app.command(&format!("session {}", rook_store::format_session_id(requested)));
+        assert_eq!(app.chat.session, Some(requested), "{:?}", app.chat.log);
+        assert!(app.chat.log.iter().any(|(_, text)| text.contains("continuing")));
+        until(|| {
+            app.poll_refresh();
+            !app.sessions.is_empty() && !app.refresh.active && app.refresh.desired.is_none()
+        });
+        assert_eq!(app.sessions[app.session_state.selected().unwrap()].meta.id, requested);
+        assert_eq!(app.chat.session, Some(requested));
+    }
+
     #[test]
     fn panel_refresh_rejects_a_different_backend_before_sending_a_read() {
         let server = Server::new();
