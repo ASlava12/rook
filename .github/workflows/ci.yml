@@ -164,6 +164,17 @@ jobs:
           name: quoted-secrets-${{ matrix.os }}
           path: ${{ runner.temp }}/rook-quoted-secrets.json
           if-no-files-found: error
+      - name: native Google tool schema translation
+        shell: bash
+        timeout-minutes: 3
+        run: python3 xtask/probes/google-tool-schemas/run.py --bin-dir target/debug --tmp-root "$RUNNER_TEMP" --output "$RUNNER_TEMP/rook-google-tool-schemas.json"
+      - name: Google tool schema receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: google-tool-schemas-${{ matrix.os }}
+          path: ${{ runner.temp }}/rook-google-tool-schemas.json
+          if-no-files-found: error
       - name: macOS process-group lifecycle
         if: matrix.os == 'macos-latest'
         run: cargo test --locked -p rook-contain process::tests -- --nocapture
