@@ -606,8 +606,17 @@ pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, js
 
 fn show_sessions(sessions: &[SessionSummary], workspace: &Path, all: bool, json: bool) -> Result<()> {
     let here = workspace.display().to_string();
-    let shown: Vec<SessionSummary> =
-        sessions.iter().filter(|s| all || s.meta.workspace == here).cloned().collect();
+    let canonical = workspace.canonicalize().ok();
+    let shown: Vec<SessionSummary> = sessions
+        .iter()
+        .filter(|s| {
+            all || s.meta.workspace == here
+                || canonical.as_ref().is_some_and(|here| {
+                    Path::new(&s.meta.workspace).canonicalize().is_ok_and(|saved| &saved == here)
+                })
+        })
+        .cloned()
+        .collect();
     let elsewhere = sessions.len() - shown.len();
     let sessions = shown;
     if json {

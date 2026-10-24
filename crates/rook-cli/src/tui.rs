@@ -40,6 +40,7 @@ mod keys;
 mod mcp;
 mod mcp_auth;
 mod queue;
+mod refresh;
 mod stop_retry;
 mod tasks;
 mod wrapping;
@@ -226,6 +227,7 @@ fn what_it_serves(said: &rook_core::models::Answered) -> String {
 ///
 /// Saved dispatch measurements come from timing notes linked to the result;
 /// older and unmeasured results keep an unknown status.
+#[derive(serde::Serialize)]
 struct Call {
     seq: u64,
     doing: String,
@@ -1558,11 +1560,13 @@ struct App {
     /// deadline beside it, the same line says the wait is bounded and when.
     patience: std::time::Duration,
     sessions: Vec<SessionSummary>,
+    refresh: refresh::Refresh,
     session_rows: Vec<rook_core::session_list::Row>,
     session_state: ListState,
     /// The newest bounded calls, with what they were given and what came back.
     /// Read from the log so a window attached mid-turn sees earlier calls too.
     calls: Vec<Call>,
+    calls_session: Option<u128>,
     calls_older: bool,
     calls_error: Option<String>,
     call_state: ListState,
@@ -1672,6 +1676,7 @@ impl App {
 
         let tasks = tasks::Tasks::new(&source, &runtime, &config.work);
         let history = history::History::new(&source);
+        let refresh = refresh::Refresh::new(&source);
         let context = context::ContextPane::default();
         let queue = queue::Queue::new(&source, config.work.max_message_bytes);
         let (stop_retry, stop_retry_error) = if source.daemon_base().is_some() {
@@ -1755,9 +1760,11 @@ impl App {
             palette_at: 0,
             model: rook_core::Config::load().map(|c| c.agent.model).unwrap_or_default(),
             sessions: Vec::new(),
+            refresh,
             session_rows: Vec::new(),
             session_state: ListState::default(),
             calls: Vec::new(),
+            calls_session: None,
             calls_older: false,
             calls_error: None,
             call_state: ListState::default(),
@@ -1802,101 +1809,193 @@ impl App {
         app
     }
 
-    fn reload(&mut self) {
-        let workspace = self.source.workspace().to_path_buf();
-        let selected = self.session_state.selected().and_then(|i| self.sessions.get(i)).map(|s| s.meta.id);
-        let sessions = self.source.sessions().unwrap_or_default();
-        self.session_rows = rook_core::session_list::rows(&sessions);
-        self.sessions = self.session_rows.iter().map(|row| sessions[row.index].clone()).collect();
-        self.session_state.select(
-            selected
-                .and_then(|id| self.sessions.iter().position(|s| s.meta.id == id))
-                .or_else(|| (!self.sessions.is_empty()).then_some(0)),
-        );
-        self.skills = self.source.catalog(&workspace).unwrap_or_default();
-        let here = workspace.display().to_string();
-        self.facts = self
-            .source
-            .memory()
-            .map(|facts| facts.into_iter().filter(|f| f.scope.applies_in(&here)).collect())
-            .unwrap_or_default();
-        self.stats = self.source.stats().ok();
-        self.checkpoints = self.source.checkpoints().unwrap_or_default();
-        let last = self.checkpoints.len().saturating_sub(1);
-        self.checkpoint_state.select(
-            (!self.checkpoints.is_empty()).then(|| self.checkpoint_state.selected().unwrap_or(0).min(last)),
-        );
-        self.load_calls();
-        // From the file where this window holds the store. Where it does not,
-        // the names arrive in the daemon's settings message instead and this
-        // must not overwrite them with an empty list.
-        if let Some(rook) = self.source.here() {
-            self.endpoints = rook.config.models.keys().cloned().collect();
+    fn refresh_scope(&self) -> refresh::Scope {
+        refresh::Scope {
+            backend: refresh::Backend::of(&self.source),
+            workspace: self.source.workspace().to_path_buf(),
+            live: self.chat.session,
+            session: self
+                .session_state
+                .selected()
+                .and_then(|i| self.sessions.get(i))
+                .map(|s| s.meta.id)
+                .or(self.chat.session),
+            skill: self.selected_skill(),
+            docs: self
+                .docs_state
+                .selected()
+                .and_then(|i| self.docs.get(i))
+                .map(|d| (d.topic.clone(), d.version.clone())),
         }
-        let last = self.endpoints.len().saturating_sub(1);
-        self.endpoint_state.select(
-            (!self.endpoints.is_empty()).then(|| self.endpoint_state.selected().unwrap_or(0).min(last)),
-        );
-        // Asked once, on the first read: where nobody has chosen a model, the
-        // setting is a guess at a local Ollama and the first turn fails against
-        // a machine that was never there — while the endpoints somebody did
-        // write down sit in the same file. Put to the person rather than
-        // decided here: which of their machines to work on is not ours to pick.
+    }
+
+    fn reload(&mut self) {
+        if self.calls_session != self.chat.session {
+            self.calls.clear();
+            self.calls_older = false;
+            self.calls_error = None;
+            self.call_state.select(None);
+            self.calls_session = self.chat.session;
+        }
+        self.refresh.request(refresh::Query {
+            scope: self.refresh_scope(),
+            selected: self.session_state.selected().and_then(|i| self.sessions.get(i)).cloned(),
+        });
+    }
+
+    fn poll_refresh(&mut self) {
+        let Some(snapshot) = self.refresh.poll() else { return };
+        self.apply_refresh(snapshot);
+    }
+
+    fn apply_refresh(&mut self, snapshot: refresh::Snapshot) {
+        if snapshot.scope != self.refresh_scope() {
+            self.reload();
+            return;
+        }
+        let mut errors = Vec::new();
+        let fact_id = self.fact_state.selected().and_then(|i| self.facts.get(i)).map(|f| f.id.clone());
+        let checkpoint = self.checkpoint_state.selected().and_then(|i| self.checkpoints.get(i)).cloned();
+        let endpoint = self.endpoint_state.selected().and_then(|i| self.endpoints.get(i)).cloned();
+        let call = self.call_state.selected().and_then(|i| self.calls.get(i)).map(|c| c.seq);
+        macro_rules! apply {
+            ($value:expr, $name:literal, $field:expr) => {
+                match $value {
+                    Ok(value) => $field = value,
+                    Err(error) => errors.push(format!("{}: {error}", $name)),
+                }
+            };
+        }
+        let selected_id = snapshot.selected.as_ref().map(|s| s.meta.id);
+        match snapshot.sessions {
+            Ok(sessions) => {
+                self.session_rows = rook_core::session_list::rows(&sessions);
+                self.sessions = self.session_rows.iter().map(|row| sessions[row.index].clone()).collect();
+                self.session_state
+                    .select(selected_id.and_then(|id| self.sessions.iter().position(|s| s.meta.id == id)));
+            }
+            Err(error) => errors.push(format!("sessions: {error}")),
+        }
+        apply!(snapshot.skills, "skills", self.skills);
+        apply!(snapshot.facts, "memory", self.facts);
+        self.fact_state.select(fact_id.and_then(|id| self.facts.iter().position(|f| f.id == id)));
+        apply!(snapshot.stats.map(Some), "store stats", self.stats);
+        apply!(snapshot.checkpoints, "checkpoints", self.checkpoints);
+        self.checkpoint_state
+            .select(checkpoint.and_then(|key| self.checkpoints.iter().position(|c| *c == key)));
+        apply!(snapshot.docs, "documentation", self.docs);
+        match snapshot.objects {
+            Ok(rows) => {
+                self.objects =
+                    rows.into_iter().map(|r| (r.short, r.kind, r.size_raw, r.size_stored)).collect()
+            }
+            Err(error) => errors.push(format!("objects: {error}")),
+        }
+        if let Some(endpoints) = snapshot.endpoints {
+            apply!(endpoints, "models", self.endpoints);
+        }
+        self.endpoint_state.select(endpoint.and_then(|key| self.endpoints.iter().position(|e| *e == key)));
         if !self.asked_which && self.shared.model.borrow().is_none() {
             self.asked_which = true;
-            if let Some(rook) = self.source.here()
-                && let Some(named) =
-                    rook_core::models::unchosen(&rook.config, &rook_core::paths::config_file())
-            {
+            if let Ok(Some(named)) = &snapshot.unchosen {
                 self.endpoint_note = "nobody has chosen one yet".into();
                 self.chat.push(
                     "stat",
                     &format!(
-                        "  no model is chosen — {} models, or `/model {}`",
+                        "no model is chosen - {} models, or `/model {}`",
                         keys::hint(&self.bindings, Action::Palette),
                         named.first().map(String::as_str).unwrap_or("<name>")
                     ),
                 );
             }
         }
-        self.docs = self.source.docs_kept().unwrap_or_default();
-        let last = self.docs.len().saturating_sub(1);
-        self.docs_state
-            .select((!self.docs.is_empty()).then(|| self.docs_state.selected().unwrap_or(0).min(last)));
-        self.load_doc_set();
-        self.objects = self
-            .source
-            .objects(None, 300)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|row| (row.short, row.kind, row.size_raw, row.size_stored))
-            .collect();
-        // Clamped rather than kept: forgetting the last fact leaves the
-        // selection past the end, and the next `d` would find nothing there.
-        let last = self.facts.len().saturating_sub(1);
-        self.fact_state
-            .select((!self.facts.is_empty()).then(|| self.fact_state.selected().unwrap_or(0).min(last)));
-        if self.session_state.selected().is_none() && !self.sessions.is_empty() {
-            self.session_state.select(Some(0));
+        if let Err(error) = snapshot.unchosen {
+            errors.push(format!("model choice: {error}"));
         }
-        if self.skill_state.selected().is_none() && !self.skills.is_empty() {
-            self.skill_state.select(Some(0));
+        if selected_id != snapshot.scope.session {
+            self.transcript.clear();
+            self.selected = None;
+            self.transcript_scroll = 0;
         }
-        self.load_transcript();
-        self.load_versions();
-        self.status = format!(
-            "{} sessions · {} skills · {} on disk",
-            self.sessions.len(),
-            self.skills.len(),
-            self.stats.as_ref().map(|s| fmt::bytes(s.disk_bytes())).unwrap_or_default()
-        );
+        if let Some(transcript) = snapshot.transcript {
+            apply!(transcript, "transcript", self.transcript);
+        }
+        if let Some(meta) = snapshot.selected {
+            match snapshot.changes {
+                Some(Ok(changes)) => {
+                    self.selected = Some(Selected { goal: meta.goal, forked_at: meta.forked_at, changes })
+                }
+                Some(Err(error)) => errors.push(format!("session changes: {error}")),
+                None => {}
+            }
+        }
+        if let Some((name, versions)) = snapshot.versions {
+            if snapshot.scope.skill.as_ref() != Some(&name) {
+                self.skill_versions.clear();
+            }
+            self.skill_state.select(self.skills.iter().position(|s| s.name == name));
+            apply!(versions, "skill versions", self.skill_versions);
+        } else if self.skills.is_empty() {
+            self.skill_versions.clear();
+        }
+        if let Some((key, set)) = snapshot.doc_set {
+            if snapshot.scope.docs.as_ref() != Some(&key) {
+                self.doc_set = None;
+            }
+            self.docs_state.select(
+                self.docs
+                    .iter()
+                    .position(|d| (d.topic.as_str(), d.version.as_str()) == (key.0.as_str(), key.1.as_str())),
+            );
+            apply!(set, "documentation pages", self.doc_set);
+        } else if self.docs.is_empty() {
+            self.doc_set = None;
+        }
+        if let Some(calls) = snapshot.calls {
+            match calls {
+                Ok((calls, older)) => {
+                    self.calls = calls;
+                    self.call_state.select(call.and_then(|seq| self.calls.iter().position(|c| c.seq == seq)));
+                    self.calls_older = older;
+                    self.calls_error = None;
+                }
+                Err(error) => {
+                    self.calls_error = Some(error.clone());
+                    errors.push(format!("calls: {error}"));
+                }
+            }
+        }
+        fn clamp(state: &mut ListState, len: usize) {
+            state.select((len > 0).then(|| state.selected().unwrap_or(0).min(len.saturating_sub(1))));
+        }
+        clamp(&mut self.fact_state, self.facts.len());
+        clamp(&mut self.skill_state, self.skills.len());
+        clamp(&mut self.docs_state, self.docs.len());
+        clamp(&mut self.call_state, self.calls.len());
+        clamp(&mut self.checkpoint_state, self.checkpoints.len());
+        clamp(&mut self.endpoint_state, self.endpoints.len());
+        self.refresh.note = if errors.is_empty() {
+            format!(
+                "{} sessions; {} skills; {} on disk",
+                self.sessions.len(),
+                self.skills.len(),
+                self.stats.as_ref().map(|s| fmt::bytes(s.disk_bytes())).unwrap_or_default()
+            )
+        } else {
+            rook_llm::truncate(
+                &format!("refresh failed (previous data retained): {}", errors.join("; ")),
+                1024,
+            )
+        };
+        if !errors.is_empty() {
+            self.chat.push("err", &self.refresh.note);
+        }
     }
 
-    /// The captured versions of the skill under the cursor.
+    /// Schedule selection details without doing IO on the input thread.
     fn load_versions(&mut self) {
         self.skill_versions.clear();
-        let Some(name) = self.selected_skill() else { return };
-        self.skill_versions = self.source.skill_history(&name).unwrap_or_default();
+        self.reload();
     }
 
     fn selected_skill(&self) -> Option<String> {
@@ -1913,43 +2012,21 @@ impl App {
     /// because a window that attached to a daemon mid-turn never saw the
     /// earlier calls and the log has them all.
     fn load_calls(&mut self) {
-        self.calls.clear();
-        self.calls_older = false;
-        self.calls_error = None;
-        self.call_state.select(None);
-        let Some(session) = self.chat.session else { return };
-        match recent_calls(&self.source, session) {
-            Ok((calls, older)) => {
-                self.calls = calls;
-                self.calls_older = older;
-            }
-            Err(error) => self.calls_error = Some(rook_llm::truncate(&error.to_string(), 256)),
-        }
-        self.call_state.select((!self.calls.is_empty()).then_some(0));
+        self.reload();
     }
 
     fn load_transcript(&mut self) {
         self.transcript.clear();
         self.selected = None;
         self.transcript_scroll = 0;
-        let Some(i) = self.session_state.selected() else { return };
-        let Some(session) = self.sessions.get(i) else { return };
-        // Bounded on purpose: viewing a session with a huge tool result must not
-        // itself become the memory problem.
-        self.transcript = self.source.transcript(session.meta.id, 0, 500, 4_000).unwrap_or_default();
-        self.selected = Some(Selected {
-            goal: session.goal.clone(),
-            forked_at: session.forked_at,
-            // No diffs: the header is a summary, and a session that rewrote a
-            // large file would take the pane over.
-            changes: self.source.changes(session.meta.id, false).unwrap_or_default(),
-        });
+        self.reload();
     }
 
     fn run(mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         while !self.quit {
             terminal.draw(|f| self.draw(f))?;
             self.drain_turn_events();
+            self.poll_refresh();
             if self.source.here().is_some()
                 && let Some(input) = self.asker.private_input()
             {
@@ -3650,11 +3727,15 @@ impl App {
             return;
         }
         if self.source.daemon_base().is_some() && name == "session" && !rest.trim().is_empty() {
-            match self.source.session_named(rest.trim(), self.source.workspace()) {
-                Ok(id) => {
+            match self
+                .source
+                .session_named(rest.trim(), self.source.workspace())
+                .and_then(|id| self.source.session_metadata(id))
+            {
+                Ok(meta) => {
+                    self.session_state.select(self.sessions.iter().position(|s| s.meta.id == meta.id));
+                    self.continue_known(meta.id, meta.title, meta.next_seq);
                     self.reload();
-                    self.session_state.select(self.sessions.iter().position(|s| s.meta.id == id));
-                    self.continue_selected();
                 }
                 Err(error) => self.chat.push("err", &error.to_string()),
             }
@@ -5026,6 +5107,24 @@ impl App {
             // conversation is visibly still there behind it.
             let area = centred(f.area(), 94, 86);
             f.render_widget(Clear, area);
+            let panel_data = matches!(
+                overlay,
+                Overlay::Calls
+                    | Overlay::Sessions
+                    | Overlay::Memory
+                    | Overlay::Skills
+                    | Overlay::Store
+                    | Overlay::Checkpoints
+                    | Overlay::Docs
+                    | Overlay::Models
+            );
+            let (area, refresh_status) = if panel_data && !self.refresh.note.is_empty() {
+                let [content, status] =
+                    Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).areas(area);
+                (content, Some(status))
+            } else {
+                (area, None)
+            };
             match overlay {
                 Overlay::Palette => self.draw_palette(f, area),
                 Overlay::Calls => self.draw_calls(f, area),
@@ -5043,6 +5142,14 @@ impl App {
                 Overlay::Docs => self.draw_docs(f, area),
                 Overlay::Models => self.draw_models(f, area),
                 Overlay::Help => self.draw_help(f, area),
+            }
+            if let Some(status) = refresh_status {
+                f.render_widget(
+                    Paragraph::new(self.refresh.note.as_str())
+                        .style(Style::default().fg(Color::Yellow))
+                        .wrap(Wrap { trim: false }),
+                    status,
+                );
             }
         }
 
@@ -5100,8 +5207,12 @@ impl App {
             ),
             Style::default().fg(Color::DarkGray),
         ));
-        let tail =
-            format!("  {}  {}", spent(self.chat.spent, self.chat.carried, self.context_window), self.status);
+        let tail = format!(
+            "  {}  {} {}",
+            spent(self.chat.spent, self.chat.carried, self.context_window),
+            self.status,
+            self.refresh.note
+        );
         spans.push(Span::styled(tail, Style::default().fg(Color::DarkGray)));
 
         f.render_widget(
@@ -6049,11 +6160,8 @@ impl App {
     /// off this pane is the addresses — and a list of topics with no sources
     /// under it is the same claim without the evidence.
     fn load_doc_set(&mut self) {
-        self.doc_set = self
-            .docs_state
-            .selected()
-            .and_then(|at| self.docs.get(at))
-            .and_then(|kept| self.source.docs(&kept.topic, Some(&kept.version)).ok().flatten());
+        self.doc_set = None;
+        self.reload();
     }
 
     /// The endpoints, and what each said when it was last asked.
