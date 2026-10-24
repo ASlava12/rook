@@ -1840,6 +1840,10 @@ impl App {
 
     fn poll_refresh(&mut self) {
         let Some(snapshot) = self.refresh.poll() else { return };
+        self.apply_refresh(snapshot);
+    }
+
+    fn apply_refresh(&mut self, snapshot: refresh::Snapshot) {
         if snapshot.scope != self.refresh_scope() {
             self.reload();
             return;
@@ -1921,12 +1925,18 @@ impl App {
             }
         }
         if let Some((name, versions)) = snapshot.versions {
+            if snapshot.scope.skill.as_ref() != Some(&name) {
+                self.skill_versions.clear();
+            }
             self.skill_state.select(self.skills.iter().position(|s| s.name == name));
             apply!(versions, "skill versions", self.skill_versions);
         } else if self.skills.is_empty() {
             self.skill_versions.clear();
         }
         if let Some((key, set)) = snapshot.doc_set {
+            if snapshot.scope.docs.as_ref() != Some(&key) {
+                self.doc_set = None;
+            }
             self.docs_state.select(
                 self.docs
                     .iter()
