@@ -16,6 +16,8 @@ An explicitly selected workspace must match that project; opening a conversation
 does not move it. If its project is unavailable, move the session explicitly
 with `rook session move` before continuing it. Unknown IDs, invalid selectors
 and workspace conflicts are reported before entering the terminal screen.
+If an older daemon cannot read the selected session's metadata, the error
+explains that `rook daemon restart` loads the installed daemon build.
 
 Opening a conversation shows its saved history. In a shared window it also
 attaches to a turn already running in that session, using the existing live

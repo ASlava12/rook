@@ -1830,7 +1830,14 @@ fn changed_note(changed: &[String]) -> String {
 /// versions on connect; the failure itself carries it here, where somebody is
 /// already reading.
 fn refused(url: &str, status: reqwest::StatusCode, body: &str) -> String {
-    let older = status == reqwest::StatusCode::NOT_FOUND && body.contains("no such endpoint");
+    // Older daemons know this session route only as DELETE, so its new GET
+    // answers 405 rather than the usual missing-endpoint 404.
+    let old_metadata_route = status == reqwest::StatusCode::METHOD_NOT_ALLOWED
+        && reqwest::Url::parse(url).ok().is_some_and(|url| {
+            url.path().strip_prefix("/api/sessions/").and_then(rook_store::parse_session_id).is_some()
+        });
+    let older =
+        old_metadata_route || (status == reqwest::StatusCode::NOT_FOUND && body.contains("no such endpoint"));
     match older {
         true => format!(
             "{url} answered {status}: {body}\nthat route exists in this build of `rook`, so the \
@@ -2050,6 +2057,17 @@ impl Daemon {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_session_old_metadata_method_is_reported_as_version_skew() {
+        let route = "http://127.0.0.1:7717/api/sessions/00000000000000000000000000";
+        let old = refused(route, reqwest::StatusCode::METHOD_NOT_ALLOWED, "");
+        assert!(old.contains("older one") && old.contains("daemon restart"), "{old}");
+        let missing = refused(route, reqwest::StatusCode::NOT_FOUND, "no session there");
+        assert!(!missing.contains("older one"), "{missing}");
+        let unrelated = refused(&format!("{route}/goal"), reqwest::StatusCode::METHOD_NOT_ALLOWED, "");
+        assert!(!unrelated.contains("older one"), "{unrelated}");
+    }
 
     #[test]
     fn explicit_session_ids_do_not_fetch_an_unrelated_listing_but_last_still_does() {
