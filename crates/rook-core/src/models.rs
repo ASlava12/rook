@@ -121,12 +121,17 @@ fn built(
     }
     let endpoints = endpoints_with_chain(config, vault, name, chain)?;
     let observations = crate::model_catalog::Snapshot::new(config);
-    rook_llm::from_endpoints_configured(
+    let provider = rook_llm::from_endpoints_configured(
         endpoints,
         config.agent.stream_idle(),
         prefer,
         |endpoint, provider| observations.decorate(config, vault, endpoint, provider),
-    )
+    )?;
+    // Shorthand endpoints resolve environment credentials below this layer.
+    // Register the actual held values in this caller's vault too: auxiliary
+    // routes do not construct another AgentLoop to perform that handoff.
+    provider.visit_connection_secrets(&mut |value| vault.also_hide(value));
+    Ok(provider)
 }
 
 /// Every endpoint worth trying for this setting, the one asked for first.

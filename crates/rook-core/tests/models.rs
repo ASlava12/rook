@@ -8,6 +8,69 @@ use rook_core::{Config, ModelSource, Vault};
 
 const KEY: &str = "sk-not-a-real-key-at-all";
 
+#[test]
+fn environment_transport_credentials_enter_the_supplied_vault_for_auxiliary_routes() {
+    const CHILD: &str = "ROOK_OWNED_AUXILIARY_CREDENTIAL_CHILD";
+    const SECRET: &str = "owned-auxiliary-transport-credential";
+    if std::env::var_os(CHILD).is_none() {
+        // An owned child keeps fake credentials out of other parallel tests.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "environment_transport_credentials_enter_the_supplied_vault_for_auxiliary_routes",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("OPENAI_API_KEY", SECRET)
+            .env("ANTHROPIC_API_KEY", SECRET)
+            .env("GEMINI_API_KEY", SECRET)
+            .env("GOOGLE_API_KEY", SECRET)
+            .env("ROOK_LLM_API_KEY", SECRET)
+            .env("OPENAI_BASE_URL", "http://127.0.0.1:9/v1")
+            .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:9")
+            .env("GEMINI_BASE_URL", "http://127.0.0.1:9/v1beta")
+            .env("ROOK_LLM_BASE_URL", "http://127.0.0.1:9/v1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "owned auxiliary route child failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let config = Config::default();
+    let mut missing = Vec::new();
+    for route in [
+        "openai/owned-model",
+        "responses/owned-model",
+        "anthropic/owned-model",
+        "google/owned-model",
+        "openai-compatible/owned-model",
+    ] {
+        for errand in [false, true] {
+            let vault = Vault::empty();
+            let provider = if errand {
+                rook_core::models::errand_provider_for(&config, &vault, route)
+            } else {
+                rook_core::models::provider_for(&config, &vault, route)
+            }
+            .unwrap();
+            let mut held = Vec::new();
+            provider.visit_connection_secrets(&mut |value| held.push(value.to_owned()));
+            assert!(held.iter().any(|value| value == SECRET), "transport precondition: {route}");
+            if vault.redact(SECRET) != "${secret}" {
+                missing.push((route, errand));
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "resolved transport credentials missing from the supplied vault: {missing:?}"
+    );
+}
+
 fn serving(api: &str, url: &str, key: &str) -> ModelSource {
     ModelSource {
         model: "qwen3-coder:30b".into(),

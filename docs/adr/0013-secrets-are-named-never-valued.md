@@ -92,6 +92,15 @@ registered a key in a temporary vault that the actual turn did not retain.
 The default visitor keeps custom provider implementations source-compatible;
 custom hosts can also use explicit connection-secret registration.
 
+The shared provider factory also registers these already-resolved values in
+the vault supplied by its caller. This includes `provider/model` routes whose
+keys come from the environment. Configured auxiliary and compaction routes use
+the current agent's vault directly; they do not create a new AgentLoop for the
+constructor handoff. The factory visitor closes that path without reading a
+credential source again. An isolated child-process regression checks five
+transport spellings through both ordinary and errand factories with artificial
+keys and loopback addresses; it sends no model request.
+
 The owned native fixture runs direct CLI and private daemon turns in both the
 OpenAI-compatible and Anthropic transports. It checks 43 conditions, including
 unchanged real authorization headers and masked saved/live context. All four
