@@ -241,11 +241,12 @@ impl Refresh {
         self.dispatch();
     }
     fn dispatch(&mut self) {
-        if self.active || self.send.is_none() {
+        if self.active {
             return;
         }
+        let Some(send) = self.send.as_ref() else { return };
         if let Some(query) = self.desired.take() {
-            match self.send.as_ref().unwrap().try_send((self.epoch, query)) {
+            match send.try_send((self.epoch, query)) {
                 Ok(()) => self.active = true,
                 Err(_) => {
                     self.send = None;
