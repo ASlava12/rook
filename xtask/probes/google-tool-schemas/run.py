@@ -52,7 +52,7 @@ try:
         home, workspace = case / 'home', case / 'workspace'
         home.mkdir()
         workspace.mkdir()
-        requests, calls, methods = [], [], []
+        requests, calls, methods, executions = [], [], [], []
 
         class Fixture(http.server.BaseHTTPRequestHandler):
             def log_message(self, *unused):
@@ -155,11 +155,15 @@ refresh_tools=false
 
         def invoke(label, arguments):
             out, err = case / (label + '.stdout'), case / (label + '.stderr')
+            command = [str(bins['rook']), '-C', str(workspace), *arguments]
             with out.open('xb') as stdout, err.open('xb') as stderr:
-                result = subprocess.run([str(bins['rook']), '-C', str(workspace), *arguments], cwd=workspace, env=env,
+                result = subprocess.run(command, cwd=workspace, env=env,
                                         stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, timeout=55,
                                         creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
             assert out.stat().st_size <= 1024 * 1024 and err.stat().st_size <= 1024 * 1024
+            executions.append({'command': command, 'cwd': str(workspace), 'exit_code': result.returncode,
+                               'stdout': out.read_bytes().decode('utf-8'), 'stdout_sha256': sha(out),
+                               'stderr': err.read_bytes().decode('utf-8'), 'stderr_sha256': sha(err)})
             return result.returncode, out.read_bytes(), err.read_bytes()
 
         daemon = daemon_log = None
@@ -198,13 +202,16 @@ refresh_tools=false
                       'tool_result_reaches_continuation': len(responses) == 1 and responses[0]['name'] == 'owned__inspect' and 'OWNED_SCHEMA_TOOL' in json.dumps(responses[0]),
                       'workspace_unchanged': not any(workspace.iterdir())}
             report['cases'][mode] = {'checks': checks, 'client_exit': code, 'requests': requests, 'tool_calls': calls, 'mcp_methods': methods,
-                                     'stdout': str(case / 'run.stdout'), 'stderr': str(case / 'run.stderr')}
+                                     'stdout': str(case / 'run.stdout'), 'stderr': str(case / 'run.stderr'),
+                                     'executions': executions, 'daemon_exit': None}
             report['checks'].update({mode + '_' + k: v for k, v in checks.items()})
             print(json.dumps({'case': mode, 'checks': checks}), flush=True)
             assert all(v is True for v in checks.values()), checks
             if daemon is not None:
                 stop, _, _ = invoke('stop', ['daemon', 'stop'])
-                assert stop == 0 and daemon.wait(timeout=10) == 0
+                daemon_exit = daemon.wait(timeout=10)
+                assert stop == 0 and daemon_exit == 0
+                report['cases'][mode]['daemon_exit'] = daemon_exit
                 retired += 1
                 daemon = None
         finally:
