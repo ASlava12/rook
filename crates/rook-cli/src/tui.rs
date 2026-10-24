@@ -398,7 +398,7 @@ pub fn run(source: crate::source::Source, yes: bool, started: Option<String>) ->
     // told about is one nobody thinks to stop.
     if let (Some(from), Some(base)) = (started, daemon) {
         println!("`rookd` is still running at {base} — every window shares it.");
-        println!("Started from {from}; stop it with `pkill -f rookd` when you are done.");
+        println!("Started from {from}; stop it with `rook daemon stop` when you are done.");
     }
     result
 }
