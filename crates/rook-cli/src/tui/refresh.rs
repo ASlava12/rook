@@ -445,10 +445,23 @@ mod tests {
         let server = Server::new();
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let mut app = App::new(server.source.reader().unwrap(), runtime, true);
-        until(|| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
             app.poll_refresh();
-            !app.sessions.is_empty() && !app.refresh.active
-        });
+            if !app.sessions.is_empty() && !app.refresh.active {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "panel initialization: {}; sessions={}; active={}; desired={}; requests={:?}",
+                app.refresh.note,
+                app.sessions.len(),
+                app.refresh.active,
+                app.refresh.desired.is_some(),
+                server.seen.lock().unwrap()
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
         let skill = |name: &str| SkillCard {
             name: name.into(),
             description: String::new(),
