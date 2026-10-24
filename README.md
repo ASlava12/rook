@@ -1,7 +1,7 @@
 # Rook
 
-[Rook 0.21.17](docs/releases/0.21.17.md): intact Unicode in background command output,
-linear wrapping of long TUI text and Windows skill caches beneath nested home paths.
+[Rook 0.21.18](docs/releases/0.21.18.md): skill-source diagnostics,
+known credential masking, immediate Z.ai balance refusals and preserved compaction summaries.
 
 [Domain network policy with OS containment](docs/domain-network-policy.md).
 
