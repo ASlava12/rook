@@ -80,7 +80,7 @@ pub(super) async fn invoke(
     let mut err = child.stderr.take();
     let mut drain = Drain(tokio::spawn(async move { bounded(&mut err).await }));
     let patience = Duration::from_secs(config.timeout_secs);
-    send(stdin, &input, patience).await?;
+    send_to_child(stdin, &input, patience, &mut child).await?;
     let source = Source::hook(config, ordinal);
     let mut consumed = 0usize;
     let mut finished = None;
@@ -109,7 +109,7 @@ pub(super) async fn invoke(
                 &FormAnswer { form_answer: &answer },
                 settings.max_update_bytes.saturating_add(128),
             )?;
-            send(stdin, &bytes, patience).await?;
+            send_to_child(stdin, &bytes, patience, &mut child).await?;
         } else if let Some(raw) = frame.reply {
             finished = Some(serde_json::from_str::<HookReply>(raw.get())?);
             break;
@@ -117,7 +117,8 @@ pub(super) async fn invoke(
     }
     let reply =
         finished.ok_or_else(|| std::io::Error::other("hook stream frame limit reached before reply"))?;
-    deadline(patience, stdin.shutdown()).await?;
+    // Each frame was flushed by send(). Closing the pipe delivers EOF; a
+    // further asynchronous shutdown must not wait on an already exited child.
     drop(input_pipe.stdin.take());
     let mut remainder = Some(stdout);
     let (tail, status, stderr) =
@@ -186,9 +187,60 @@ async fn send(
     .await
 }
 
+async fn send_to_child(
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+    bytes: &[u8],
+    patience: Duration,
+    child: &mut tokio::process::Child,
+) -> std::io::Result<()> {
+    tokio::select! {
+        biased;
+        result = send(writer, bytes, patience) => result,
+        status = child.wait() => Err(std::io::Error::other(format!(
+            "hook exited with code {} before accepting its input",
+            status?.code().unwrap_or(-1),
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn an_exited_interactive_hook_retires_an_input_writer_that_never_wakes() {
+        struct Stalled;
+        impl tokio::io::AsyncWrite for Stalled {
+            fn poll_write(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+                _: &[u8],
+            ) -> std::task::Poll<std::io::Result<usize>> {
+                std::task::Poll::Pending
+            }
+            fn poll_flush(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::task::Poll::Pending
+            }
+            fn poll_shutdown(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::task::Poll::Pending
+            }
+        }
+        let mut child = shell("exit 7").kill_on_drop(true).spawn().unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            send_to_child(&mut Stalled, b"owned frame", Duration::from_secs(30), &mut child),
+        )
+        .await
+        .expect("an exited hook cannot keep waiting for input readiness");
+        assert!(result.unwrap_err().to_string().contains("code 7 before accepting"));
+        assert_eq!(child.wait().await.unwrap().code(), Some(7));
+    }
+
     #[tokio::test]
     async fn line_and_total_caps_refuse_the_next_copy() {
         let mut reader = BufReader::new(&b"123456\n"[..]);
