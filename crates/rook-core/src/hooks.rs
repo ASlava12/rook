@@ -194,7 +194,10 @@ impl Hooks {
             } else {
                 config
             };
-            let reply = match invoke(config, payload, *ordinal, settings, asker, &mut on_ui).await {
+            // Keep ordinary hook IO out of every enclosing agent/delegate
+            // future as well as interactive hooks. Even a turn with no hooks
+            // has that frame layout, which matters on Windows' main stack.
+            let reply = match Box::pin(invoke(config, payload, *ordinal, settings, asker, &mut on_ui)).await {
                 Ok(reply) => reply,
                 Err(e) => {
                     tracing::warn!("hook {:?} failed: {e}", config.command);
