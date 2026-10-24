@@ -210,6 +210,9 @@ rook update                                # a newer release, if there is one; k
 rook daemon restart                        # after an upgrade; names any turn it ends
 ```
 
+TUI data panels refresh in the background and retain their previous data when a
+read fails. See [panel refresh behavior and limits](docs/tui-panel-refresh.md).
+
 The browser is a front end, not a viewer: the chat resumes any session, stops a
 turn, answers the agent's approvals and questions in place, and renders what
 the model says; a session being written by a terminal is read live from the
