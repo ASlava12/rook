@@ -2,6 +2,9 @@
 use super::*;
 use rook_core::mcp_connections::Report;
 
+#[cfg(test)]
+mod tests;
+
 pub(super) struct Connections {
     commands: mpsc::Sender<Option<String>>,
     events: mpsc::Receiver<Result<Report, String>>,
@@ -14,10 +17,15 @@ pub(super) struct Connections {
 }
 impl Drop for Connections {
     fn drop(&mut self) {
-        self.worker.abort();
+        self.close();
     }
 }
 impl Connections {
+    pub(super) fn close(&mut self) {
+        self.worker.abort();
+        self.auth.close();
+    }
+
     pub(super) fn new(
         source: &crate::source::Source,
         runtime: &tokio::runtime::Runtime,

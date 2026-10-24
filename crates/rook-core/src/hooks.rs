@@ -311,11 +311,16 @@ async fn invoke(
                 let _ = stdin.shutdown().await;
             }
         };
-        let (_, stdout, stderr, status) = tokio::join!(
-            tracked(&completed[0], feed),
+        let status = async {
+            let result =
+                wait_after_input(tracked(&completed[0], feed), tracked(&completed[3], child.wait())).await;
+            completed[0].store(true, std::sync::atomic::Ordering::Relaxed);
+            result
+        };
+        let (stdout, stderr, status) = tokio::join!(
             tracked(&completed[1], bounded(&mut out)),
             tracked(&completed[2], bounded(&mut err)),
-            tracked(&completed[3], child.wait()),
+            status,
         );
         (status, stdout, stderr)
     };
@@ -394,3 +399,21 @@ async fn bounded(stream: &mut Option<impl tokio::io::AsyncRead + Unpin>) -> (Str
     }
     (String::from_utf8_lossy(&kept).trim().to_string(), truncated, bytes)
 }
+
+// Input cannot be consumed after the child exits, even if a pipe write never
+// receives its readiness notification. Its caller still drains both outputs.
+async fn wait_after_input<I, W>(input: I, wait: W) -> W::Output
+where
+    I: std::future::Future<Output = ()>,
+    W: std::future::Future,
+{
+    tokio::pin!(input, wait);
+    tokio::select! {
+        biased;
+        result = &mut wait => result,
+        _ = &mut input => wait.await,
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests;

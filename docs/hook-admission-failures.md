@@ -16,6 +16,14 @@ draining, stderr draining and process waiting completed. These flags describe
 the observed wait state; they do not establish why a child or pipe failed to
 finish. The command deadline and bounded output limits remain in force.
 
-This closes an observed failure path in which a prompt hook's timeout was logged
-but the prompt was subsequently sent to the model. It does not establish or fix
-the cause of that timeout.
+When an ordinary hook process has exited, Rook retires its remaining stdin
+delivery instead of waiting for a pipe writer that can no longer be consumed.
+Both output streams are still drained and the actual process exit determines
+the hook result. A live child still has the configured watchdog. Interactive
+hook frame writes also stop if their child exits; after the final flushed reply,
+closing stdin delivers EOF without an additional asynchronous shutdown wait.
+
+This addresses an observed FreeBSD failure where process waiting and both output
+streams had finished but stdin delivery remained pending until the watchdog.
+Failed exits still refuse prompt and tool gates; cancelling an unusable input
+writer does not turn a failed hook into an approval.

@@ -2784,6 +2784,39 @@ fn every_command_that_takes_a_session_takes_last() {
 /// follows — and a list of every session on the machine is not what someone
 /// standing in a project asked for.
 #[test]
+fn session_listing_matches_workspace_identity_locally_and_through_the_daemon() {
+    let rook = Rook::new();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let canonical = rook.workspace.path().canonicalize().unwrap();
+    let dotted = rook.workspace.path().join(".");
+    let ids = [rook_store::new_session_id(), rook_store::new_session_id(), rook_store::new_session_id()];
+    {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        for (id, path) in ids.into_iter().zip([canonical.as_path(), dotted.as_path(), elsewhere.path()]) {
+            store
+                .create_session(&rook_store::SessionMeta::new(
+                    id,
+                    "workspace identity",
+                    path.display().to_string(),
+                    rook_store::now_unix(),
+                ))
+                .unwrap();
+        }
+    }
+    for shared in [false, true] {
+        let daemon = shared.then(|| Daemon::start(&rook));
+        let listed = rook.json(&["session", "ls"]);
+        let listed: Vec<_> = listed.as_array().unwrap().iter().map(|s| s["id"].as_str().unwrap()).collect();
+        assert_eq!(listed.len(), 2, "both spellings belong to this workspace: {listed:?}");
+        assert!(listed.contains(&rook_store::format_session_id(ids[0]).as_str()));
+        assert!(listed.contains(&rook_store::format_session_id(ids[1]).as_str()));
+        assert!(!listed.contains(&rook_store::format_session_id(ids[2]).as_str()));
+        assert_eq!(rook.json(&["session", "ls", "--all"]).as_array().unwrap().len(), 3);
+        drop(daemon);
+    }
+}
+
+#[test]
 fn listing_sessions_shows_this_workspace_and_says_what_it_hid() {
     let rook = Rook::new();
     rook.chat("/quit\n");
