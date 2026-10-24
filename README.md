@@ -1,7 +1,7 @@
 # Rook
 
-[Rook 0.21.20](docs/releases/0.21.20.md): resume saved TUI sessions,
-refuse failed prompt guards, and avoid nested ACP stack overflow on Windows.
+[Rook 0.21.21](docs/releases/0.21.21.md): responsive TUI panel refresh,
+questions and Stop during slow reads, reliable cross-window cancellation, local MCP shutdown and hook input cleanup.
 
 [Domain network policy with OS containment](docs/domain-network-policy.md).
 
@@ -209,6 +209,9 @@ rook daemon status                         # where it is, and whether it is this
 rook update                                # a newer release, if there is one; keeps the previous beside it
 rook daemon restart                        # after an upgrade; names any turn it ends
 ```
+
+TUI data panels refresh in the background and retain their previous data when a
+read fails. See [panel refresh behavior and limits](docs/tui-panel-refresh.md).
 
 The browser is a front end, not a viewer: the chat resumes any session, stops a
 turn, answers the agent's approvals and questions in place, and renders what

@@ -470,6 +470,12 @@ async fn serve(
                         let cancelled = if already_applied {
                             false
                         } else if let Some(live) = state.live.write().await.remove(&session) {
+                            // This socket gets its acknowledgement and ending
+                            // directly, in that order. Other observers receive
+                            // the ending from the shared replay.
+                            if let Some(view) = watching.as_ref().filter(|view| view.session == session) {
+                                view.stopping.store(true, Ordering::Release);
+                            }
                             live.stop();
                             true
                         } else {
@@ -1249,6 +1255,7 @@ pub(crate) async fn where_it_belongs(
 
 /// A window's view of one live turn.
 struct Watching {
+    stopping: Arc<AtomicBool>,
     session: u128,
     live: std::sync::Weak<Live>,
     carrying: tokio::task::JoinHandle<()>,
@@ -1287,6 +1294,8 @@ fn carry_view(
     }
     let watched = Arc::downgrade(live);
     let live = live.clone();
+    let stopping = Arc::new(AtomicBool::new(false));
+    let stopped = stopping.clone();
     let carrying = tokio::spawn(async move {
         let mut approvals_changed = live.approver.changes();
         let mut questions_changed = live.asker.changes();
@@ -1314,6 +1323,9 @@ fn carry_view(
                 return;
             }
             for event in missed {
+                if stopped.load(Ordering::Acquire) {
+                    return;
+                }
                 if to_window.send(event).await.is_err() {
                     return;
                 }
@@ -1333,6 +1345,7 @@ fn carry_view(
                         Ok(sequence) => {
                             let event = live.backlog.lock().unwrap_or_else(|e| e.into_inner()).get(sequence);
                             let Some(event) = event else { break };
+                            if stopped.load(Ordering::Acquire) { return; }
                             // Current requests arrive from their authoritative map,
                             // including resolution; an old relay event is not state.
                             if live_snapshots && matches!(event, ChatEvent::Approval { .. } | ChatEvent::Ask { .. } | ChatEvent::SecretRequest { .. }) { continue; }
@@ -1348,7 +1361,7 @@ fn carry_view(
             replace = true;
         }
     });
-    Watching { session, live: watched, carrying }
+    Watching { session, live: watched, carrying, stopping }
 }
 
 async fn send_inputs(live: &Live, to_window: &delivery::Sender) -> Result<(), delivery::Closed> {
@@ -1606,8 +1619,8 @@ async fn everything_it_says(
             biased;
             Some(event) = events.recv() => {
                 if matches!(event, ChatEvent::Done { .. } | ChatEvent::Failed { .. } | ChatEvent::Cancelled) {
+                    if completed.swap(true, Ordering::AcqRel) { continue; }
                     if let Some(activity) = &activity { activity.observe(&event); }
-                    completed.store(true, Ordering::Release);
                 }
                 fan_out(&backlog, &said, event);
             },
@@ -1626,10 +1639,12 @@ async fn everything_it_says(
     // enough.
     while let Ok(event) = events.try_recv() {
         if matches!(event, ChatEvent::Done { .. } | ChatEvent::Failed { .. } | ChatEvent::Cancelled) {
+            if completed.swap(true, Ordering::AcqRel) {
+                continue;
+            }
             if let Some(activity) = &activity {
                 activity.observe(&event);
             }
-            completed.store(true, Ordering::Release);
         }
         fan_out(&backlog, &said, event);
     }
@@ -1796,6 +1811,18 @@ impl Live {
         self.task.abort();
         for helper in &self.helpers {
             helper.abort();
+        }
+        // The task carrying ordinary endings has just been aborted. Publish
+        // cancellation through the shared replay so every window, including
+        // the original caller, can finish without waiting for a socket close.
+        if !self.completed.swap(true, Ordering::AcqRel) {
+            fan_out(&self.backlog, &self.said, ChatEvent::Cancelled);
+            if let Some(activity) = &self.activity {
+                activity.observe(&ChatEvent::Cancelled);
+            }
+        }
+        if let Some(activity) = &self.activity {
+            activity.finish();
         }
     }
 
@@ -2574,6 +2601,52 @@ mod tests {
 
     fn text(what: &str) -> ChatEvent {
         ChatEvent::Text { text: what.to_string() }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stopping_a_turn_notifies_every_attached_view_and_retains_one_terminal_event() {
+        let (said, _) = tokio::sync::broadcast::channel(8);
+        let live = Arc::new(parked(said));
+        let mut views = Vec::new();
+        for epoch in [1, 2] {
+            let (out, frames) = delivery::channel(8, 4096);
+            views.push((carry_view(&live, epoch, out, None, true, false), frames));
+        }
+        live.stop();
+        live.stop();
+        for (view, mut frames) in views {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let frame = frames.recv().await.expect("attached view lost its ending");
+                    let event: ChatEvent = serde_json::from_str(&frame.text).unwrap();
+                    if matches!(event, ChatEvent::Cancelled) {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("Stop must end every attached view, including the original caller");
+            // The connection relay stays available for input-state updates;
+            // receiving the terminal frame is what ends the client turn.
+            view.carrying.abort();
+            assert!(view.carrying.await.unwrap_err().is_cancelled());
+        }
+        assert!(!live.running());
+        let (_, missed, _) = live.join();
+        assert_eq!(missed.iter().filter(|event| matches!(event, ChatEvent::Cancelled)).count(), 1);
+        assert!(matches!(missed.last(), Some(ChatEvent::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn stopping_an_already_completed_turn_keeps_its_original_ending() {
+        let (said, _) = tokio::sync::broadcast::channel(8);
+        let live = parked(said);
+        live.completed.store(true, Ordering::Release);
+        fan_out(&live.backlog, &live.said, ChatEvent::Failed { message: "original ending".into() });
+        live.stop();
+        let (_, missed, _) = live.join();
+        assert_eq!(missed.len(), 1);
+        assert!(matches!(&missed[0], ChatEvent::Failed { message } if message == "original ending"));
     }
 
     /// A window that joins a turn already running has to be given what it
