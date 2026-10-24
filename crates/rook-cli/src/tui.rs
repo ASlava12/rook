@@ -1628,6 +1628,23 @@ struct App {
     quit: bool,
 }
 
+impl Drop for App {
+    fn drop(&mut self) {
+        if let Some(turn) = self.turn.take() {
+            turn.abort();
+        }
+        self.mcp.close();
+        if self.source.here().is_some() {
+            // Windows pipe reads can outlive cancelled tasks until the stdio
+            // child exits. Close its owner before dropping the runtime. Keep
+            // remote HTTP cleanup bounded as well.
+            self.runtime.block_on(async {
+                let _ = tokio::time::timeout(Duration::from_secs(5), self.shared.mcp.shutdown()).await;
+            });
+        }
+    }
+}
+
 impl App {
     fn new(source: crate::source::Source, runtime: tokio::runtime::Runtime, yes: bool) -> Self {
         let extension_changes = source.here().map(|r| r.extension_ui_changes());
