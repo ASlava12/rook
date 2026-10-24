@@ -197,6 +197,7 @@ cargo test 2>&1 | rook run "why does this fail?"   # stdin joins the prompt
 rook --json run "..." | jq .outcome.reply  # one object: reply, tokens, changes
                                            # exit 2 if the turn did not finish
 rook tui                                   # the conversation, with ^p for everything else
+rook tui --session last                    # open this workspace's saved conversation
 rook checkpoint create before-refactor     # or `c` in the TUI's Checkpoints tab
 rook docs add redis                        # read its documentation once, answer from it after
 rookd                                      # http://127.0.0.1:7717 — web UI + API

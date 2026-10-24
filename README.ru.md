@@ -197,6 +197,7 @@ cargo test 2>&1 | rook run "почему падает?"   # stdin приклеи
 rook --json run "..." | jq .outcome.reply  # один объект: ответ, токены, изменения
                                            # код возврата 2, если ход не доведён до конца
 rook tui                                   # разговор, ^p — всё остальное
+rook tui --session last                    # открыть сохранённый разговор этого проекта
 rook checkpoint create before-refactor     # или `c` во вкладке Checkpoints в TUI
 rook docs add redis                        # прочитать документацию один раз и дальше отвечать из неё
 rookd                                      # http://127.0.0.1:7717 — веб-интерфейс и API

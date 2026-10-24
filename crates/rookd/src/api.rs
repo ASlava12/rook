@@ -182,7 +182,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/store/verify", post(verify))
         .route("/api/store/train", post(train))
         .route("/api/sessions/{id}/fork", post(fork))
-        .route("/api/sessions/{id}", axum::routing::delete(delete_session))
+        .route("/api/sessions/{id}", get(session_metadata).delete(delete_session))
         .route(
             "/api/chat",
             get(crate::chat::upgrade).layer(axum::middleware::from_fn(crate::chat::only_from_this_daemon)),
@@ -746,6 +746,21 @@ async fn attention(
         selected
     };
     history_read(s, move |rook| rook.live_attention_page(&query, &live)).await
+}
+
+async fn session_metadata(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+) -> ApiResult<rook_store::SessionMeta> {
+    let meta = s
+        .rook
+        .read()
+        .await
+        .store
+        .get_session_limited(session_id(&id)?, 256 * 1024)
+        .map_err(CoreError::from)?
+        .ok_or(CoreError::NoSession(id))?;
+    Ok(Json(meta))
 }
 
 async fn sessions(
@@ -2783,6 +2798,26 @@ mod tests {
             StatusCode::BAD_REQUEST
         );
         f.state.live.write().await.remove(&f.session);
+    }
+
+    #[tokio::test]
+    async fn startup_session_metadata_reads_exact_identity_without_mutating_history() {
+        let f = fixture();
+        let before = f.state.rook.read().await.store.get_session(f.session).unwrap().unwrap();
+        let id = rook_store::format_session_id(f.session);
+        let (status, body) = get(&f, &format!("/api/sessions/{id}")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let meta: rook_store::SessionMeta = serde_json::from_value(body).unwrap();
+        assert_eq!(meta.id, f.session);
+        assert_eq!(meta.workspace, before.workspace);
+        assert_eq!(meta.title, before.title);
+        assert_eq!(meta.next_seq, before.next_seq);
+        let after = f.state.rook.read().await.store.get_session(f.session).unwrap().unwrap();
+        assert_eq!(after.next_seq, before.next_seq);
+        assert_eq!(after.updated_at, before.updated_at);
+        let missing = rook_store::format_session_id(rook_store::new_session_id());
+        assert_eq!(get(&f, &format!("/api/sessions/{missing}")).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(get(&f, "/api/sessions/not-an-id").await.0, StatusCode::BAD_REQUEST);
     }
 
     async fn get(f: &Fixture, path: &str) -> (StatusCode, serde_json::Value) {

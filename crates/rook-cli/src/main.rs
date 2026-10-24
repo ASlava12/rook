@@ -67,15 +67,16 @@ fn main() -> Result<()> {
         // Bare `rook` opens a conversation: talking to the agent is the point,
         // and every comparable tool starts there.
         None => chat::run(cli.workspace, None, cli.yes),
-        Some(Command::Tui { alone }) => {
+        Some(Command::Tui { alone, session }) => {
             // Shared by default: the store takes one writer, so a window that
             // takes it is a window nobody can open a second of — which is what
             // somebody working in two projects meets first.
+            let explicit_workspace = cli.workspace.is_some();
             let (source, started) = match alone {
                 true => (Source::open(cli.workspace)?, None),
                 false => Source::shared(cli.workspace)?,
             };
-            tui::run(source, cli.yes, started)
+            tui::run(source, cli.yes, started, session.as_deref(), explicit_workspace)
         }
         Some(Command::Init) => commands::config::cmd_init(cli.workspace),
         Some(Command::Doctor) => commands::doctor::cmd_doctor(&workspace_of(&cli.workspace), cli.json),
@@ -212,12 +213,30 @@ mod tests {
     /// interface and stays there.
     #[test]
     fn only_the_window_owns_the_terminal_it_is_drawing_on() {
-        assert!(draws_the_screen(&Some(Command::Tui { alone: false })));
-        assert!(draws_the_screen(&Some(Command::Tui { alone: true })));
+        assert!(draws_the_screen(&Some(Command::Tui { alone: false, session: None })));
+        assert!(draws_the_screen(&Some(Command::Tui { alone: true, session: None })));
 
         // Bare `rook` is a conversation printed line by line, not a drawn
         // screen: its warnings belong on stderr with the rest of what it says.
         assert!(!draws_the_screen(&None));
         assert!(!draws_the_screen(&Some(Command::Doctor {})));
+    }
+
+    #[test]
+    fn startup_session_cli_accepts_selectors_in_both_tui_modes_and_requires_a_value() {
+        use clap::Parser;
+        for words in
+            [vec!["rook", "tui", "--session", "last"], vec!["rook", "tui", "--alone", "--session", "last"]]
+        {
+            let cli = super::Cli::try_parse_from(words.clone()).unwrap();
+            assert!(
+                matches!(cli.command, Some(Command::Tui { session: Some(ref name), alone }) if name == "last" && alone == words.contains(&"--alone"))
+            );
+        }
+        assert!(super::Cli::try_parse_from(["rook", "tui", "--session"]).is_err());
+        assert!(matches!(
+            super::Cli::try_parse_from(["rook", "tui"]).unwrap().command,
+            Some(Command::Tui { session: None, alone: false })
+        ));
     }
 }

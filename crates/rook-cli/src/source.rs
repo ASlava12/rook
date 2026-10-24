@@ -504,6 +504,32 @@ impl Source {
         }
     }
 
+    /// Read one session without depending on the unrelated session listing.
+    pub fn session_metadata(&self, session: u128) -> Result<rook_store::SessionMeta> {
+        let meta = match self {
+            Self::Local(rook) => {
+                rook.store.get_session_limited(session, 256 * 1024)?.context("no session there")?
+            }
+            Self::Daemon(daemon) => daemon.get::<rook_store::SessionMeta>(&format!(
+                "/api/sessions/{}",
+                rook_store::format_session_id(session)
+            ))?,
+        };
+        anyhow::ensure!(meta.id == session, "the daemon returned a different session");
+        Ok(meta)
+    }
+
+    /// Keep the same store/daemon, looking at the selected session's project.
+    pub fn in_workspace(self, workspace: std::path::PathBuf) -> Self {
+        match self {
+            Self::Local(rook) => Self::Local(std::sync::Arc::new(rook.for_workspace(workspace))),
+            Self::Daemon(mut daemon) => {
+                daemon.workspace = workspace;
+                Self::Daemon(daemon)
+            }
+        }
+    }
+
     pub fn catalog(&self, workspace: &std::path::Path) -> Result<Vec<SkillCard>> {
         match self {
             Self::Local(rook) => Ok(rook.catalog()),

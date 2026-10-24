@@ -327,7 +327,44 @@ const TICK: Duration = Duration::from_millis(60);
 const NOT_HERE: &str = "`rookd` holds the store, so the slash commands are not available in this \
                         window. Turns are: they run there and stream back here.";
 
-pub fn run(source: crate::source::Source, yes: bool, started: Option<String>) -> Result<()> {
+fn startup_session(
+    source: crate::source::Source,
+    requested: Option<&str>,
+    explicit_workspace: bool,
+) -> Result<(crate::source::Source, Option<rook_store::SessionMeta>)> {
+    let Some(requested) = requested else { return Ok((source, None)) };
+    let id = source.session_named(requested, source.workspace())?;
+    let meta = source.session_metadata(id)?;
+    let owner = std::path::PathBuf::from(&meta.workspace);
+    anyhow::ensure!(
+        owner.is_dir(),
+        "session workspace {} is unavailable; use `rook session move` to move the conversation",
+        owner.display()
+    );
+    let same = |path: &std::path::Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let source = if same(&owner) != same(source.workspace()) {
+        anyhow::ensure!(
+            !explicit_workspace,
+            "this session belongs to {}; open the TUI there or use `rook session move` to move the conversation",
+            owner.display()
+        );
+        source.in_workspace(owner)
+    } else {
+        source
+    };
+    Ok((source, Some(meta)))
+}
+
+pub fn run(
+    source: crate::source::Source,
+    yes: bool,
+    started: Option<String>,
+    requested: Option<&str>,
+    explicit_workspace: bool,
+) -> Result<()> {
+    // Resolve and check before entering the alternate screen, so a missing
+    // session leaves an ordinary error and cannot create a new conversation.
+    let (source, resumed) = startup_session(source, requested, explicit_workspace)?;
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let mut terminal = ratatui::init();
     // The wheel is how a person scrolls back through what an agent said, and
@@ -365,6 +402,9 @@ pub fn run(source: crate::source::Source, yes: bool, started: Option<String>) ->
         .is_ok();
     let daemon = source.daemon_base().map(str::to_string);
     let mut app = App::new(source, runtime, yes);
+    if let Some(meta) = resumed {
+        app.continue_known(meta.id, meta.title, meta.next_seq);
+    }
     app.mouse = mouse;
     app.shift_enter = shift_enter;
     let result = app.run(&mut terminal);
@@ -6671,6 +6711,62 @@ fn kind_style(kind: &str) -> Style {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn startup_session_resolves_existing_history_and_workspace_scoped_last_without_creating_sessions() {
+        use crate::source::Source;
+        use std::sync::Arc;
+        let home = tempfile::tempdir().unwrap();
+        let workspace = home.path().join("project");
+        let elsewhere = home.path().join("elsewhere");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&elsewhere).unwrap();
+        let rook = Arc::new(rook_core::Rook::from_parts(
+            rook_store::Store::open(home.path().join("store")).unwrap(),
+            Default::default(),
+            rook_skills::Environment::bare("test", "test", "1"),
+            Default::default(),
+            workspace.clone(),
+        ));
+        let session = rook.start_session("saved conversation").unwrap();
+        rook.log(session, rook_store::EventKind::UserMessage, "prompt", "STARTUP_HISTORY_MARKER").unwrap();
+        let foreign = rook.for_workspace(elsewhere.clone());
+        let other = foreign.start_session("another project").unwrap();
+        foreign.log(other, rook_store::EventKind::UserMessage, "prompt", "OTHER_PROJECT").unwrap();
+        let before = rook.session_summaries().unwrap().len();
+        for requested in ["last".to_string(), rook_store::format_session_id(session)] {
+            let (source, meta) =
+                super::startup_session(Source::Local(rook.clone()), Some(&requested), true).unwrap();
+            let meta = meta.unwrap();
+            assert_eq!(meta.id, session);
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let mut app = super::App::new(source, runtime, true);
+            app.continue_known(meta.id, meta.title, meta.next_seq);
+            assert_eq!(app.chat.session, Some(session));
+            assert!(app.chat.log.iter().any(|(_, line)| line.contains("STARTUP_HISTORY_MARKER")));
+            assert!(!app.chat.busy);
+        }
+        for requested in
+            ["invalid-selector".to_string(), rook_store::format_session_id(rook_store::new_session_id())]
+        {
+            assert!(super::startup_session(Source::Local(rook.clone()), Some(&requested), false).is_err());
+        }
+        let (_, meta) = super::startup_session(Source::Local(rook.clone()), None, false).unwrap();
+        assert!(meta.is_none());
+        assert_eq!(rook.session_summaries().unwrap().len(), before);
+
+        let selector = rook_store::format_session_id(other);
+        let (source, meta) =
+            super::startup_session(Source::Local(rook.clone()), Some(&selector), false).unwrap();
+        assert_eq!(source.workspace(), elsewhere);
+        assert_eq!(meta.unwrap().id, other);
+        let refused = super::startup_session(Source::Local(rook.clone()), Some(&selector), true);
+        assert!(refused.err().unwrap().to_string().contains("belongs to"));
+        assert_eq!(
+            rook.store.get_session(other).unwrap().unwrap().workspace,
+            elsewhere.display().to_string()
+        );
+    }
+
     #[test]
     fn background_read_uses_the_worker_and_preserves_a_busy_session_and_draft() {
         let home = tempfile::tempdir().unwrap();

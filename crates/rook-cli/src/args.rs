@@ -94,6 +94,10 @@ pub(crate) enum Command {
     },
     /// Chat, and browse the store, sessions and skills, in the terminal.
     Tui {
+        /// Open an existing session. `last` selects the latest conversation in
+        /// this workspace. Without -C, an explicit session follows its project.
+        #[arg(long)]
+        session: Option<String>,
         /// Take the store for this window alone rather than sharing it through
         /// `rookd`. One process, and no second window while it runs.
         #[arg(long)]
