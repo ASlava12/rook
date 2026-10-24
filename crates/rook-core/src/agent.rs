@@ -916,14 +916,26 @@ impl<'a> AgentLoop<'a> {
             .await
             .map_err(|e| CoreError::Other(self.vault.redact(&e.to_string())))?;
         let mut assembler = Assembler::default();
+        let mut failure = None;
         while let Some(delta) = stream.next().await {
-            let delta = delta.map_err(|e| CoreError::Other(self.vault.redact(&e.to_string())))?;
+            let delta = match delta {
+                Ok(delta) => delta,
+                Err(error) => {
+                    failure = Some(self.vault.redact(&error.to_string()));
+                    break;
+                }
+            };
             // A known credential can span model fragments. Keep the bounded
             // reply until it can be masked as a whole, before display or storage.
-            assembler.push(delta).map_err(|e| CoreError::Other(self.vault.redact(&e.to_string())))?;
+            if let Err(error) = assembler.push(delta) {
+                failure = Some(self.vault.redact(&error.to_string()));
+                break;
+            }
         }
+        drop(stream);
 
-        let completed = assembler.finish_with_metadata();
+        let mut completed = assembler.finish_with_metadata();
+        completed.completion_confirmed &= failure.is_none();
         let response = &completed.response;
         // A model that answers an aside with a tool call has nothing to say and
         // no way to act; an empty pane would leave that looking like a hang.
@@ -934,7 +946,15 @@ impl<'a> AgentLoop<'a> {
             "" => "(the model returned nothing)".to_string(),
             text => self.vault.redact(text),
         };
-        let body = format!("Q: {}\nA: {answer}", self.vault.redact(question));
+        let confirmed = completed.completion_confirmed;
+        let body = if confirmed {
+            format!("Q: {}\nA: {answer}", self.vault.redact(question))
+        } else {
+            format!(
+                "Q: {}\nIncomplete answer (stream completion unconfirmed): {answer}",
+                self.vault.redact(question)
+            )
+        };
         crate::model_route::Auxiliary::new(
             &self.rook.config,
             &self.vault,
@@ -947,9 +967,14 @@ impl<'a> AgentLoop<'a> {
             self.rook,
             self.session,
             rook_store::NewEvent::new(EventKind::Note, rook_store::Kind::Message, body.as_bytes())
-                .label("btw")
+                .label(if confirmed { "btw" } else { "btw incomplete" })
                 .usage(response.usage.input_tokens, response.usage.output_tokens),
         )?;
+        if !confirmed {
+            return Err(CoreError::Other(failure.unwrap_or_else(|| {
+                "side-question stream ended without confirmed completion; incomplete output is saved in the transcript".into()
+            })));
+        }
         on_delta(&Delta::Text(answer.clone()));
         Ok(answer)
     }

@@ -2354,9 +2354,17 @@ mod tests {
         Fixture { _home: home, _workspace: workspace, router: router(state.clone()), state, session }
     }
 
+    #[derive(Clone, Copy)]
+    enum SideCompletion {
+        FinishReason,
+        DoneMarker,
+        Eof,
+    }
+
     async fn side_question_upstream(
         f: &Fixture,
         hold: bool,
+        terminal: SideCompletion,
     ) -> (tokio::task::JoinHandle<()>, tokio::sync::mpsc::Receiver<serde_json::Value>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -2367,8 +2375,12 @@ mod tests {
                 async move {
                     sent.send(request).await.unwrap();
                     if hold { std::future::pending::<()>().await; }
-                    let frame = serde_json::json!({"model":"owned-aside","choices":[{"index":0,"delta":{"role":"assistant","content":"SIDE_API_ANSWER"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":4}});
-                    ([(axum::http::header::CONTENT_TYPE,"text/event-stream")],format!("data: {frame}\n\ndata: [DONE]\n\n"))
+                    let finish_reason = matches!(terminal, SideCompletion::FinishReason).then_some("stop");
+                    let frame = serde_json::json!({"model":"owned-aside","choices":[{"index":0,"delta":{"role":"assistant","content":"SIDE_API_ANSWER"},"finish_reason":finish_reason}],"usage":{"prompt_tokens":5,"completion_tokens":4}});
+                    // Either finish_reason or [DONE] confirms this dialect.
+                    // EOF has neither marker and remains genuinely incomplete.
+                    let ending = if matches!(terminal, SideCompletion::DoneMarker) { "data: [DONE]\n\n" } else { "" };
+                    ([(axum::http::header::CONTENT_TYPE,"text/event-stream")],format!("data: {frame}\n\n{ending}"))
                 }
             }));
             axum::serve(listener, app).await.unwrap();
@@ -2392,38 +2404,40 @@ mod tests {
 
     #[tokio::test]
     async fn side_question_api_answers_without_admitting_or_finishing_a_foreground_prompt() {
-        let f = fixture();
-        let (upstream, mut requests) = side_question_upstream(&f, false).await;
-        let turn = f.state.turn_started();
-        let path = format!("/api/sessions/{}/aside", rook_store::format_session_id(f.session));
-        let (status, reply) = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            post(&f, &path, serde_json::json!({"question":"Which port?"})),
-        )
-        .await
-        .unwrap();
-        assert_eq!(status, StatusCode::OK, "{reply}");
-        assert_eq!(reply["status"], "complete");
-        assert_eq!(reply["answer"], "SIDE_API_ANSWER");
-        let request = requests.recv().await.unwrap();
-        assert!(request.get("tools").is_none_or(|v| v.as_array().is_some_and(Vec::is_empty)));
-        assert_eq!(f.state.turns.load(std::sync::atomic::Ordering::SeqCst), 1);
-        let rook = f.state.rook.read().await;
-        let history = rook.transcript(f.session, 0, 100, 65536).unwrap();
-        assert_eq!(history.iter().filter(|e| e.kind == "user").count(), 1);
-        assert_eq!(history.iter().find(|e| e.kind == "user").unwrap().body, "find the leak");
-        assert!(!history.iter().any(|e| e.kind == "assistant"));
-        assert_eq!(history.iter().filter(|e| e.label == "btw").count(), 1);
-        drop(rook);
-        drop(turn);
-        upstream.abort();
-        assert!(upstream.await.unwrap_err().is_cancelled());
+        for terminal in [SideCompletion::FinishReason, SideCompletion::DoneMarker] {
+            let f = fixture();
+            let (upstream, mut requests) = side_question_upstream(&f, false, terminal).await;
+            let turn = f.state.turn_started();
+            let path = format!("/api/sessions/{}/aside", rook_store::format_session_id(f.session));
+            let (status, reply) = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                post(&f, &path, serde_json::json!({"question":"Which port?"})),
+            )
+            .await
+            .unwrap();
+            assert_eq!(status, StatusCode::OK, "{reply}");
+            assert_eq!(reply["status"], "complete");
+            assert_eq!(reply["answer"], "SIDE_API_ANSWER");
+            let request = requests.recv().await.unwrap();
+            assert!(request.get("tools").is_none_or(|v| v.as_array().is_some_and(Vec::is_empty)));
+            assert_eq!(f.state.turns.load(std::sync::atomic::Ordering::SeqCst), 1);
+            let rook = f.state.rook.read().await;
+            let history = rook.transcript(f.session, 0, 100, 65536).unwrap();
+            assert_eq!(history.iter().filter(|e| e.kind == "user").count(), 1);
+            assert_eq!(history.iter().find(|e| e.kind == "user").unwrap().body, "find the leak");
+            assert!(!history.iter().any(|e| e.kind == "assistant"));
+            assert_eq!(history.iter().filter(|e| e.label == "btw").count(), 1);
+            drop(rook);
+            drop(turn);
+            upstream.abort();
+            assert!(upstream.await.unwrap_err().is_cancelled());
+        }
     }
 
     #[tokio::test]
     async fn side_question_response_body_cancellation_drops_the_owned_model_future() {
         let f = fixture();
-        let (upstream, mut requests) = side_question_upstream(&f, true).await;
+        let (upstream, mut requests) = side_question_upstream(&f, true, SideCompletion::FinishReason).await;
         let turn = f.state.turn_started();
         let path = format!("/api/sessions/{}/aside", rook_store::format_session_id(f.session));
         let response = f
@@ -2451,6 +2465,40 @@ mod tests {
         let history = rook.transcript(f.session, 0, 100, 65536).unwrap();
         assert!(!history.iter().any(|e| e.label == "btw"));
         assert_eq!(history.iter().filter(|e| e.kind == "user").count(), 1);
+        assert_eq!(f.state.turns.load(std::sync::atomic::Ordering::SeqCst), 1);
+        drop(rook);
+        drop(turn);
+        upstream.abort();
+        assert!(upstream.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn side_question_api_rejects_an_unconfirmed_native_stream_and_retains_partial_usage() {
+        let f = fixture();
+        let (upstream, mut requests) = side_question_upstream(&f, false, SideCompletion::Eof).await;
+        let turn = f.state.turn_started();
+        let path = format!("/api/sessions/{}/aside", rook_store::format_session_id(f.session));
+        let (status, reply) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            post(&f, &path, serde_json::json!({"question":"Which port?"})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(reply["status"], "failed", "{reply}");
+        assert!(reply["error"].as_str().unwrap().contains("completion"));
+        assert!(reply.get("answer").is_none());
+        requests.recv().await.unwrap();
+        let rook = f.state.rook.read().await;
+        let history = rook.transcript(f.session, 0, 100, 65536).unwrap();
+        assert!(!history.iter().any(|e| e.label == "btw" || e.kind == "assistant"));
+        assert!(history.iter().any(|e| e.label == "btw incomplete" && e.body.contains("SIDE_API_ANSWER")));
+        let receipt: serde_json::Value =
+            serde_json::from_str(&history.iter().find(|e| e.label == "rook:model-aux:v1").unwrap().body)
+                .unwrap();
+        assert_eq!(receipt["receipt"]["complete"], false);
+        let meta = rook.store.get_session(f.session).unwrap().unwrap();
+        assert_eq!((meta.tokens_in, meta.tokens_out), (5, 4));
         assert_eq!(f.state.turns.load(std::sync::atomic::Ordering::SeqCst), 1);
         drop(rook);
         drop(turn);

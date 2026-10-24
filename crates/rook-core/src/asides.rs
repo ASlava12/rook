@@ -44,6 +44,103 @@ mod tests {
     #[derive(Default)]
     struct Model(Mutex<Vec<rook_llm::Request>>);
 
+    #[derive(Clone, Copy)]
+    enum Incomplete {
+        Eof,
+        UnconfirmedDone,
+        Failed,
+    }
+
+    #[async_trait::async_trait]
+    impl rook_llm::Provider for Incomplete {
+        fn id(&self) -> &str {
+            "owned/incomplete-aside"
+        }
+        fn context_window(&self) -> usize {
+            32000
+        }
+        fn visit_connection_secrets(&self, visitor: &mut dyn FnMut(&str)) {
+            visitor(OWNED_KEY);
+        }
+        async fn complete(&self, _: rook_llm::Request) -> rook_llm::Result<rook_llm::Response> {
+            unreachable!("the owned fixture exercises the streaming path")
+        }
+        async fn stream(&self, _: rook_llm::Request) -> rook_llm::Result<rook_llm::ResponseStream> {
+            let mut deltas = vec![Ok(rook_llm::Delta::Text(format!("OWNED_PARTIAL {OWNED_KEY}")))];
+            match self {
+                Self::Eof => {}
+                Self::UnconfirmedDone => {
+                    deltas.push(Ok(rook_llm::Delta::ResponseMetadata {
+                        usage_reported: true,
+                        completion_confirmed: false,
+                    }));
+                    deltas.push(Ok(rook_llm::Delta::Done {
+                        stop_reason: rook_llm::StopReason::EndTurn,
+                        usage: rook_llm::Usage { input_tokens: 5, output_tokens: 7, ..Default::default() },
+                        model: "owned/incomplete-aside".into(),
+                    }));
+                }
+                Self::Failed => {
+                    deltas.push(Err(rook_llm::LlmError::Other(format!("owned partial failure {OWNED_KEY}"))))
+                }
+            }
+            Ok(Box::pin(futures_util::stream::iter(deltas)))
+        }
+    }
+
+    async fn incomplete_side_question(mode: Incomplete) {
+        let home = tempfile::tempdir().unwrap();
+        let rook = owned_rook(home.path());
+        let session = rook.start_session("owned incomplete aside").unwrap();
+        rook.log(session, rook_store::EventKind::UserMessage, "", "OWNED_FOREGROUND").unwrap();
+        let mut live = String::new();
+        let result = AgentLoop::new(&rook, Arc::new(mode), session)
+            .aside("Which port?", |delta| {
+                if let rook_llm::Delta::Text(text) = delta {
+                    live.push_str(text);
+                }
+            })
+            .await;
+        let error = result.expect_err("an unconfirmed or failed stream cannot become a complete side answer");
+        assert!(!error.to_string().contains(OWNED_KEY));
+        assert!(live.is_empty(), "partial replies are not displayed as completed answers");
+        let history = rook.transcript(session, 0, 100, 65536).unwrap();
+        assert!(!history.iter().any(|e| e.label == "btw" || e.kind == "assistant"));
+        let partial = history
+            .iter()
+            .find(|e| e.label == "btw incomplete")
+            .expect("retain the partial answer explicitly as incomplete");
+        assert!(partial.body.contains("OWNED_PARTIAL") && !partial.body.contains(OWNED_KEY));
+        let receipt: serde_json::Value =
+            serde_json::from_str(&history.iter().find(|e| e.label == "rook:model-aux:v1").unwrap().body)
+                .unwrap();
+        assert_eq!(receipt["purpose"], "aside");
+        assert_eq!(receipt["receipt"]["complete"], false);
+        let meta = rook.store.get_session(session).unwrap().unwrap();
+        let expected = if matches!(mode, Incomplete::UnconfirmedDone) { (5, 7) } else { (0, 0) };
+        assert_eq!(
+            (meta.tokens_in, meta.tokens_out),
+            expected,
+            "retain reported usage without inventing absent counters"
+        );
+        assert_eq!(history.iter().filter(|e| e.kind == "user").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn incomplete_side_eof_never_becomes_a_successful_answer() {
+        incomplete_side_question(Incomplete::Eof).await;
+    }
+
+    #[tokio::test]
+    async fn incomplete_side_synthesized_done_keeps_reported_usage_without_claiming_completion() {
+        incomplete_side_question(Incomplete::UnconfirmedDone).await;
+    }
+
+    #[tokio::test]
+    async fn incomplete_side_stream_error_retains_a_masked_partial_without_a_successful_reply() {
+        incomplete_side_question(Incomplete::Failed).await;
+    }
+
     const OWNED_KEY: &str = "owned-aside-credential-for-regression-81273645";
 
     struct KeyEcho {
