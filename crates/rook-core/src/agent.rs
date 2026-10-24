@@ -900,6 +900,10 @@ impl<'a> AgentLoop<'a> {
              offer to — this is an aside, not an instruction.)"
         )));
 
+        for message in &mut messages {
+            crate::provider_history::redact_message(message, &self.vault)?;
+        }
+
         let mut request = Request::new(messages);
         request.max_output_tokens = 1024;
         // An aside is a question about work already done, not the work.
@@ -910,12 +914,13 @@ impl<'a> AgentLoop<'a> {
             .provider
             .stream_observed(request, self.attempt_observer(crate::model_route::Purpose::Aside))
             .await
-            .map_err(|e| CoreError::Other(e.to_string()))?;
+            .map_err(|e| CoreError::Other(self.vault.redact(&e.to_string())))?;
         let mut assembler = Assembler::default();
         while let Some(delta) = stream.next().await {
-            let delta = delta.map_err(|e| CoreError::Other(e.to_string()))?;
-            on_delta(&delta);
-            assembler.push(delta).map_err(|e| CoreError::Other(e.to_string()))?;
+            let delta = delta.map_err(|e| CoreError::Other(self.vault.redact(&e.to_string())))?;
+            // A known credential can span model fragments. Keep the bounded
+            // reply until it can be masked as a whole, before display or storage.
+            assembler.push(delta).map_err(|e| CoreError::Other(self.vault.redact(&e.to_string())))?;
         }
 
         let completed = assembler.finish_with_metadata();
@@ -927,9 +932,9 @@ impl<'a> AgentLoop<'a> {
                 "(the model tried to use a tool instead of answering; ask it as a normal message)".to_string()
             }
             "" => "(the model returned nothing)".to_string(),
-            text => text.to_string(),
+            text => self.vault.redact(text),
         };
-        let body = format!("Q: {question}\nA: {answer}");
+        let body = format!("Q: {}\nA: {answer}", self.vault.redact(question));
         crate::model_route::Auxiliary::new(
             &self.rook.config,
             &self.vault,
@@ -945,6 +950,7 @@ impl<'a> AgentLoop<'a> {
                 .label("btw")
                 .usage(response.usage.input_tokens, response.usage.output_tokens),
         )?;
+        on_delta(&Delta::Text(answer.clone()));
         Ok(answer)
     }
 

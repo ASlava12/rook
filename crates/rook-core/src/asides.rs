@@ -44,6 +44,112 @@ mod tests {
     #[derive(Default)]
     struct Model(Mutex<Vec<rook_llm::Request>>);
 
+    const OWNED_KEY: &str = "owned-aside-credential-for-regression-81273645";
+
+    struct KeyEcho {
+        seen: Mutex<Vec<rook_llm::Request>>,
+        fail: bool,
+        split: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl rook_llm::Provider for KeyEcho {
+        fn id(&self) -> &str {
+            "owned/key-echo"
+        }
+        fn context_window(&self) -> usize {
+            32000
+        }
+        fn visit_connection_secrets(&self, visitor: &mut dyn FnMut(&str)) {
+            visitor(OWNED_KEY);
+        }
+        async fn complete(&self, request: rook_llm::Request) -> rook_llm::Result<rook_llm::Response> {
+            self.seen.lock().unwrap().push(request);
+            if self.fail {
+                return Err(rook_llm::LlmError::Other(format!("owned refusal {OWNED_KEY}")));
+            }
+            Ok(rook_llm::Response {
+                message: rook_llm::Message::assistant(format!("owned answer {OWNED_KEY}")),
+                stop_reason: rook_llm::StopReason::EndTurn,
+                usage: Default::default(),
+                model: "owned/key-echo".into(),
+            })
+        }
+
+        async fn stream(&self, request: rook_llm::Request) -> rook_llm::Result<rook_llm::ResponseStream> {
+            let response = self.complete(request).await?;
+            let text = response.message.content;
+            let mut deltas = Vec::new();
+            if self.split {
+                let (first, rest) = text.split_at(text.len() / 2);
+                deltas.push(Ok(rook_llm::Delta::Text(first.into())));
+                deltas.push(Ok(rook_llm::Delta::Text(rest.into())));
+            } else {
+                deltas.push(Ok(rook_llm::Delta::Text(text)));
+            }
+            deltas.push(Ok(rook_llm::Delta::Done {
+                stop_reason: response.stop_reason,
+                usage: response.usage,
+                model: response.model,
+            }));
+            Ok(Box::pin(futures_util::stream::iter(deltas)))
+        }
+    }
+
+    #[tokio::test]
+    async fn aside_masks_its_known_connection_key_in_request_live_answer_and_saved_note() {
+        let home = tempfile::tempdir().unwrap();
+        let rook = owned_rook(home.path());
+        let session = rook.start_session("owned key aside").unwrap();
+        let model = Arc::new(KeyEcho { seen: Default::default(), fail: false, split: false });
+        let mut live = String::new();
+        let answer = AgentLoop::new(&rook, model.clone(), session)
+            .aside(&format!("What is {OWNED_KEY}?"), |delta| {
+                if let rook_llm::Delta::Text(text) = delta {
+                    live.push_str(text);
+                }
+            })
+            .await
+            .unwrap();
+        let sent = model.seen.lock().unwrap()[0].messages.iter().any(|m| m.content.contains(OWNED_KEY));
+        let saved =
+            rook.transcript(session, 0, 100, 65536).unwrap().iter().any(|e| e.body.contains(OWNED_KEY));
+        let exposed = [sent, live.contains(OWNED_KEY), answer.contains(OWNED_KEY), saved];
+        eprintln!("owned aside key exposure [request, live, reply, saved] = {exposed:?}");
+        assert_eq!(exposed, [false; 4], "known connection keys must stay out of every aside surface");
+    }
+
+    #[tokio::test]
+    async fn aside_masks_its_known_connection_key_in_provider_errors() {
+        let home = tempfile::tempdir().unwrap();
+        let rook = owned_rook(home.path());
+        let session = rook.start_session("owned error aside").unwrap();
+        let model = Arc::new(KeyEcho { seen: Default::default(), fail: true, split: false });
+        let error =
+            AgentLoop::new(&rook, model, session).aside("Why did it fail?", |_| {}).await.unwrap_err();
+        assert!(!error.to_string().contains(OWNED_KEY), "aside errors must mask known connection keys");
+    }
+
+    #[tokio::test]
+    async fn aside_masks_a_known_connection_key_split_across_model_fragments() {
+        let home = tempfile::tempdir().unwrap();
+        let rook = owned_rook(home.path());
+        let session = rook.start_session("owned split key aside").unwrap();
+        let model = Arc::new(KeyEcho { seen: Default::default(), fail: false, split: true });
+        let mut live = String::new();
+        let answer = AgentLoop::new(&rook, model, session)
+            .aside("Which port?", |delta| {
+                if let rook_llm::Delta::Text(text) = delta {
+                    live.push_str(text);
+                }
+            })
+            .await
+            .unwrap();
+        assert!(!live.contains(OWNED_KEY), "masking individual fragments can still reveal the complete key");
+        assert_eq!(live, answer);
+        assert!(answer.contains("${secret}"));
+    }
+
     struct HeldModel {
         started: tokio::sync::Notify,
         dropped: Arc<std::sync::atomic::AtomicBool>,

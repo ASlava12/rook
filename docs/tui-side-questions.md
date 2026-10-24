@@ -20,6 +20,9 @@ One side question can run per window. Sending another keeps its draft and shows
 that the first is still running. Answers and failures appear with their original
 question, without replacing text currently being edited. The exchange is saved
 as an auxiliary transcript note and excluded from normal conversation replay.
+The bounded answer is displayed after completion so known credentials can be
+masked even when they span several model fragments. Request messages, saved
+question/answer text and provider errors use the existing known-value mask.
 
 Changing sessions or closing the window cancels the window's auxiliary request.
 A routed window uses the daemon's side-question API; dropping its response body
