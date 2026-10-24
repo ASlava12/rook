@@ -58,6 +58,7 @@ type Connection = Arc<Server>;
 struct Entry {
     name: String,
     enabled: bool,
+    connecting: bool,
     transport: &'static str,
     installed: Option<Connection>,
     generation: u64,
@@ -69,6 +70,7 @@ impl Entry {
         Self {
             name: config.name.clone(),
             enabled: config.enabled,
+            connecting: false,
             transport: if config.url.as_deref().is_some_and(|url| !url.is_empty()) {
                 "http"
             } else {
@@ -121,7 +123,35 @@ pub struct McpSession {
     pub(crate) apps: crate::mcp_apps::Pool,
     state: RwLock<State>,
     operation: tokio::sync::Mutex<()>,
+    startup_cancel: tokio::sync::Notify,
     limits: Settings,
+}
+
+/// Owns an initial connection attempt, including before its future is polled.
+/// Dropping it retires pending declarations without replacing connected servers.
+pub struct Startup {
+    session: Arc<McpSession>,
+    configs: Vec<ServerConfig>,
+    proxy: rook_llm::Proxy,
+}
+
+impl Startup {
+    pub async fn run(mut self) {
+        let configs = std::mem::take(&mut self.configs);
+        self.session.initialize(configs, &self.proxy).await;
+    }
+}
+
+impl Drop for Startup {
+    fn drop(&mut self) {
+        let mut state = self.session.state.write().unwrap_or_else(|e| e.into_inner());
+        for entry in &mut state.entries {
+            if entry.connecting {
+                entry.connecting = false;
+                entry.error = Some("initial connection cancelled; reconnect this server to try again");
+            }
+        }
+    }
 }
 
 impl McpSession {
@@ -132,30 +162,108 @@ impl McpSession {
         proxy: &rook_llm::Proxy,
         limits: Settings,
     ) -> Self {
+        let (session, configs) = Self::prepare(configs, limits);
+        session.initialize(configs, proxy).await;
+        session
+    }
+
+    /// Declare bounded connection state immediately; the caller owns when to
+    /// poll or cancel startup. Ready servers publish independently, in the
+    /// original declaration order. Turns still take fixed catalog snapshots.
+    pub fn start<'a>(
+        configs: impl IntoIterator<Item = &'a ServerConfig>,
+        proxy: rook_llm::Proxy,
+        limits: Settings,
+    ) -> (Arc<Self>, Startup) {
+        let (session, configs) = Self::prepare(configs, limits);
+        let session = Arc::new(session);
+        let startup = Startup { session: session.clone(), configs, proxy };
+        (session, startup)
+    }
+
+    fn prepare<'a>(
+        configs: impl IntoIterator<Item = &'a ServerConfig>,
+        limits: Settings,
+    ) -> (Self, Vec<ServerConfig>) {
         let mut state = State::default();
-        match admitted(configs, limits) {
-            Err(issue) => state.issue = Some(issue),
+        let configs = match admitted(configs, limits) {
+            Err(issue) => {
+                state.issue = Some(issue);
+                Vec::new()
+            }
             Ok(configs) => {
                 let configs: Vec<ServerConfig> = configs.into_iter().cloned().collect();
-                state.entries = stream::iter(configs.into_iter().map(|config| async move {
-                    let mut entry = Entry::new(&config);
-                    if config.enabled {
-                        match candidate(&config, proxy, limits).await {
-                            Ok(connection) => {
-                                entry.installed = Some(connection);
-                                entry.generation = 1;
-                            }
-                            Err(error) => entry.error = Some(error),
-                        }
+                state.entries = configs
+                    .iter()
+                    .map(|config| {
+                        let mut entry = Entry::new(config);
+                        entry.connecting = config.enabled;
+                        entry
+                    })
+                    .collect();
+                configs
+            }
+        };
+        (
+            Self {
+                state: RwLock::new(state),
+                operation: Default::default(),
+                startup_cancel: Default::default(),
+                apps: Default::default(),
+                limits,
+            },
+            configs,
+        )
+    }
+
+    async fn initialize(&self, configs: Vec<ServerConfig>, proxy: &rook_llm::Proxy) {
+        // Invalid settings and empty/disabled configurations must not create a
+        // zero-capacity stream or postpone an otherwise ready local window.
+        if !configs.iter().any(|config| config.enabled) {
+            return;
+        }
+        let _operation = self.operation.lock().await;
+        let mut pending =
+            stream::iter(
+                configs.into_iter().enumerate().filter(|(_, c)| c.enabled).map(
+                    |(index, config)| async move { (index, candidate(&config, proxy, self.limits).await) },
+                ),
+            )
+            .buffer_unordered(self.limits.parallel_connects);
+        loop {
+            if self.state.read().unwrap_or_else(|e| e.into_inner()).closed {
+                return;
+            }
+            let next = tokio::select! {
+                _ = self.startup_cancel.notified() => return,
+                next = pending.next() => next,
+            };
+            let Some((index, result)) = next else { return };
+            let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());
+            if state.closed {
+                return;
+            }
+            if let Some(entry) = state.entries.get_mut(index) {
+                entry.connecting = false;
+                match result {
+                    Ok(connection) => {
+                        entry.installed = Some(connection);
+                        entry.generation = 1;
                     }
-                    entry
-                }))
-                .buffered(limits.parallel_connects)
-                .collect()
-                .await;
+                    Err(error) => entry.error = Some(error),
+                }
             }
         }
-        Self { state: RwLock::new(state), operation: Default::default(), apps: Default::default(), limits }
+    }
+
+    pub fn pending_connections(&self) -> usize {
+        self.state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .entries
+            .iter()
+            .filter(|entry| entry.connecting)
+            .count()
     }
 
     /// A fixed snapshot for one turn: swapping the manager cannot move an
@@ -231,6 +339,8 @@ impl McpSession {
                             "closed"
                         } else if !entry.enabled {
                             "disabled"
+                        } else if entry.connecting {
+                            "connecting"
                         } else if entry.installed.is_some() {
                             "connected"
                         } else {
@@ -296,6 +406,9 @@ impl McpSession {
             if state.closed {
                 return Err("MCP session is closed; open a new session");
             }
+            if state.entries.iter().any(|entry| entry.connecting) {
+                return Err("initial MCP connections are still running; wait for them before reconnecting");
+            }
             if !state.entries.iter().any(|entry| entry.name == name) {
                 if state.entries.len() >= self.limits.max_servers {
                     return Err(
@@ -312,6 +425,9 @@ impl McpSession {
             if config.enabled { candidate(config, proxy, self.limits).await.map(Some) } else { Ok(None) };
         {
             let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());
+            if state.closed {
+                return Err("MCP session is closed; open a new session");
+            }
             let entry = state
                 .entries
                 .iter_mut()
@@ -339,6 +455,14 @@ impl McpSession {
     }
 
     pub async fn shutdown(&self) {
+        {
+            let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());
+            state.closed = true;
+            for entry in &mut state.entries {
+                entry.connecting = false;
+            }
+        }
+        self.startup_cancel.notify_one();
         let _operation = self.operation.lock().await;
         let servers: Vec<_> = {
             let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());

@@ -1,11 +1,17 @@
 //! A single bounded worker leaves input and turn streaming live during discovery.
 use super::*;
+use futures_util::FutureExt;
 use rook_core::mcp_connections::Report;
+
+#[cfg(test)]
+mod tests;
 
 pub(super) struct Connections {
     commands: mpsc::Sender<Option<String>>,
     events: mpsc::Receiver<Result<Report, String>>,
     worker: tokio::task::JoinHandle<()>,
+    startup: Option<tokio::task::JoinHandle<()>>,
+    local: Option<Arc<rook_core::McpSession>>,
     report: Option<Report>,
     pending: bool,
     note: String,
@@ -15,6 +21,9 @@ pub(super) struct Connections {
 impl Drop for Connections {
     fn drop(&mut self) {
         self.worker.abort();
+        if let Some(startup) = &self.startup {
+            startup.abort();
+        }
     }
 }
 impl Connections {
@@ -22,7 +31,14 @@ impl Connections {
         source: &crate::source::Source,
         runtime: &tokio::runtime::Runtime,
         session: Arc<rook_core::McpSession>,
+        startup: Option<rook_core::mcp_connections::Startup>,
     ) -> Self {
+        let local = source.here().map(|_| session.clone());
+        let startup = startup
+            .filter(|_| local.is_some() && session.pending_connections() != 0)
+            .map(|startup| runtime.spawn(startup.run()));
+        let report = local.as_ref().map(|session| session.report());
+        let note = if startup.is_some() { "Connecting MCP servers…".into() } else { String::new() };
         let auth = super::mcp_auth::Auth::new(source, runtime, session.clone());
         let (commands, mut requests) = mpsc::channel::<Option<String>>(1);
         let (send, events) = mpsc::channel(1);
@@ -51,9 +67,11 @@ impl Connections {
             commands,
             events,
             worker,
-            report: None,
+            startup,
+            local,
+            report,
             pending: false,
-            note: String::new(),
+            note,
             selection: ListState::default(),
             auth,
         }
@@ -61,6 +79,10 @@ impl Connections {
 
     pub(super) fn request(&mut self, name: Option<String>) {
         if self.pending {
+            return;
+        }
+        if name.is_some() && self.starting() {
+            self.note = "Initial MCP connections are still running; wait before reconnecting.".into();
             return;
         }
         self.auth.clear_notice();
@@ -76,7 +98,8 @@ impl Connections {
         }
     }
 
-    pub(super) fn poll(&mut self) {
+    pub(super) fn poll(&mut self) -> Option<String> {
+        let notice = self.poll_startup();
         if let Some(report) = self.auth.poll() {
             self.selection.select(if report.servers.is_empty() {
                 None
@@ -102,9 +125,44 @@ impl Connections {
                 Err(error) => self.note = error,
             }
         }
+        notice
+    }
+
+    fn starting(&self) -> bool {
+        self.local.as_ref().is_some_and(|session| session.pending_connections() != 0)
+    }
+
+    fn poll_startup(&mut self) -> Option<String> {
+        let startup = self.startup.as_ref()?;
+        let finished = startup.is_finished();
+        let report = self.local.as_ref()?.report();
+        self.selection.select(if report.servers.is_empty() {
+            None
+        } else {
+            Some(self.selection.selected().unwrap_or(0).min(report.servers.len() - 1))
+        });
+        let ready = report.servers.iter().filter(|s| s.state == "connected").count();
+        let failed = report.servers.iter().filter(|s| s.state == "failed").count();
+        self.report = Some(report);
+        if !finished {
+            return None;
+        }
+        let succeeded = matches!(self.startup.take()?.now_or_never(), Some(Ok(())));
+        let text = if succeeded {
+            format!("MCP startup finished: {ready} connected, {failed} failed. /mcp shows connection status.")
+        } else {
+            "MCP startup stopped. /mcp shows connection status and reconnect controls.".into()
+        };
+        self.note = text.clone();
+        Some(text)
     }
 
     pub(super) fn authenticate(&mut self, name: String, logout: bool) {
+        if self.starting() {
+            self.note =
+                "Initial MCP connections are still running; wait before changing authentication.".into();
+            return;
+        }
         self.auth.start(name, logout);
     }
 
