@@ -1363,7 +1363,30 @@ impl Source {
                 workspace: d.workspace.clone(),
                 runtime: tokio::runtime::Builder::new_current_thread().enable_all().build()?,
                 http: daemon_client(&d.base)?,
+                read_bounds: d.read_bounds,
             }),
+        })
+    }
+
+    /// Panel refreshes are reads, not long-running routed operations.
+    pub(crate) fn panel_reader(&self) -> Result<Self> {
+        let mut reader = self.reader()?;
+        if let Self::Daemon(daemon) = &mut reader {
+            daemon.read_bounds = Some((std::time::Duration::from_secs(15), 32 * 1024 * 1024));
+        }
+        Ok(reader)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn panel_fixture(base: String) -> Self {
+        rook_llm::init_tls();
+        Self::Daemon(Daemon {
+            http: daemon_client(&base).unwrap(),
+            base,
+            replaced: false,
+            workspace: std::path::PathBuf::from("."),
+            runtime: tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap(),
+            read_bounds: None,
         })
     }
 
@@ -1871,6 +1894,7 @@ pub struct Daemon {
     workspace: std::path::PathBuf,
     runtime: tokio::runtime::Runtime,
     http: reqwest::Client,
+    read_bounds: Option<(std::time::Duration, usize)>,
 }
 
 /// How long to wait for the daemon to say it is there.
@@ -1928,8 +1952,14 @@ impl Daemon {
         rook_llm::init_tls();
         // The default every request inherits; the probe below asks for less.
         let http = daemon_client(&base).ok()?;
-        let mut daemon =
-            Self { base, replaced: false, workspace: std::path::PathBuf::from("."), runtime, http };
+        let mut daemon = Self {
+            base,
+            replaced: false,
+            workspace: std::path::PathBuf::from("."),
+            runtime,
+            http,
+            read_bounds: None,
+        };
         // The same request that proves it is alive answers what it is running,
         // so knowing costs nothing beyond what was already asked — and where
         // it is too old to answer, this side works it out from how long it
@@ -2042,9 +2072,24 @@ impl Daemon {
     fn get_within<T: DeserializeOwned>(&self, path: &str, patience: std::time::Duration) -> Result<T> {
         let url = format!("{}{path}", self.base);
         self.runtime.block_on(async {
-            let response =
+            let patience = self.read_bounds.map_or(patience, |(limit, _)| patience.min(limit));
+            let mut response =
                 self.http.get(&url).timeout(patience).send().await.with_context(|| format!("GET {url}"))?;
             let status = response.status();
+            if let Some((_, limit)) = self.read_bounds {
+                let mut body = Vec::new();
+                while let Some(chunk) = response.chunk().await? {
+                    anyhow::ensure!(
+                        chunk.len() <= limit.saturating_sub(body.len()),
+                        "panel reply exceeds {limit} bytes"
+                    );
+                    body.extend_from_slice(&chunk);
+                }
+                if !status.is_success() {
+                    bail!("{}", refused(&url, status, &String::from_utf8_lossy(&body)));
+                }
+                return serde_json::from_slice(&body).with_context(|| format!("decoding {url}"));
+            }
             let body = response.text().await.with_context(|| format!("reading {url}"))?;
             if !status.is_success() {
                 bail!("{}", refused(&url, status, &body));
@@ -2057,6 +2102,49 @@ impl Daemon {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn panel_reader_bounds_body_and_deadline_without_restricting_the_original_client() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let source = Source::panel_fixture(format!("http://{}", listener.local_addr().unwrap()));
+        let observer = std::thread::spawn(move || {
+            for index in 0..3 {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                let mut head = Vec::new();
+                let mut byte = [0];
+                while !head.ends_with(b"\r\n\r\n") {
+                    socket.read_exact(&mut byte).unwrap();
+                    head.push(byte[0]);
+                }
+                let body = serde_json::to_vec(&"x".repeat(100)).unwrap();
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                if index == 2 {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+                let _ = socket.write_all(&body);
+            }
+        });
+        let Source::Daemon(original) = &source else { unreachable!() };
+        assert!(original.read_bounds.is_none());
+        assert_eq!(original.get::<String>("/ordinary").unwrap().len(), 100);
+        let Source::Daemon(mut panel) = source.panel_reader().unwrap() else { unreachable!() };
+        assert_eq!(panel.read_bounds, Some((std::time::Duration::from_secs(15), 32 * 1024 * 1024)));
+        panel.read_bounds = Some((std::time::Duration::from_secs(5), 64));
+        let error = panel.get::<String>("/oversized").unwrap_err();
+        assert!(error.to_string().contains("panel reply exceeds 64 bytes"), "{error}");
+        panel.read_bounds = Some((std::time::Duration::from_secs(1), 64));
+        let error = panel.get::<String>("/slow").unwrap_err();
+        assert!(error.downcast_ref::<reqwest::Error>().is_some_and(reqwest::Error::is_timeout), "{error:#}");
+        assert!(original.read_bounds.is_none());
+        observer.join().unwrap();
+    }
 
     #[test]
     fn startup_session_old_metadata_method_is_reported_as_version_skew() {
@@ -2117,6 +2205,7 @@ mod tests {
         });
         let source = Source::Daemon(Daemon {
             http: daemon_client(&base).unwrap(),
+            read_bounds: None,
             base,
             replaced: false,
             workspace: std::path::PathBuf::from("owned-workspace"),
