@@ -441,6 +441,70 @@ mod tests {
     }
 
     #[test]
+    fn panel_details_survive_read_failure_only_while_the_selected_identity_survives() {
+        let server = Server::new();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let mut app = App::new(server.source.reader().unwrap(), runtime, true);
+        until(|| {
+            app.poll_refresh();
+            !app.sessions.is_empty() && !app.refresh.active
+        });
+        let skill = |name: &str| SkillCard {
+            name: name.into(),
+            description: String::new(),
+            version: "1".into(),
+            source: "owned fixture".into(),
+            keywords: Vec::new(),
+            applicable: true,
+            mismatches: Vec::new(),
+            body_tokens: 0,
+        };
+        let docs = |topic: &str| rook_core::docs::Kept {
+            topic: topic.into(),
+            version: "1".into(),
+            pages: 0,
+            bytes: 0,
+            fetched_at: 0,
+            object: "owned fixture".into(),
+        };
+        app.skills = vec![skill("old-skill")];
+        app.skill_state.select(Some(0));
+        app.skill_versions = vec![rook_core::SkillVersionRecord {
+            reference: "old-skill".into(),
+            object: "old-object".into(),
+            version: "1".into(),
+            captured_at: 0,
+            files: 0,
+            bytes: 0,
+            note: None,
+        }];
+        app.docs = vec![docs("old-docs")];
+        app.docs_state.select(Some(0));
+        app.doc_set = Some(rook_core::DocSet::new("old-docs", "1", Vec::new()));
+
+        for replaced in [false, true] {
+            let mut snapshot = Query { scope: app.refresh_scope(), selected: None }
+                .read(&server.source, 0, &AtomicU64::new(0))
+                .unwrap();
+            let name = if replaced { "replacement-skill" } else { "old-skill" };
+            let topic = if replaced { "replacement-docs" } else { "old-docs" };
+            snapshot.skills = Ok(vec![skill(name)]);
+            snapshot.versions = Some((name.into(), Err("owned history unavailable".into())));
+            snapshot.docs = Ok(vec![docs(topic)]);
+            snapshot.doc_set = Some(((topic.into(), "1".into()), Err("owned pages unavailable".into())));
+            app.apply_refresh(snapshot);
+            assert_eq!(app.selected_skill().as_deref(), Some(name));
+            assert_eq!(app.docs[app.docs_state.selected().unwrap()].topic, topic);
+            assert_eq!(app.skill_versions.is_empty(), replaced);
+            assert_eq!(app.doc_set.is_none(), replaced);
+            assert!(
+                app.refresh.note.contains("skill versions:")
+                    && app.refresh.note.contains("documentation pages:")
+            );
+        }
+    }
+
+    #[test]
     fn panel_refresh_coalesces_requests_and_rejects_the_delayed_old_scope() {
         let server = Server::new();
         server.hold.store(true, Ordering::Release);
