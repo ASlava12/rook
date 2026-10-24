@@ -16,6 +16,7 @@ pub const SHELL: &str = "/bin/sh";
 pub mod acp_executor;
 pub mod activity;
 pub mod agent;
+pub mod asides;
 pub mod attachments;
 pub mod attention;
 pub mod background;

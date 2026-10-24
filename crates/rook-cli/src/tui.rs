@@ -31,6 +31,7 @@ use tokio::sync::mpsc;
 
 use crate::fmt;
 
+mod asides;
 mod context;
 mod diff;
 mod draft;
@@ -1500,6 +1501,7 @@ struct App {
     stop_retry: Option<stop_retry::Journal>,
     tasks: tasks::Tasks,
     mcp: mcp::Connections,
+    asides: asides::Asides,
     queue: queue::Queue,
     editor: Option<editor::Picker>,
     /// Whether this window is taking the mouse, and so whether the terminal's
@@ -1633,6 +1635,7 @@ impl Drop for App {
         if let Some(turn) = self.turn.take() {
             turn.abort();
         }
+        self.asides.close();
         self.mcp.close();
         if self.source.here().is_some() {
             // Windows pipe reads can outlive cancelled tasks until the stdio
@@ -1725,6 +1728,7 @@ impl App {
             extension_changes,
             bindings,
             mcp: mcp_controls,
+            asides: asides::Asides::default(),
             queue,
             tasks,
             history,
@@ -2109,6 +2113,7 @@ impl App {
                     Err(error) => self.chat.push("err", &format!("Summary suggestion failed: {error}")),
                 }
             }
+            self.poll_asides();
             if let Some(notice) = self.mcp.poll() {
                 self.chat.push("stat", &notice);
             }
@@ -4612,6 +4617,14 @@ impl App {
 
     fn send(&mut self) {
         let typed = self.chat.input.as_str().trim();
+        if typed == "/btw" {
+            self.send_aside(String::new());
+            return;
+        }
+        if let Some(question) = typed.strip_prefix("/btw ") {
+            self.send_aside(question.trim().to_string());
+            return;
+        }
         if self.shared.mcp.pending_connections() != 0
             && !typed.is_empty()
             && (slash(typed).is_none() || rook_core::agent::carrying_on(typed))
@@ -4767,9 +4780,8 @@ impl App {
             self.chat.scroll = 0;
             return;
         }
-        // `/btw` is a turn without tools, so it goes down the normal path; every
-        // other slash command is answered here, by the same code the plain CLI
-        // runs.
+        // Side questions were dispatched before the foreground busy check.
+        // Other slash commands use the same implementation as the plain CLI.
         // A command is one line. Pasted text that happens to start with a path
         // is not `/Users/...` the command, and reading it as one would answer a
         // paste with "no such command".
@@ -4784,7 +4796,6 @@ impl App {
             self.chat.push("you", &prompt);
             return self.command(command);
         }
-        let aside = prompt.strip_prefix("/btw ").map(|q| q.trim().to_string());
         self.chat.push("you", &prompt);
         self.chat.began();
         self.chat.scroll = 0;
@@ -4797,11 +4808,7 @@ impl App {
         let asker = self.asker.clone();
         let policy = self.shared.policy.clone();
         let effort = self.shared.effort.get();
-        let output = if aside.is_some() {
-            Default::default()
-        } else {
-            crate::turn_options::for_turn(&mut self.shared.output.borrow_mut())
-        };
+        let output = crate::turn_options::for_turn(&mut self.shared.output.borrow_mut());
         // Taken here rather than in the task, because the task owns none of
         // this window and a `RefCell` does not cross into one.
         let named = self.shared.model.borrow().clone();
@@ -4824,11 +4831,7 @@ impl App {
                 },
             };
 
-            let resolved = if aside.is_some() {
-                rook_core::models::chosen(&rook.config, named.as_deref()).map_err(rook_core::CoreError::from)
-            } else {
-                rook.provider_for_turn(session, named.as_deref())
-            };
+            let resolved = rook.provider_for_turn(session, named.as_deref());
             let provider = match resolved {
                 Ok(provider) => provider,
                 Err(e) => return fail(&to_loop, e.to_string()),
@@ -4836,21 +4839,6 @@ impl App {
 
             let mut agent = AgentLoop::new(&rook, provider.into(), session);
             agent.options = output;
-            if let Some(question) = aside {
-                let emit = to_loop.clone();
-                let result = agent
-                    .aside(&question, |delta| {
-                        if let Delta::Text(text) = delta {
-                            let _ = emit.send(TurnEvent::Reasoning(text.clone()));
-                        }
-                    })
-                    .await;
-                let _ = match result {
-                    Ok(_) => to_loop.send(TurnEvent::Done("[aside]".into())),
-                    Err(e) => to_loop.send(TurnEvent::Error(e.to_string())),
-                };
-                return;
-            }
             agent.effort = effort;
             if yes {
                 agent.allow_everything_not_denied();
@@ -6763,7 +6751,7 @@ fn short_model(spec: &str) -> String {
 
 /// The command in a line, if it is one.
 ///
-/// `/btw` is not: it is a turn without tools and goes down the ordinary path.
+/// `/btw` is dispatched separately before foreground turn routing.
 /// A line with a newline in it is not either — pasted text that happens to
 /// begin with a path is not a command, and reading it as one answers a paste
 /// with "no such command".
@@ -7460,6 +7448,36 @@ and the next line"
             None
         );
         assert_eq!(super::slash("just a sentence"), None);
+    }
+
+    #[test]
+    fn side_question_while_busy_never_enters_the_foreground_correction_queue() {
+        let home = tempfile::tempdir().unwrap();
+        let rook = rook_core::Rook::from_parts(
+            rook_store::Store::open(home.path().join("store")).unwrap(),
+            rook_core::Config::default(),
+            rook_skills::Environment::bare("test", "test", "1"),
+            Default::default(),
+            home.path().into(),
+        );
+        let session = rook.start_session("busy side question").unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let mut app = super::App::new(crate::source::Source::Local(rook.into()), runtime, true);
+        app.chat.session = Some(session);
+        app.chat.busy = true;
+        app.chat.input.set("/btw What is the selected port?");
+        app.send();
+        eprintln!(
+            "side fixture log={:?}, input={:?}, queue={:?}",
+            app.chat.log,
+            app.chat.input.as_str(),
+            app.queue.preview(Some(session))
+        );
+        assert!(
+            !app.chat.log.iter().any(|(_, line)| line.contains("/queue retains the ID")),
+            "A side question must not become a foreground correction"
+        );
+        assert!(app.chat.busy && app.chat.session == Some(session));
     }
 
     #[test]

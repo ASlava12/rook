@@ -21,6 +21,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod activity;
+pub mod aside;
 pub mod queue;
 pub mod schedule;
 pub mod work;

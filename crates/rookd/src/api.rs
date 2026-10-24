@@ -72,6 +72,10 @@ pub fn router(state: Shared) -> Router {
             post(private_input).layer(axum::extract::DefaultBodyLimit::max(65536)),
         )
         .route("/api/sessions/{id}/transcript", get(transcript))
+        .route(
+            "/api/sessions/{id}/aside",
+            post(side_question).layer(axum::extract::DefaultBodyLimit::max(65536)),
+        )
         .route("/api/sessions/{id}/turns", get(turns))
         .route("/api/sessions/{id}/tree", get(branches))
         .route("/api/sessions/{id}/branch", post(branch_from_event))
@@ -1008,6 +1012,39 @@ struct BranchSummary {
     #[serde(default)]
     source_through: Option<u64>,
 }
+/// The response body owns the auxiliary future: disconnecting drops it rather
+/// than leaving a detached model call running after its window closes.
+async fn side_question(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Json(request): Json<rook_proto::aside::Request>,
+) -> std::result::Result<Response, Fail> {
+    request.validate().map_err(|why| Fail(StatusCode::BAD_REQUEST, ApiError::new("bad_request", why)))?;
+    let session = session_id(&id)?;
+    let workspace = s
+        .rook
+        .read()
+        .await
+        .store
+        .get_session_limited(session, 256 * 1024)
+        .map_err(CoreError::from)?
+        .ok_or(CoreError::NoSession(id))?
+        .workspace;
+    let engine = s.engine_for(Some(std::path::Path::new(&workspace))).await.map_err(CoreError::Other)?;
+    let stream = futures_util::stream::once(async move {
+        let rook = engine.read().await;
+        let reply = match rook_core::asides::answer(&rook, session, request).await {
+            Ok(answer) => rook_proto::aside::Reply::Complete { answer },
+            Err(error) => {
+                rook_proto::aside::Reply::Failed { error: error.to_string().chars().take(4096).collect() }
+            }
+        };
+        serde_json::to_vec(&reply).map(axum::body::Bytes::from).map_err(std::io::Error::other)
+    });
+    Ok(([(axum::http::header::CONTENT_TYPE, "application/json")], axum::body::Body::from_stream(stream))
+        .into_response())
+}
+
 #[derive(Deserialize)]
 struct BranchSummaryQuery {
     source: String,
@@ -2315,6 +2352,110 @@ mod tests {
             stopping: tokio::sync::Notify::new(),
         });
         Fixture { _home: home, _workspace: workspace, router: router(state.clone()), state, session }
+    }
+
+    async fn side_question_upstream(
+        f: &Fixture,
+        hold: bool,
+    ) -> (tokio::task::JoinHandle<()>, tokio::sync::mpsc::Receiver<serde_json::Value>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sent, requests) = tokio::sync::mpsc::channel(4);
+        let upstream = tokio::spawn(async move {
+            let app = Router::new().route("/v1/chat/completions", axum::routing::post(move |Json(request): Json<serde_json::Value>| {
+                let sent = sent.clone();
+                async move {
+                    sent.send(request).await.unwrap();
+                    if hold { std::future::pending::<()>().await; }
+                    let frame = serde_json::json!({"model":"owned-aside","choices":[{"index":0,"delta":{"role":"assistant","content":"SIDE_API_ANSWER"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":4}});
+                    ([(axum::http::header::CONTENT_TYPE,"text/event-stream")],format!("data: {frame}\n\ndata: [DONE]\n\n"))
+                }
+            }));
+            axum::serve(listener, app).await.unwrap();
+        });
+        let mut rook = f.state.rook.write().await;
+        rook.config.agent.model = "owned-aside".into();
+        rook.config.models.insert(
+            "owned-aside".into(),
+            rook_core::config::ModelSource {
+                api: "openai".into(),
+                model: "owned-aside".into(),
+                url: format!("http://{address}/v1"),
+                context_window: Some(32768),
+                parallel: Some(4),
+                proxy: "direct".into(),
+                ..Default::default()
+            },
+        );
+        (upstream, requests)
+    }
+
+    #[tokio::test]
+    async fn side_question_api_answers_without_admitting_or_finishing_a_foreground_prompt() {
+        let f = fixture();
+        let (upstream, mut requests) = side_question_upstream(&f, false).await;
+        let turn = f.state.turn_started();
+        let path = format!("/api/sessions/{}/aside", rook_store::format_session_id(f.session));
+        let (status, reply) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            post(&f, &path, serde_json::json!({"question":"Which port?"})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::OK, "{reply}");
+        assert_eq!(reply["status"], "complete");
+        assert_eq!(reply["answer"], "SIDE_API_ANSWER");
+        let request = requests.recv().await.unwrap();
+        assert!(request.get("tools").is_none_or(|v| v.as_array().is_some_and(Vec::is_empty)));
+        assert_eq!(f.state.turns.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let rook = f.state.rook.read().await;
+        let history = rook.transcript(f.session, 0, 100, 65536).unwrap();
+        assert_eq!(history.iter().filter(|e| e.kind == "user").count(), 1);
+        assert_eq!(history.iter().find(|e| e.kind == "user").unwrap().body, "find the leak");
+        assert!(!history.iter().any(|e| e.kind == "assistant"));
+        assert_eq!(history.iter().filter(|e| e.label == "btw").count(), 1);
+        drop(rook);
+        drop(turn);
+        upstream.abort();
+        assert!(upstream.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn side_question_response_body_cancellation_drops_the_owned_model_future() {
+        let f = fixture();
+        let (upstream, mut requests) = side_question_upstream(&f, true).await;
+        let turn = f.state.turn_started();
+        let path = format!("/api/sessions/{}/aside", rook_store::format_session_id(f.session));
+        let response = f
+            .router
+            .clone()
+            .oneshot(
+                Request::post(path)
+                    .header("host", "localhost")
+                    .header("Content-Type", "application/json")
+                    .header("X-Rook-Api", rook_proto::API_VERSION.to_string())
+                    .body(Body::from(r#"{"question":"hold this side request"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = tokio::spawn(async move { axum::body::to_bytes(response.into_body(), 256 * 1024).await });
+        tokio::time::timeout(std::time::Duration::from_secs(5), requests.recv()).await.unwrap().unwrap();
+        body.abort();
+        assert!(body.await.unwrap_err().is_cancelled());
+        // The auxiliary future holds this read lock during its model call.
+        // A detached call would retain it after the response body was dropped.
+        let rook =
+            tokio::time::timeout(std::time::Duration::from_secs(1), f.state.rook.write()).await.unwrap();
+        let history = rook.transcript(f.session, 0, 100, 65536).unwrap();
+        assert!(!history.iter().any(|e| e.label == "btw"));
+        assert_eq!(history.iter().filter(|e| e.kind == "user").count(), 1);
+        assert_eq!(f.state.turns.load(std::sync::atomic::Ordering::SeqCst), 1);
+        drop(rook);
+        drop(turn);
+        upstream.abort();
+        assert!(upstream.await.unwrap_err().is_cancelled());
     }
 
     #[tokio::test]

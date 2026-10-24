@@ -242,6 +242,9 @@ answer never enters the context the agent carries forward, though it is still in
 the transcript. Ctrl-C stops the turn in flight without leaving; whatever it
 already did stays in the log.
 
+In the TUI, [side questions](docs/tui-side-questions.md) can run while the main
+turn continues, subject to the configured provider concurrency limit.
+
 In `rook tui`, **Ctrl+E** opens a list of installed console editors; choose with
 the arrows and press Enter. The last successfully used editor comes first, even
 after restarting Rook. `VISUAL` and `EDITOR` can also name a terminal editor with
