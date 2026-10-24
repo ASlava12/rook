@@ -25,3 +25,10 @@ The JSON result records checks and physical request counts. A successful process
 exit and all check flags are required. Scripted-provider results establish
 runtime behavior, not live-model task quality. Archive verification and platform
 CI remain separate requirements in the [release procedure](../../../docs/releasing.md).
+
+Successful runs remove their temporary state. Failed runs retain the owned
+directory and print its path. `failure.json` captures the assertion, request
+counts and timestamps, fixture gates, and the live daemon's health and work
+states before cleanup. `daemon.stderr` and the private store remain available
+for diagnosis; owned processes are still stopped. Retained failure evidence is
+not a passing receipt and does not authorize retrying or publishing a release.

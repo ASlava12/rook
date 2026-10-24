@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -30,6 +31,7 @@ guidance_started = threading.Event()
 guidance_failure = threading.Event()
 counts = {}
 errors = []
+model_requests = []
 
 
 class Model(http.server.BaseHTTPRequestHandler):
@@ -73,6 +75,7 @@ class Model(http.server.BaseHTTPRequestHandler):
             assert not pending
             assert any(tool['function']['name'] == 'defer_work' for tool in request['tools'])
             counts[marker] = counts.get(marker, 0) + 1
+            model_requests.append({'marker': marker, 'monotonic': time.monotonic(), 'unix': time.time()})
             assert sum(counts.values()) <= 24
             resumed = any(message['role'] == 'tool' and 'Work checkpoint saved' in str(message.get('content', ''))
                           for message in request['messages'])
@@ -136,10 +139,11 @@ server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Model)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 daemon = None
 observers = []
-temporary = tempfile.TemporaryDirectory(prefix='rook-deferred-', dir=args.tmp_root)
+temporary_parent = Path(args.tmp_root or tempfile.gettempdir()).resolve()
+root = Path(tempfile.mkdtemp(prefix='rook-deferred-', dir=temporary_parent)).resolve()
+succeeded = False
+daemon_log = (root / 'daemon.stderr').open('ab')
 try:
-    directory = temporary.name
-    root = Path(directory)
     home = root / 'home'; home.mkdir()
     workspace = root / 'workspace'; workspace.mkdir()
     other_workspace = root / 'other-workspace'; other_workspace.mkdir()
@@ -189,7 +193,7 @@ context_window=32768
     def start():
         global daemon, base
         daemon = subprocess.Popen([str(binary / ('rookd' + suffix)), '--workspace', str(workspace), '--port', '0'],
-                                  env=env, cwd=workspace, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                  env=env, cwd=workspace, stdout=subprocess.DEVNULL, stderr=daemon_log)
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             assert daemon.poll() is None, 'owned daemon stopped during startup'
@@ -407,6 +411,27 @@ context_window=32768
                       'observer_survives_slot_readmission': True,
                       'requests': counts}))
     daemon.terminate(); daemon.wait(timeout=20); daemon = None
+    succeeded = True
+except BaseException as failure:
+    # Capture before releasing held calls or stopping the owned daemon: its
+    # live executor state is otherwise lost along with the temporary store.
+    snapshot = {'error': repr(failure)[:16384], 'counts': dict(counts),
+                'model_errors': list(errors), 'model_requests': list(model_requests),
+                'held': held.is_set(), 'release': release.is_set(),
+                'owned_daemon_pid': daemon.pid if daemon else None,
+                'monotonic': time.monotonic(), 'unix': time.time()}
+    if daemon is not None and daemon.poll() is None and globals().get('base'):
+        for path in ['/api/health', '/api/work']:
+            try:
+                snapshot[path] = api(path)
+            except BaseException as error:
+                snapshot[path] = {'read_error': repr(error)[:2048]}
+    try:
+        (root / 'failure.json').write_text(json.dumps(snapshot, indent=2) + '\n', encoding='utf-8')
+    except OSError as error:
+        print(json.dumps({'failure_snapshot_error': str(error)}), flush=True)
+    print(json.dumps({'retained_failure_root': str(root), 'scope': 'Failed probe; no passing receipt.'}), flush=True)
+    raise
 finally:
     release.set()
     guidance_failure.set()
@@ -424,4 +449,7 @@ finally:
         except subprocess.TimeoutExpired:
             daemon.kill(); daemon.wait()
     server.shutdown(); server.server_close()
-    temporary.cleanup()
+    daemon_log.close()
+    if succeeded:
+        assert root.parent == temporary_parent and root.name.startswith('rook-deferred-')
+        shutil.rmtree(root)
