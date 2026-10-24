@@ -1,7 +1,7 @@
 # Rook
 
-[Rook 0.21.20](docs/releases/0.21.20.md): resume saved TUI sessions,
-refuse failed prompt guards, and avoid nested ACP stack overflow on Windows.
+[Rook 0.21.21](docs/releases/0.21.21.md): responsive TUI panel refresh,
+questions and Stop during slow reads, reliable cross-window cancellation, local MCP shutdown and hook input cleanup.
 
 [Domain network policy with OS containment](docs/domain-network-policy.md).
 
