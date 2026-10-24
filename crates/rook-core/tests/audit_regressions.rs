@@ -164,7 +164,43 @@ async fn a_hook_that_never_reads_stdin_still_times_out() {
     )
     .await
     .unwrap();
-    assert!(matches!(outcome.decision, Some(rook_tools::policy::Decision::Deny(_))));
+    let Some(rook_tools::policy::Decision::Deny(reason)) = outcome.decision else {
+        panic!("the timed-out guard must refuse the operation");
+    };
+    assert!(reason.contains("no answer within 1s"), "{reason}");
+    assert!(reason.contains("completed: stdin="), "{reason}");
+    assert!(
+        reason.contains("stdout=") && reason.contains("stderr=") && reason.contains("process="),
+        "{reason}"
+    );
+}
+
+#[tokio::test]
+async fn failed_hook_commands_refuse_prompt_and_tool_gates_but_keep_observers_best_effort() {
+    use rook_core::hooks::{Event, HookConfig, Hooks};
+    for event in [
+        Event::Prompt,
+        Event::PreTool,
+        Event::SessionStart,
+        Event::PostTool,
+        Event::TurnEnd,
+        Event::PostCompaction,
+        Event::SessionDelete,
+    ] {
+        let (hooks, errors) =
+            Hooks::compile(&[HookConfig { event, command: "exit 7".into(), ..Default::default() }]);
+        assert!(errors.is_empty());
+        let outcome = hooks.run(event, "subject", &serde_json::json!({})).await;
+        if matches!(event, Event::Prompt | Event::PreTool) {
+            let Some(rook_tools::policy::Decision::Deny(reason)) = outcome.decision else {
+                panic!("{event:?} must refuse the failed gate");
+            };
+            assert!(reason.contains("hook failed: exit 7"), "{reason}");
+        } else {
+            assert!(outcome.decision.is_none(), "{event:?} remains best effort");
+        }
+        assert!(outcome.context.is_empty(), "a failed command contributes no context");
+    }
 }
 
 #[test]

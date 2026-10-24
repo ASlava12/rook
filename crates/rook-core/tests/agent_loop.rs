@@ -3451,6 +3451,31 @@ async fn a_prompt_hook_can_refuse_the_turn_and_add_context() {
 }
 
 #[tokio::test]
+async fn a_failed_prompt_hook_never_admits_the_prompt_or_calls_the_model() {
+    let _one = one_at_a_time().await;
+    let f = fixture();
+    let rook = hooked(&f, vec![hook(rook_core::hooks::Event::Prompt, "exit 7")]);
+    let session = rook.start_session("failed admission hook").unwrap();
+    let provider = ScriptedProvider::new(vec![reply("must not be reached")]);
+    let seen = provider.share();
+    let prompt = "PRIVATE_PROMPT_MUST_NOT_BE_ADMITTED";
+    let options = rook_proto::TurnOptions::default();
+    let claim =
+        rook_core::chat_submission::claim(&rook, Some(session), "failed-hook", prompt, &options).unwrap();
+    let mut agent = AgentLoop::new(&rook, Arc::new(provider), session);
+    agent.submission_key = Some(claim.key);
+    let error = agent.run(prompt).await.unwrap_err();
+    assert!(error.to_string().contains("hook failed: exit 7"), "{error}");
+    assert!(seen.lock().unwrap().is_empty(), "a failed admission hook cannot permit model work");
+    let receipt =
+        rook_core::chat_submission::read(&rook, session, "failed-hook", prompt, &options).unwrap().unwrap();
+    assert_eq!(receipt.status, rook_core::chat_submission::Status::Pending);
+    assert!(rook.execution(session).unwrap()[0].prompt.is_none());
+    let transcript = rook.transcript(session, 0, usize::MAX, 4096).unwrap();
+    assert!(transcript.iter().all(|event| event.kind != "user" && !event.body.contains(prompt)));
+}
+
+#[tokio::test]
 async fn prompt_admission_is_reported_after_the_atomic_receipt_before_the_model_reply() {
     let f = fixture();
     let rook = &f.rook;

@@ -200,7 +200,7 @@ impl Hooks {
                     tracing::warn!("hook {:?} failed: {e}", config.command);
                     // A hook that cannot run must not silently approve what it
                     // was there to check.
-                    if event == Event::PreTool {
+                    if matches!(event, Event::Prompt | Event::PreTool) {
                         outcome.decision = Some(Decision::Deny(format!("hook failed: {e}")));
                         return outcome;
                     }
@@ -292,6 +292,15 @@ async fn invoke(
     let _group = HookGroup(rook_contain::Group::holding(child.id()));
     let stdin = child.stdin.take();
     let (mut out, mut err) = (child.stdout.take(), child.stderr.take());
+    let completed = [const { std::sync::atomic::AtomicBool::new(false) }; 4];
+    async fn tracked<T>(
+        completed: &std::sync::atomic::AtomicBool,
+        future: impl std::future::Future<Output = T>,
+    ) -> T {
+        let result = future.await;
+        completed.store(true, std::sync::atomic::Ordering::Relaxed);
+        result
+    }
     let finished = async {
         let feed = async {
             if let Some(mut stdin) = stdin {
@@ -299,15 +308,26 @@ async fn invoke(
                 let _ = stdin.shutdown().await;
             }
         };
-        let (_, stdout, stderr, status) =
-            tokio::join!(feed, bounded(&mut out), bounded(&mut err), child.wait());
+        let (_, stdout, stderr, status) = tokio::join!(
+            tracked(&completed[0], feed),
+            tracked(&completed[1], bounded(&mut out)),
+            tracked(&completed[2], bounded(&mut err)),
+            tracked(&completed[3], child.wait()),
+        );
         (status, stdout, stderr)
     };
     let (status, (stdout, truncated, _), (stderr, _, _)) =
         tokio::time::timeout(Duration::from_secs(config.timeout_secs), finished).await.map_err(|_| {
             std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
-                format!("no answer within {}s", config.timeout_secs),
+                format!(
+                    "no answer within {}s (completed: stdin={}, stdout={}, stderr={}, process={})",
+                    config.timeout_secs,
+                    completed[0].load(std::sync::atomic::Ordering::Relaxed),
+                    completed[1].load(std::sync::atomic::Ordering::Relaxed),
+                    completed[2].load(std::sync::atomic::Ordering::Relaxed),
+                    completed[3].load(std::sync::atomic::Ordering::Relaxed),
+                ),
             )
         })?;
 
