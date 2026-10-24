@@ -1422,6 +1422,86 @@ fn socket_stop_uses_observed_goal_generation_and_replays_once() {
 }
 
 #[test]
+fn stopping_from_another_view_ends_the_original_cli_before_the_model_replies() {
+    struct Process(std::process::Child);
+    impl Drop for Process {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    rook_llm::init_tls();
+    let rook = Rook::new();
+    let model = Model::new();
+    rook.write_config(&config(&model.url, "initial", "ask", rook.workspace.path()));
+    let session = rook_store::new_session_id();
+    let id = rook_store::format_session_id(session);
+    {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        store
+            .create_session(&rook_store::SessionMeta::new(
+                session,
+                "cross-window Stop",
+                rook.workspace.path().display().to_string(),
+                rook_store::now_unix(),
+            ))
+            .unwrap();
+    }
+    let daemon = Daemon::start(&rook);
+    let mut caller = Process(
+        Command::new(env!("CARGO_BIN_EXE_rook"))
+            .env("ROOK_HOME", rook.home.path())
+            .env("ROOK_LOG", "error")
+            .arg("--workspace")
+            .arg(rook.workspace.path())
+            .args(["run", "Wait for an answer.", "--session", &id])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    assert_eq!(model.next()["model"], "initial-model");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let (mut view, _) = tokio_tungstenite::connect_async(format!(
+            "{}/api/chat",
+            daemon.address.replacen("http", "ws", 1),
+        ))
+        .await
+        .unwrap();
+        view.send(tokio_tungstenite::tungstenite::Message::Text(
+            json!({"type":"attach","session":id}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+        let turn = socket_event(&mut view, "turn").await["id"].as_str().unwrap().to_owned();
+        view.send(tokio_tungstenite::tungstenite::Message::Text(
+            json!({"type":"stop","id":"other-window-stop","session":id,"turn":turn}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(socket_event(&mut view, "stop_applied").await["id"], "other-window-stop");
+        socket_event(&mut view, "cancelled").await;
+        view.close(None).await.unwrap();
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = caller.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(std::time::Instant::now() < deadline, "the original CLI never received cancellation");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert!(!status.success(), "a cancelled turn must not report completion");
+    let mut error = String::new();
+    caller.0.stderr.take().unwrap().read_to_string(&mut error).unwrap();
+    assert!(error.contains("the turn was cancelled"), "{error}");
+    assert_eq!(model.release.load(Ordering::SeqCst), 0, "no model reply was released to end the caller");
+    drop(daemon);
+}
+
+#[test]
 fn socket_stop_rejects_an_earlier_ordinary_turn() {
     rook_llm::init_tls();
     let rook = Rook::new();
