@@ -23,6 +23,9 @@ as an auxiliary transcript note and excluded from normal conversation replay.
 The bounded answer is displayed after completion so known credentials can be
 masked even when they span several model fragments. Request messages, saved
 question/answer text and provider errors use the existing known-value mask.
+The window uses the backend's masked question for the result heading. If a
+transport failure or an older daemon provides no safe question, the heading
+omits it rather than repeating the original request text.
 An unconfirmed end of stream or stream error produces a failed side question,
 without displaying a successful answer. Masked partial output is retained as an
 explicitly incomplete auxiliary note, together with any reported usage. It is

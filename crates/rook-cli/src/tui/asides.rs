@@ -1,11 +1,11 @@
 //! One auxiliary question per window, with no foreground completion events.
 use super::*;
 use futures_util::FutureExt;
+use rook_proto::aside::Reply;
 
 struct Pending {
     session: u128,
-    question: String,
-    worker: tokio::task::JoinHandle<Result<String>>,
+    worker: tokio::task::JoinHandle<Result<Reply>>,
 }
 
 #[derive(Default)]
@@ -44,10 +44,9 @@ impl Asides {
                 .ok_or_else(|| anyhow::anyhow!("open a conversation before asking /btw; your draft is kept"))?
                 .start_session("")?,
         };
-        let question = request.question.clone();
         let worker = runtime.spawn(async move {
             match local {
-                Some(rook) => Ok(rook_core::asides::answer(&rook, session, request).await?),
+                Some(rook) => Ok(rook_core::asides::reply(&rook, session, request).await),
                 None => {
                     remote(
                         base.as_deref()
@@ -59,11 +58,11 @@ impl Asides {
                 }
             }
         });
-        self.pending = Some(Pending { session, question, worker });
+        self.pending = Some(Pending { session, worker });
         Ok(session)
     }
 
-    pub(super) fn poll(&mut self, session: Option<u128>) -> Option<(String, Result<String>)> {
+    pub(super) fn poll(&mut self, session: Option<u128>) -> Option<Reply> {
         let pending = self.pending.as_ref()?;
         if session != Some(pending.session) {
             self.close();
@@ -77,11 +76,11 @@ impl Asides {
             Some(Ok(result)) => result,
             _ => Err(anyhow::anyhow!("side question stopped; the foreground turn is unchanged")),
         };
-        Some((pending.question, result))
+        Some(result.unwrap_or_else(|error| Reply::Failed { question: None, error: error.to_string() }))
     }
 }
 
-async fn remote(base: &str, session: u128, request: rook_proto::aside::Request) -> Result<String> {
+async fn remote(base: &str, session: u128, request: rook_proto::aside::Request) -> Result<Reply> {
     rook_llm::init_tls();
     let client =
         reqwest::Client::builder().timeout(rook_core::asides::TIMEOUT + Duration::from_secs(10)).build()?;
@@ -108,10 +107,7 @@ async fn remote(base: &str, session: u128, request: rook_proto::aside::Request) 
         );
         bytes.extend_from_slice(&chunk);
     }
-    match serde_json::from_slice::<rook_proto::aside::Reply>(&bytes)? {
-        rook_proto::aside::Reply::Complete { answer } => Ok(answer),
-        rook_proto::aside::Reply::Failed { error } => anyhow::bail!(error),
-    }
+    Ok(serde_json::from_slice(&bytes)?)
 }
 
 impl App {
@@ -141,13 +137,16 @@ impl App {
     }
 
     pub(super) fn poll_asides(&mut self) {
-        if let Some((question, result)) = self.asides.poll(self.chat.session) {
-            match result {
-                Ok(answer) => self.chat.push("stat", &format!("[aside]\nQ: {question}\nA: {answer}")),
-                Err(error) => {
-                    self.chat.push("err", &format!("[aside]\nQ: {question}\n{error}"));
-                }
-            }
+        if let Some(reply) = self.asides.poll(self.chat.session) {
+            let (question, kind, body) = match reply {
+                Reply::Complete { question, answer } => (question, "stat", format!("A: {answer}")),
+                Reply::Failed { question, error } => (question, "err", error),
+            };
+            // Only the backend knows all values registered by its provider.
+            // A transport failure or older backend supplies no safe question;
+            // never fall back to echoing the original request.
+            let heading = question.map(|q| format!("[aside]\nQ: {q}")).unwrap_or_else(|| "[aside]".into());
+            self.chat.push(kind, &format!("{heading}\n{body}"));
         }
     }
 }
@@ -235,6 +234,10 @@ mod tests {
                 server.abort();
             }
             let result = result.expect("owned remote request must finish");
+            let result = result.and_then(|reply| match reply {
+                Reply::Complete { answer, .. } => Ok(answer),
+                Reply::Failed { error, .. } => Err(anyhow::anyhow!(error)),
+            });
             tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
             match expected_error {
                 Some(expected) => assert!(result.unwrap_err().to_string().contains(expected), "{expected}"),
@@ -264,7 +267,7 @@ mod tests {
     fn second_side_question_keeps_its_draft_and_foreground_identity() {
         let (_home, mut app, session) = app();
         let worker = app.runtime.spawn(std::future::pending());
-        app.asides.pending = Some(Pending { session, question: "first".into(), worker });
+        app.asides.pending = Some(Pending { session, worker });
         app.chat.input.set("/btw second");
         app.send();
         assert_eq!(app.chat.input.as_str(), "/btw second");
@@ -311,8 +314,10 @@ mod tests {
         let (_home, mut app, session) = app();
         app.turn = Some(app.runtime.spawn(std::future::pending()));
         let foreground = app.turn.as_ref().unwrap().id();
-        let worker = app.runtime.spawn(async { Ok("SIDE ANSWER".into()) });
-        app.asides.pending = Some(Pending { session, question: "which port?".into(), worker });
+        let worker = app.runtime.spawn(async {
+            Ok(Reply::Complete { question: Some("which port?".into()), answer: "SIDE ANSWER".into() })
+        });
+        app.asides.pending = Some(Pending { session, worker });
         app.runtime.block_on(tokio::task::yield_now());
         app.chat.input.set("UNSENT FOREGROUND DRAFT");
         app.poll_asides();
@@ -328,7 +333,7 @@ mod tests {
         let (_home, mut app, session) = app();
         let worker = app.runtime.spawn(std::future::pending());
         let abort = worker.abort_handle();
-        app.asides.pending = Some(Pending { session, question: "OLD SESSION QUESTION".into(), worker });
+        app.asides.pending = Some(Pending { session, worker });
         app.chat.session = Some(session.wrapping_add(1));
         app.poll_asides();
         app.runtime.block_on(tokio::task::yield_now());
@@ -338,14 +343,45 @@ mod tests {
     }
 
     #[test]
+    fn side_question_result_never_repeats_an_unmasked_pending_question() {
+        let (_home, mut app, session) = app();
+        let worker = app.runtime.spawn(async {
+            Ok(Reply::Complete { question: Some("Which ${secret}?".into()), answer: "SIDE ANSWER".into() })
+        });
+        app.asides.pending = Some(Pending { session, worker });
+        app.runtime.block_on(tokio::task::yield_now());
+        app.poll_asides();
+        assert!(app.chat.log.iter().any(|(_, line)| line.contains("SIDE ANSWER")));
+        assert!(!app.chat.log.iter().any(|(_, line)| line.contains("owned-ui-question-key-52718364")));
+    }
+
+    #[test]
     fn failed_side_question_does_not_fill_an_empty_foreground_answer_field() {
         let (_home, mut app, session) = app();
         let worker = app.runtime.spawn(async { Err(anyhow::anyhow!("owned side failure")) });
-        app.asides.pending = Some(Pending { session, question: "which port?".into(), worker });
+        app.asides.pending = Some(Pending { session, worker });
         app.runtime.block_on(tokio::task::yield_now());
         app.poll_asides();
         assert!(app.chat.input.is_empty());
         assert!(app.chat.busy);
+        assert!(app.chat.log.iter().any(|(_, line)| line.contains("owned side failure")));
+        assert!(!app.chat.log.iter().any(|(_, line)| line.contains("Q:")));
+    }
+
+    #[test]
+    fn failed_side_reply_uses_the_backend_masked_question() {
+        let (_home, mut app, session) = app();
+        let worker = app.runtime.spawn(async {
+            Ok(Reply::Failed {
+                question: Some("Which ${secret}?".into()),
+                error: "owned side failure".into(),
+            })
+        });
+        app.asides.pending = Some(Pending { session, worker });
+        app.runtime.block_on(tokio::task::yield_now());
+        app.poll_asides();
+        assert!(app.chat.busy);
+        assert!(app.chat.log.iter().any(|(_, line)| line.contains("Q: Which ${secret}?")));
         assert!(app.chat.log.iter().any(|(_, line)| line.contains("owned side failure")));
     }
 }

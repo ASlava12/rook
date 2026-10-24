@@ -888,6 +888,10 @@ impl<'a> AgentLoop<'a> {
     /// the history replay skips — so asking what a piece of code does mid-task
     /// neither costs the agent a tool round trip nor leaves anything in the
     /// context it will carry for the rest of the session.
+    pub(crate) fn aside_display_question(&self, question: &str) -> String {
+        self.vault.redact(question)
+    }
+
     pub async fn aside<F: FnMut(&Delta)>(&self, question: &str, mut on_delta: F) -> Result<String> {
         let mut messages = vec![cacheable(Message::system(self.system_prompt()))];
         let sources = self.source_context();

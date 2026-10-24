@@ -1033,12 +1033,7 @@ async fn side_question(
     let engine = s.engine_for(Some(std::path::Path::new(&workspace))).await.map_err(CoreError::Other)?;
     let stream = futures_util::stream::once(async move {
         let rook = engine.read().await;
-        let reply = match rook_core::asides::answer(&rook, session, request).await {
-            Ok(answer) => rook_proto::aside::Reply::Complete { answer },
-            Err(error) => {
-                rook_proto::aside::Reply::Failed { error: error.to_string().chars().take(4096).collect() }
-            }
-        };
+        let reply = rook_core::asides::reply(&rook, session, request).await;
         serde_json::to_vec(&reply).map(axum::body::Bytes::from).map_err(std::io::Error::other)
     });
     Ok(([(axum::http::header::CONTENT_TYPE, "application/json")], axum::body::Body::from_stream(stream))
@@ -2392,6 +2387,7 @@ mod tests {
             rook_core::config::ModelSource {
                 api: "openai".into(),
                 model: "owned-aside".into(),
+                key: "owned-side-api-key-73489162".into(),
                 url: format!("http://{address}/v1"),
                 context_window: Some(32768),
                 parallel: Some(4),
@@ -2411,14 +2407,17 @@ mod tests {
             let path = format!("/api/sessions/{}/aside", rook_store::format_session_id(f.session));
             let (status, reply) = tokio::time::timeout(
                 std::time::Duration::from_secs(5),
-                post(&f, &path, serde_json::json!({"question":"Which port?"})),
+                post(&f, &path, serde_json::json!({"question":"Which owned-side-api-key-73489162 port?"})),
             )
             .await
             .unwrap();
             assert_eq!(status, StatusCode::OK, "{reply}");
             assert_eq!(reply["status"], "complete");
             assert_eq!(reply["answer"], "SIDE_API_ANSWER");
+            assert_eq!(reply["question"], "Which ${secret} port?");
+            assert!(!reply.to_string().contains("owned-side-api-key-73489162"));
             let request = requests.recv().await.unwrap();
+            assert!(!request.to_string().contains("owned-side-api-key-73489162"));
             assert!(request.get("tools").is_none_or(|v| v.as_array().is_some_and(Vec::is_empty)));
             assert_eq!(f.state.turns.load(std::sync::atomic::Ordering::SeqCst), 1);
             let rook = f.state.rook.read().await;

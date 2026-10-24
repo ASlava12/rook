@@ -3,7 +3,7 @@ use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use crate::{CoreError, Result, Rook, agent::AgentLoop};
-use rook_proto::aside::Request;
+use rook_proto::aside::{Reply, Request};
 
 pub const TIMEOUT: Duration = Duration::from_secs(180);
 static QUESTIONS: LazyLock<Arc<tokio::sync::Semaphore>> =
@@ -11,16 +11,21 @@ static QUESTIONS: LazyLock<Arc<tokio::sync::Semaphore>> =
 
 /// Dropping this future cancels only this auxiliary request. No task is detached,
 /// no message is queued, and the existing aside route accounts for its own usage.
-pub async fn answer(rook: &Rook, session: u128, request: Request) -> Result<String> {
-    answer_using(rook, session, request, |model| Ok(crate::models::chosen(&rook.config, model)?.into())).await
+pub async fn reply(rook: &Rook, session: u128, request: Request) -> Reply {
+    reply_using(rook, session, request, |model| Ok(crate::models::chosen(&rook.config, model)?.into()))
+        .await
+        .unwrap_or_else(|error| Reply::Failed {
+            question: None,
+            error: error.to_string().chars().take(4096).collect(),
+        })
 }
 
-async fn answer_using(
+async fn reply_using(
     rook: &Rook,
     session: u128,
     request: Request,
     provider: impl FnOnce(Option<&str>) -> Result<Arc<dyn rook_llm::Provider>>,
-) -> Result<String> {
+) -> Result<Reply> {
     request.validate().map_err(|why| CoreError::Other(why.into()))?;
     let _permit = QUESTIONS
         .clone()
@@ -31,9 +36,28 @@ async fn answer_using(
         .ok_or_else(|| CoreError::NoSession(rook_store::format_session_id(session)))?;
     let provider = provider(request.model.as_deref())?;
     let agent = AgentLoop::new(rook, provider, session);
-    tokio::time::timeout(TIMEOUT, agent.aside(&request.question, |_| {}))
-        .await
-        .map_err(|_| CoreError::Other("side question timed out; the foreground turn is unchanged".into()))?
+    let question = Some(agent.aside_display_question(&request.question));
+    let result =
+        tokio::time::timeout(TIMEOUT, agent.aside(&request.question, |_| {})).await.unwrap_or_else(|_| {
+            Err(CoreError::Other("side question timed out; the foreground turn is unchanged".into()))
+        });
+    Ok(match result {
+        Ok(answer) => Reply::Complete { question, answer },
+        Err(error) => Reply::Failed { question, error: error.to_string().chars().take(4096).collect() },
+    })
+}
+
+#[cfg(test)]
+async fn answer_using(
+    rook: &Rook,
+    session: u128,
+    request: Request,
+    provider: impl FnOnce(Option<&str>) -> Result<Arc<dyn rook_llm::Provider>>,
+) -> Result<String> {
+    match reply_using(rook, session, request, provider).await? {
+        Reply::Complete { answer, .. } => Ok(answer),
+        Reply::Failed { error, .. } => Err(CoreError::Other(error)),
+    }
 }
 
 #[cfg(test)]
@@ -190,6 +214,37 @@ mod tests {
                 model: response.model,
             }));
             Ok(Box::pin(futures_util::stream::iter(deltas)))
+        }
+    }
+
+    #[tokio::test]
+    async fn side_reply_carries_only_the_masked_question_on_success_and_failure() {
+        for fail in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let rook = owned_rook(home.path());
+            let session = rook.start_session("owned question display").unwrap();
+            let model = Arc::new(KeyEcho { seen: Default::default(), fail, split: false });
+            let reply = reply_using(
+                &rook,
+                session,
+                Request { question: format!("What is {OWNED_KEY}?"), model: None },
+                |_| Ok(model),
+            )
+            .await
+            .unwrap();
+            let encoded = serde_json::to_string(&reply).unwrap();
+            assert!(!encoded.contains(OWNED_KEY));
+            let question = match reply {
+                Reply::Complete { question, .. } => {
+                    assert!(!fail);
+                    question
+                }
+                Reply::Failed { question, .. } => {
+                    assert!(fail);
+                    question
+                }
+            };
+            assert_eq!(question.as_deref(), Some("What is ${secret}?"));
         }
     }
 

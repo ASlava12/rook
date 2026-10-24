@@ -27,6 +27,14 @@ impl Request {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Reply {
-    Complete { answer: String },
-    Failed { error: String },
+    Complete {
+        #[serde(default)]
+        question: Option<String>,
+        answer: String,
+    },
+    Failed {
+        #[serde(default)]
+        question: Option<String>,
+        error: String,
+    },
 }
