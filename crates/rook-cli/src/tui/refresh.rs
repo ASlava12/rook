@@ -556,6 +556,58 @@ mod tests {
         assert!(!seen.iter().any(|p| p.contains("workspace=first")));
     }
     #[test]
+    fn question_can_be_answered_before_a_panel_read_finishes() {
+        let server = Server::new();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let mut app = App::new(server.source.reader().unwrap(), runtime, true);
+        until(|| {
+            app.poll_refresh();
+            !app.sessions.is_empty() && !app.refresh.active
+        });
+        let active = app.sessions[0].meta.id;
+        let browsing = app.sessions[1].meta.id;
+        app.chat.session = Some(active);
+        app.chat.busy = true;
+        let (send, mut controls) = mpsc::unbounded_channel();
+        app.chat.remote = Some(send);
+        app.session_state.select(Some(1));
+        server.hold.store(true, Ordering::Release);
+        app.reload();
+        server.started.recv_timeout(Duration::from_secs(30)).unwrap();
+
+        app.heard_from_daemon(ChatEvent::Ask {
+            id: "held-panel-question".into(),
+            questions: vec![rook_proto::AskQuestion {
+                question: "Choose how to continue while panels wait".into(),
+                choices: vec!["KEEP_BRANCH".into(), "CHANGE_BRANCH".into()],
+                multi: false,
+            }],
+        });
+        assert!(controls.try_recv().is_err(), "showing a question must not answer it");
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let visible: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        assert!(visible.contains("Choose how to continue while panels wait"));
+        app.on_key(crossterm::event::KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
+        app.on_key(crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            controls.try_recv().unwrap(),
+            ClientMessage::Answers { id, answers }
+                if id == "held-panel-question" && answers == vec![vec!["KEEP_BRANCH".to_owned()]]
+        ));
+        assert!(controls.try_recv().is_err(), "one input sends exactly one answer");
+        assert!(app.chat.asking.is_none());
+        assert_eq!(app.chat.session, Some(active));
+        assert_eq!(app.sessions[app.session_state.selected().unwrap()].meta.id, browsing);
+        assert!(app.refresh.poll().is_none(), "answer must precede panel completion");
+        server.release.send(()).unwrap();
+        until(|| {
+            app.poll_refresh();
+            !app.refresh.active
+        });
+    }
+
+    #[test]
     fn failed_panel_refresh_retains_data_and_processes_draft_stream_and_stop_before_io_finishes() {
         let server = Server::new();
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
