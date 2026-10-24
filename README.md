@@ -1,7 +1,7 @@
 # Rook
 
-[Rook 0.21.18](docs/releases/0.21.18.md): skill-source diagnostics,
-known credential masking, immediate Z.ai balance refusals and preserved compaction summaries.
+[Rook 0.21.19](docs/releases/0.21.19.md): Gemini tool JSON Schema compatibility,
+including nested constraints and MCP tool declarations.
 
 [Domain network policy with OS containment](docs/domain-network-policy.md).
 
