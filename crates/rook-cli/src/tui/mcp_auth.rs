@@ -23,15 +23,18 @@ enum Event {
 }
 impl Drop for Auth {
     fn drop(&mut self) {
-        if let Some(worker) = &self.worker {
-            worker.abort();
-        }
-        if let Some(browser) = &self.browser {
-            browser.abort();
-        }
+        self.close();
     }
 }
 impl Auth {
+    pub(super) fn close(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            worker.abort();
+        }
+        if let Some(browser) = self.browser.take() {
+            browser.abort();
+        }
+    }
     pub(super) fn new(
         source: &crate::source::Source,
         runtime: &tokio::runtime::Runtime,

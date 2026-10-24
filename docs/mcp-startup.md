@@ -20,6 +20,8 @@ tool bindings when a later connection is replaced.
 
 Closing the window cancels its initial connection attempts. A routed TUI uses
 the daemon's connections and does not start another copy of its servers.
+The local window closes its MCP connections before dropping its async runtime,
+so a live stdio server cannot leave Windows pipe reads holding the window open.
 This change covers local TUI MCP startup; plain CLI and daemon startup keep their
 existing admission behavior.
 

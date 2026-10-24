@@ -163,6 +163,10 @@ fn initial_mcp_discovery_leaves_the_window_and_draft_live_without_admitting_or_r
     assert!(!app.chat.busy && app.chat.session.is_none());
     assert!(app.source.sessions().unwrap().is_empty(), "finishing startup must not send a prompt");
     assert!(app.mcp.poll().is_none(), "startup completion is announced once");
+    let session = app.shared.mcp.clone();
+    drop(app);
+    assert!(session.servers().is_empty());
+    assert_eq!(session.report().servers[0].state, "closed");
 }
 
 #[test]
@@ -174,6 +178,6 @@ fn closing_the_window_cancels_owned_initial_mcp_discovery_before_the_server_is_r
     drop(app);
     assert_eq!(session.pending_connections(), 0);
     assert!(session.servers().is_empty());
-    assert!(session.report().servers[0].error.as_deref().unwrap().contains("cancelled"));
+    assert_eq!(session.report().servers[0].state, "closed");
     // The fixture's held response is released only by its later Drop.
 }

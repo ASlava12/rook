@@ -20,13 +20,18 @@ pub(super) struct Connections {
 }
 impl Drop for Connections {
     fn drop(&mut self) {
-        self.worker.abort();
-        if let Some(startup) = &self.startup {
-            startup.abort();
-        }
+        self.close();
     }
 }
 impl Connections {
+    pub(super) fn close(&mut self) {
+        self.worker.abort();
+        if let Some(startup) = self.startup.take() {
+            startup.abort();
+        }
+        self.auth.close();
+    }
+
     pub(super) fn new(
         source: &crate::source::Source,
         runtime: &tokio::runtime::Runtime,
