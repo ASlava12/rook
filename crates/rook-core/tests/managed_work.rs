@@ -1135,6 +1135,7 @@ impl rook_tools::policy::Approver for HeldWaitApproval {
 #[tokio::test]
 async fn a_pending_wait_claims_external_effects_only_for_a_matching_pre_tool_hook() {
     use rook_core::hooks::{Event, HookConfig};
+    use tracing::instrument::WithSubscriber;
     for (event, matcher, effects) in [
         (Event::SessionDelete, None, false),
         (Event::PreTool, Some("read_file"), false),
@@ -1157,19 +1158,25 @@ async fn a_pending_wait_claims_external_effects_only_for_a_matching_pre_tool_hoo
         .unwrap();
         let approval = Arc::new(HeldWaitApproval { entered: tokio::sync::Notify::new() });
         let script = Script::new(vec![defer(serde_json::json!({"seconds":60}))]);
-        let mut stage = Box::pin(work::advance(
-            &rook,
-            &run.id,
-            |session| {
-                let mut agent = AgentLoop::new(&rook, script.clone(), session);
-                agent.policy.set_stance(rook_tools::policy::Stance::Assist);
-                agent.approver = approval.clone();
-                Ok(agent)
-            },
-            |_| {},
-        ));
+        eprintln!("approval fixture case: event={event:?}, matcher={matcher:?}, expected_effects={effects}");
+        let mut stage = Box::pin(
+            work::advance(
+                &rook,
+                &run.id,
+                |session| {
+                    let mut agent = AgentLoop::new(&rook, script.clone(), session);
+                    agent.policy.set_stance(rook_tools::policy::Stance::Assist);
+                    agent.approver = approval.clone();
+                    Ok(agent)
+                },
+                |_| {},
+            )
+            .with_subscriber(
+                tracing_subscriber::fmt().with_max_level(tracing::Level::WARN).with_test_writer().finish(),
+            ),
+        );
         tokio::select! {
-            result = &mut stage => panic!("fixture must wait for an actual approval: {result:?}"),
+            result = &mut stage => panic!("fixture must wait for an actual approval: event={event:?}, matcher={matcher:?}, result={result:?}, model_transcripts={:?}", script.seen.lock().unwrap()),
             entered = tokio::time::timeout(std::time::Duration::from_secs(60),approval.entered.notified()) => entered.unwrap(),
         }
         let saved = work::read(&rook, &run.id).unwrap();

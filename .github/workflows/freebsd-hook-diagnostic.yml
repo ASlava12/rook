@@ -1,0 +1,35 @@
+name: freebsd hook diagnostic
+
+on:
+  push:
+    branches: [diagnose/freebsd-hook-wait-20261024]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    name: owned hook and approval reproduction
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          release: '14.2'
+          usesh: true
+          copyback: false
+          prepare: pkg install -y rust git python3
+          run: |
+            # Diagnostic only. Retain every result, including failures. This
+            # workflow cannot substitute for any mandatory source-CI job.
+            status=0
+            for attempt in 1 2 3; do
+              echo "FOCUSED APPROVAL REPRODUCTION $attempt"
+              cargo test --locked -p rook-core --test managed_work a_pending_wait_claims_external_effects_only_for_a_matching_pre_tool_hook -- --exact --nocapture || status=1
+            done
+            for attempt in 1 2; do
+              echo "FULL MANAGED WORK REPRODUCTION $attempt"
+              cargo test --locked -p rook-core --test managed_work -- --nocapture || status=1
+            done
+            exit "$status"
