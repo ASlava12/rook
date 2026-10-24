@@ -27,4 +27,3 @@ This addresses an observed FreeBSD failure where process waiting and both output
 streams had finished but stdin delivery remained pending until the watchdog.
 Failed exits still refuse prompt and tool gates; cancelling an unusable input
 writer does not turn a failed hook into an approval.
-
