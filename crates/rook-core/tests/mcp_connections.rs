@@ -240,6 +240,104 @@ async fn startup_parallelism_is_bounded_while_retaining_declaration_order() {
 }
 
 #[tokio::test]
+async fn background_startup_publishes_ready_servers_before_a_slow_catalog_in_declaration_order() {
+    let first = Fixture::new("slow", true).await;
+    let mut second = Fixture::new("ready", false).await;
+    second.config.name = "second".into();
+    let (session, startup) =
+        McpSession::start([&first.config, &second.config], rook_llm::Proxy::Direct, Settings::default());
+    assert_eq!(session.pending_connections(), 2);
+    assert!(session.report().servers.iter().all(|s| s.state == "connecting"));
+    assert_eq!(first.listings.available_permits(), 0, "construction must not start network work");
+    let task = tokio::spawn(startup.run());
+    observed(&first.listings).await;
+    observed(&second.listings).await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while session.servers().len() != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let snapshot = session.servers();
+    assert_eq!(snapshot[0].1[0].description, "ready");
+    let report = session.report();
+    assert_eq!(report.servers[0].state, "connecting");
+    assert_eq!(report.servers[1].state, "connected");
+    assert_eq!(session.pending_connections(), 1);
+    assert!(!task.is_finished());
+    first.release_lists.add_permits(1);
+    task.await.unwrap();
+    assert_eq!(session.pending_connections(), 0);
+    let servers = session.servers();
+    assert_eq!(servers[0].1[0].description, "slow");
+    assert_eq!(servers[1].1[0].description, "ready");
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(snapshot[0].1[0].description, "ready");
+}
+
+#[tokio::test]
+async fn dropping_an_unpolled_startup_marks_cancellation_without_opening_a_connection() {
+    let fixture = Fixture::new("server", false).await;
+    let (session, startup) =
+        McpSession::start([&fixture.config], rook_llm::Proxy::Direct, Settings::default());
+    drop(startup);
+    assert_eq!(session.pending_connections(), 0);
+    let report = session.report();
+    assert_eq!(report.servers[0].state, "failed");
+    assert!(report.servers[0].error.as_deref().unwrap().contains("cancelled"));
+    assert_eq!(fixture.listings.available_permits(), 0);
+    session.reconnect("test", [&fixture.config], &rook_llm::Proxy::Direct).await.unwrap();
+    assert_eq!(session.servers().len(), 1);
+}
+
+#[tokio::test]
+async fn aborting_background_startup_retires_pending_work_and_allows_an_explicit_reconnect() {
+    let fixture = Fixture::new("server", true).await;
+    let (session, startup) =
+        McpSession::start([&fixture.config], rook_llm::Proxy::Direct, Settings::default());
+    let task = tokio::spawn(startup.run());
+    observed(&fixture.listings).await;
+    let error = session.reconnect("test", [&fixture.config], &rook_llm::Proxy::Direct).await.unwrap_err();
+    assert!(error.contains("already running"));
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert_eq!(session.pending_connections(), 0);
+    assert!(session.servers().is_empty());
+    fixture.release_lists.add_permits(2);
+    session.reconnect("test", [&fixture.config], &rook_llm::Proxy::Direct).await.unwrap();
+    assert_eq!(session.report().servers[0].state, "connected");
+}
+
+#[tokio::test]
+async fn shutdown_cancels_initial_discovery_without_waiting_for_the_server() {
+    let fixture = Fixture::new("server", true).await;
+    let (session, startup) =
+        McpSession::start([&fixture.config], rook_llm::Proxy::Direct, Settings::default());
+    let task = tokio::spawn(startup.run());
+    observed(&fixture.listings).await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), session.shutdown()).await.unwrap();
+    task.await.unwrap();
+    assert_eq!(fixture.release_lists.available_permits(), 0);
+    assert_eq!(session.pending_connections(), 0);
+    assert_eq!(session.report().servers[0].state, "closed");
+    assert!(session.servers().is_empty());
+}
+
+#[tokio::test]
+async fn shutdown_before_startup_is_polled_retires_pending_declarations_without_connecting() {
+    let fixture = Fixture::new("server", false).await;
+    let (session, startup) =
+        McpSession::start([&fixture.config], rook_llm::Proxy::Direct, Settings::default());
+    session.shutdown().await;
+    assert_eq!(session.pending_connections(), 0);
+    assert_eq!(session.report().servers[0].state, "closed");
+    startup.run().await;
+    assert_eq!(fixture.listings.available_permits(), 0);
+    assert!(session.servers().is_empty());
+}
+
+#[tokio::test]
 async fn last_request_failure_is_reported_without_the_server_response_and_clears_on_success() {
     let fixture = Fixture::new("healthy", false).await;
     let session =

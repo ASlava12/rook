@@ -1685,9 +1685,16 @@ impl App {
         // Connected only where turns run here: a routed window's tools are the
         // daemon's, and spawning a second copy of every server to leave them
         // idle is a cost with nothing on the other side of it.
-        let mcp = match source.here() {
-            Some(rook) => Arc::new(runtime.block_on(rook.connect_mcp())),
-            None => Arc::new(rook_core::McpSession::default()),
+        let (mcp, startup) = match source.here() {
+            Some(rook) => {
+                let (session, startup) = rook_core::McpSession::start(
+                    rook.mcp_servers(),
+                    rook.config.proxy.for_mcp(),
+                    rook.config.mcp_connections,
+                );
+                (session, Some(startup))
+            }
+            None => (Arc::new(rook_core::McpSession::default()), None),
         };
         let patience = config.agent.answer_timeout();
 
@@ -1704,7 +1711,7 @@ impl App {
         } else {
             (None, None)
         };
-        let mcp_controls = mcp::Connections::new(&source, &runtime, mcp.clone());
+        let mcp_controls = mcp::Connections::new(&source, &runtime, mcp.clone(), startup);
         let (bindings, binding_error) = match config.tui.bindings() {
             Ok(bindings) => (bindings, None),
             Err(errors) => (
@@ -1817,6 +1824,9 @@ impl App {
             quit: false,
         };
         app.reload();
+        if app.shared.mcp.pending_connections() != 0 {
+            app.chat.push("stat", "MCP servers are connecting. Drafts and commands are available; send your message when startup finishes.");
+        }
         if let Some(error) = binding_error {
             app.chat.push("err", &format!("Invalid TUI settings; using default keys: {error}"));
         }
@@ -2099,7 +2109,9 @@ impl App {
                     Err(error) => self.chat.push("err", &format!("Summary suggestion failed: {error}")),
                 }
             }
-            self.mcp.poll();
+            if let Some(notice) = self.mcp.poll() {
+                self.chat.push("stat", &notice);
+            }
             if let Some(text) = self.queue.poll(self.chat.session) {
                 if !self.chat.input.text.is_empty() {
                     self.chat.input.paste("\n\n");
@@ -4599,6 +4611,14 @@ impl App {
     }
 
     fn send(&mut self) {
+        let typed = self.chat.input.as_str().trim();
+        if self.shared.mcp.pending_connections() != 0
+            && !typed.is_empty()
+            && (slash(typed).is_none() || rook_core::agent::carrying_on(typed))
+        {
+            self.chat.push("stat", "MCP servers are still connecting. Your draft is kept; send it again when startup finishes. /mcp shows connection status.");
+            return;
+        }
         if self.source.daemon_base().is_some()
             && self.chat.input.as_str().len() > rook_core::attachments::MAX_FRAME_BYTES
         {

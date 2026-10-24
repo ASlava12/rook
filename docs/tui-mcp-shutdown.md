@@ -12,5 +12,6 @@ stdio shutdown still transfers the owned process group to the existing reaper.
 
 A routed window leaves the daemon's connections and turns running. Closing the
 window does not send a remote Stop, replay a tool call or restart an MCP server.
-This changes shutdown ordering; initial local MCP startup keeps its existing
-behavior.
+Local initial discovery also runs in the background; closing the window cancels
+its pending attempts. See [MCP startup](mcp-startup.md) for draft admission and
+connection progress.

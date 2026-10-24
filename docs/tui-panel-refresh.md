@@ -30,7 +30,7 @@ work, and repeated requests replace one pending refresh.
 These controls apply to panel reads. Operations that install, edit, restore or
 otherwise change data keep their existing routing and deadlines. Local MCP
 initialization and separate session continuation reads are outside this refresh
-worker.
+worker. Local TUI MCP connections use their own [background startup](mcp-startup.md).
 
 The reference for cancellable loading and stale-response checks is Pi's
 session selector at `482c1381a00d8d00bc81697e4a980c593db6803e`.

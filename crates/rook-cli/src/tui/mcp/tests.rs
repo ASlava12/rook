@@ -135,9 +135,68 @@ fn closing_a_local_window_retires_connected_mcp_before_dropping_its_runtime() {
     let (_home, app) = fixture.app();
     fixture.began.recv_timeout(Duration::from_secs(10)).unwrap();
     let session = app.shared.mcp.clone();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while session.pending_connections() != 0 {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(2));
+    }
     assert_eq!(session.report().servers[0].state, "connected");
     assert_eq!(session.servers().len(), 1);
     drop(app);
     assert_eq!(session.report().servers[0].state, "closed");
     assert!(session.servers().is_empty());
+}
+
+#[test]
+fn initial_mcp_discovery_leaves_the_window_and_draft_live_without_admitting_or_replaying_a_prompt() {
+    let fixture = Fixture::new();
+    let (_home, mut app) = fixture.app();
+    fixture.began.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(app.shared.mcp.pending_connections(), 1);
+    app.chat.input.set("  UNSENT_MCP_STARTUP_DRAFT  ");
+    let history = app.chat.history.clone();
+    app.on_key(crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.chat.input.as_str(), "  UNSENT_MCP_STARTUP_DRAFT  ");
+    assert_eq!(app.chat.history, history);
+    assert!(!app.chat.busy && app.chat.session.is_none());
+    assert!(app.source.sessions().unwrap().is_empty());
+    app.command("mcp");
+    app.mcp.poll();
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    let screen: String = terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect();
+    assert!(screen.contains("owned-slow-server") && screen.contains("connecting"));
+    fixture.release.send(()).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let notice = loop {
+        if let Some(notice) = app.mcp.poll() {
+            break notice;
+        }
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    assert!(notice.contains("1 connected, 0 failed"));
+    assert_eq!(app.shared.mcp.pending_connections(), 0);
+    assert_eq!(app.shared.mcp.servers()[0].1[0].description, "owned ready tool");
+    assert_eq!(app.chat.input.as_str(), "  UNSENT_MCP_STARTUP_DRAFT  ");
+    assert!(!app.chat.busy && app.chat.session.is_none());
+    assert!(app.source.sessions().unwrap().is_empty(), "finishing startup must not send a prompt");
+    assert!(app.mcp.poll().is_none(), "startup completion is announced once");
+    let session = app.shared.mcp.clone();
+    drop(app);
+    assert!(session.servers().is_empty());
+    assert_eq!(session.report().servers[0].state, "closed");
+}
+
+#[test]
+fn closing_the_window_cancels_owned_initial_mcp_discovery_before_the_server_is_released() {
+    let fixture = Fixture::new();
+    let (_home, app) = fixture.app();
+    fixture.began.recv_timeout(Duration::from_secs(10)).unwrap();
+    let session = app.shared.mcp.clone();
+    drop(app);
+    assert_eq!(session.pending_connections(), 0);
+    assert!(session.servers().is_empty());
+    assert_eq!(session.report().servers[0].state, "closed");
+    // The fixture's held response is released only by its later Drop.
 }
