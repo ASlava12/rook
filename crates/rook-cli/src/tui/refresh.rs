@@ -337,6 +337,10 @@ mod tests {
                         }
                         Err(e) => panic!("{e}"),
                     };
+                    // Accepted sockets can inherit nonblocking mode on Windows.
+                    // Wait for complete headers instead of retiring a live client
+                    // when its first packet has not arrived yet.
+                    socket.set_nonblocking(false).unwrap();
                     socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
                     let mut header = Vec::new();
                     let mut byte = [0];
