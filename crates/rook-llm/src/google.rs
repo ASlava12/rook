@@ -22,6 +22,8 @@ use crate::{
     truncate,
 };
 
+mod schema;
+
 const MAX_FRAME_BYTES: usize = 8 << 20;
 
 pub struct Config {
@@ -533,7 +535,10 @@ fn wire_request(model: &str, request: &Request) -> Value {
         let declarations: Vec<Value> = request
             .tools
             .iter()
-            .map(|t| json!({ "name": t.name, "description": t.description, "parameters": t.parameters }))
+            // ToolSpec holds JSON Schema, including MCP declarations. `parameters`
+            // is Google's narrower OpenAPI Schema message; these two fields are
+            // mutually exclusive in FunctionDeclaration.
+            .map(|t| json!({ "name": t.name, "description": t.description, "parametersJsonSchema": schema::parameters(&t.parameters) }))
             .collect();
         body["tools"] = json!([{ "functionDeclarations": declarations }]);
     }
