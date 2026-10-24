@@ -1,7 +1,7 @@
 # Rook
 
-[Rook 0.21.19](docs/releases/0.21.19.md): Gemini tool JSON Schema compatibility,
-including nested constraints and MCP tool declarations.
+[Rook 0.21.20](docs/releases/0.21.20.md): resume saved TUI sessions,
+refuse failed prompt guards, and avoid nested ACP stack overflow on Windows.
 
 [Domain network policy with OS containment](docs/domain-network-policy.md).
 
