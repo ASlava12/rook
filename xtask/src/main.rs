@@ -331,6 +331,13 @@ fn run() -> Result<()> {
             copy_tree(std::path::Path::new("skills"), &skills)?;
             println!("packaged {} built-in skill(s)", count_dirs(&skills));
 
+            let web = dir.join("web");
+            copy_tree(std::path::Path::new("web/dist"), &web.join("dist"))?;
+            for name in ["serve.mjs", "README.md"] {
+                std::fs::copy(std::path::Path::new("web").join(name), web.join(name))?;
+            }
+            println!("packaged standalone web UI in {}", web.display());
+
             println!("\nbinary sizes:");
             let mut measured = 0;
             for name in ["rook", "rookd", "rook.exe", "rookd.exe"] {

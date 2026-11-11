@@ -73,6 +73,30 @@ impl<'a> AgentLoop<'a> {
                 "query":{"type":"string","maxLength":129}
             }}),
         });
+        push(ToolSpec {
+            name: super::messaging::TOOL.into(),
+            description: "Message agents in this turn family. peers lists IDs; send needs to (ID or parent) and text; status needs id. Queued data arrives next step; delivered means recorded.".into(),
+            parameters: json!({"type":"object","properties":{
+                "action":{"type":"string","enum":["peers","send","status"]},
+                "after":{"type":"string"},
+                "to":{"type":"string"},"text":{"type":"string","maxLength":65536},
+                "id":{"type":"string"}
+            },"required":["action"],"additionalProperties":false}),
+        });
+        if !domains
+            && self.rook.config.remote_agents.enabled
+            && !self.rook.config.remote_agents.peers.is_empty()
+        {
+            push(ToolSpec {
+                name:crate::remote_agents::TOOL.into(),
+                description:"Contact configured agents on other computers. peers lists destinations; info/status/result inspect a peer; submit starts scoped remote work; message sends data to it; cancel stops it. Writes require a stable request name: retries keep the same name and arguments. Remote costs and workspace changes belong to the other computer. result pages require returned source and offset.".into(),
+                parameters:json!({"type":"object","properties":{
+                    "action":{"type":"string","enum":["peers","info","submit","status","message","result","cancel"]},
+                    "peer":{"type":"string"},"request":{"type":"string"},"id":{"type":"string"},
+                    "text":{"type":"string"},"offset":{"type":"integer","minimum":0},"source":{"type":"string"}
+                },"required":["action"],"additionalProperties":false}),
+            });
+        }
         if self.managed_iteration && self.depth == 0 && !checking {
             push(ToolSpec {
                 name: crate::work::managed::blocked::TOOL.into(),
@@ -302,7 +326,7 @@ impl<'a> AgentLoop<'a> {
                         // ran every sub-task twice.
                         "tasks": {
                             "type": "array",
-                            "items": { "oneOf": [{"type":"string"},{"type":"object","required":["task"],"properties":{"task":{"type":"string"},"output_schema":{"type":["object","boolean"]}}}] },
+                            "items": { "oneOf": [{"type":"string"},{"type":"object","required":["task"],"properties":{"task":{"type":"string"},"output_schema":{"type":["object","boolean"]},"tools":{"type":"array","maxItems":128,"items":{"type":"string","maxLength":256},"description":"Intersects inherited tool allowlist."}}}] },
                             "description": "Self-contained assignments."
                         },
                         "context": {

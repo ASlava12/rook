@@ -1,6 +1,6 @@
 // What every view needs: DOM construction, the API, formatting, shared state.
 // No dependencies and no build step — the browser loads these modules as they
-// are, and `cargo build` is the whole story on every platform (ADR-0012).
+// are, independently of the native build (ADR-0016).
 
 export const $ = (s, r = document) => r.querySelector(s);
 
@@ -92,11 +92,11 @@ export function jsonWithin(value, maximum) {
 // others left, which is how "continue in chat" from the sessions tab works.
 export const state = {
   tab: 'chat', session: null, skill: null, job: null, query: '', memoryAll: false, docsTopic: null,
-  chat: { draft: '', session: null, busy: false, waiting: false, settings: null, spent: null, context: null, modelRequest: null, sessions: [] },
+  chat: { draft: '', session: null, workspace: null, connected: false, connection: 'connecting', busy: false, waiting: false, settings: null, spent: null, context: null, modelRequest: null, sessions: [] },
 };
 
 // Set by the app so views can switch tabs without importing the router.
-export const nav = { go: () => {} };
+export const nav = { go: () => {}, chatChanged: () => {}, disposeChat: () => {}, inspect: () => {} };
 
 // A permission asked for once, on a click, which is the one time a browser
 // grants it. Off until then: an autonomous turn that needs a person is the
@@ -109,50 +109,80 @@ export function askToNotify() {
   if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
 }
 
-// The little of Markdown a model's answer actually uses — fenced code,
-// paragraphs, bullet lists, inline code and bold — built as nodes rather than
-// pasted as HTML, because the text is the model's and so is anything in it.
+// Model text always becomes nodes. Links are protocol checked, raw HTML stays
+// text, and a node budget keeps a short line repeated many times affordable.
+export const MARKDOWN_NODES = 8192;
 export function md(text) {
   const out = document.createDocumentFragment();
-  const parts = String(text).split(/```/);
-  parts.forEach((part, i) => {
-    if (i % 2 === 1) {
-      // Inside a fence: the first line may be a language name.
-      const nl = part.indexOf('\n');
-      const lang = nl >= 0 ? part.slice(0, nl).trim() : '';
-      const code = nl >= 0 ? part.slice(nl + 1) : part;
-      const pre = el('pre', { class: 'code' }, el('code', lang ? { 'data-lang': lang } : {}, code.replace(/\n$/, '')));
-      out.append(pre);
-      return;
+  let nodes = 0;
+  const limit = Symbol('markdown node limit');
+  const make = (...args) => { if (++nodes > MARKDOWN_NODES) throw limit; return el(...args); };
+  const inline = value => {
+    const result = [], pattern = /(`[^`\n]+`)|(\*\*[^*\n]+\*\*)|(\[[^\]\n]+\]\([^\s)]+\))|(\*[^*\n]+\*)/g;
+    let at = 0, match;
+    while ((match = pattern.exec(value))) {
+      if (match.index > at) result.push(value.slice(at, match.index));
+      if (match[1]) result.push(make('code', {}, match[1].slice(1,-1)));
+      else if (match[2]) result.push(make('strong', {}, match[2].slice(2,-2)));
+      else if (match[3]) {
+        const split = match[3].indexOf(']('), label = match[3].slice(1,split), href = match[3].slice(split+2,-1);
+        let safe = false;
+        try { const url = new URL(href); safe = ['http:','https:','mailto:'].includes(url.protocol) && !url.username && !url.password; } catch { /* Render invalid links as ordinary text. */ }
+        result.push(safe ? make('a', { href, target:'_blank', rel:'noopener noreferrer', referrerpolicy:'no-referrer' },label) : label);
+      } else result.push(make('em', {}, match[4].slice(1,-1)));
+      at = pattern.lastIndex;
     }
-    for (const block of part.split(/\n\s*\n/)) {
-      const lines = block.split('\n').filter(l => l.trim() !== '');
-      if (!lines.length) continue;
-      if (lines.every(l => /^\s*[-*]\s+/.test(l))) {
-        out.append(el('ul', {}, lines.map(l => el('li', {}, inline(l.replace(/^\s*[-*]\s+/, ''))))));
-      } else if (/^#{1,6}\s+/.test(lines[0]) && lines.length === 1) {
-        out.append(el('p', { class: 'h' }, inline(lines[0].replace(/^#{1,6}\s+/, ''))));
-      } else {
-        out.append(el('p', {}, inline(lines.join('\n'))));
+    if (at < value.length) result.push(value.slice(at));
+    return result;
+  };
+  const cells = line => line.trim().replace(/^\|/,'').replace(/\|$/,'').split(/(?<!\\)\|/).slice(0,16).map(value=>value.trim().replace(/\\\|/g,'|'));
+  const lines = String(text).replace(/\r\n/g,'\n').split('\n');
+  try {
+    for (let at = 0; at < lines.length;) {
+      const line = lines[at];
+      if (!line.trim()) { at++; continue; }
+      const fence = /^\s*(```+|~~~+)([^\s]*)\s*$/.exec(line);
+      if (fence) {
+        const content = []; at++;
+        while (at < lines.length && !lines[at].trim().startsWith(fence[1])) content.push(lines[at++]);
+        if (at < lines.length) at++;
+        const pre = make('pre',{class:'code'},make('code',fence[2]?{'data-lang':fence[2]}:{},content.join('\n').replace(/\n$/,'')));
+        const copy = make('button',{class:'code-copy',type:'button','aria-label':'Copy code',onclick:async()=>{
+          try { await navigator.clipboard.writeText(pre.textContent); copy.textContent='Copied'; }
+          catch { const selection=window.getSelection?.(); if(selection&&document.createRange){const range=document.createRange();range.selectNodeContents(pre);selection.removeAllRanges();selection.addRange(range);} copy.textContent='Select and copy'; }
+        }},'Copy');
+        out.append(make('div',{class:'code-wrap'},make('span',{class:'code-language'},fence[2]||'code'),copy,pre));
+        continue;
       }
+      const heading = /^(#{1,6})\s+(.*)$/.exec(line);
+      if (heading) { out.append(make(`h${heading[1].length}`,{},inline(heading[2]))); at++; continue; }
+      if (/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(line)) { out.append(make('hr')); at++; continue; }
+      if (/^\s*>\s?/.test(line)) {
+        const quoted = [];
+        while (at < lines.length && /^\s*>\s?/.test(lines[at])) quoted.push(lines[at++].replace(/^\s*>\s?/,''));
+        out.append(make('blockquote',{},inline(quoted.join('\n')))); continue;
+      }
+      if (line.includes('|') && at+1 < lines.length && /^\s*\|?\s*:?-{3,}:?\s*\|[\s|:\-]*$/.test(lines[at+1])) {
+        const head = cells(line), body = []; at+=2;
+        while (at < lines.length && lines[at].includes('|') && lines[at].trim()) body.push(make('tr',{},cells(lines[at++]).map(value=>make('td',{},inline(value)))));
+        out.append(make('table',{},make('thead',{},make('tr',{},head.map(value=>make('th',{},inline(value))))),make('tbody',{},body)));
+        continue;
+      }
+      if (/^\s*(?:[-*+]\s+|\d+[.)]\s+)/.test(line)) {
+        const ordered = /^\s*\d/.test(line), items=[];
+        const marker = ordered ? /^\s*\d+[.)]\s+/ : /^\s*[-*+]\s+/;
+        while (at < lines.length && marker.test(lines[at])) items.push(make('li',{},inline(lines[at++].replace(marker,''))));
+        out.append(make(ordered?'ol':'ul',{},items)); continue;
+      }
+      const paragraph = [line]; at++;
+      while (at < lines.length && lines[at].trim() && !/^\s*(?:#{1,6}\s|```|~~~|>|[-*+]\s+|\d+[.)]\s+)/.test(lines[at]) && !(lines[at].includes('|')&&/^\s*\|?\s*:?-{3,}/.test(lines[at+1]||''))) paragraph.push(lines[at++]);
+      out.append(make('p',{},inline(paragraph.join('\n'))));
     }
-  });
-  return out;
-}
-
-function inline(text) {
-  const nodes = [];
-  // `code` first, then **bold**; a `*` inside code is code.
-  const re = /(`[^`]+`)|(\*\*[^*]+\*\*)/g;
-  let last = 0, m;
-  while ((m = re.exec(text))) {
-    if (m.index > last) nodes.push(text.slice(last, m.index));
-    if (m[1]) nodes.push(el('code', {}, m[1].slice(1, -1)));
-    else nodes.push(el('strong', {}, m[2].slice(2, -2)));
-    last = m.index + m[0].length;
+  } catch (error) {
+    if (error !== limit) throw error;
+    out.append(el('p',{class:'warn'},'Displayed formatting limit reached. Read the complete saved answer in Session history.'));
   }
-  if (last < text.length) nodes.push(text.slice(last));
-  return nodes;
+  return out;
 }
 
 export function errorCard(e) {

@@ -5,6 +5,19 @@ what unblocks the most.
 
 ## Done
 
+**November 12 upstream reference refresh.** All ten gitlinks advance to fetched
+snapshots. Full Unicode history matching, match-centered long-line previews and
+bounded registered-secret masking in compaction are implemented in the common
+engine. The [review](research/reference-review-20261112.md) separates bounded
+history sampling, actual adoption, existing equivalents and remaining scope.
+
+**November 11 pinned-reference follow-up.** Separate bounded file-request
+metadata, individually shortened summary/checker results with whole-span JSON
+admission, and prior-summary continuity on later failure are implemented in the
+shared core. The [review](research/reference-review-20261111.md) records all ten
+pins and existing equivalents; the [contract](long-task-compaction.md) describes
+source attribution, bounds and limitations. Reference gitlinks are unchanged.
+
 **October 16 additional reference adoption (R16-1 through R16-8).**
 All ten reference pointers were advanced again. The
 [dated source review](research/reference-review-20261016.md) records exact pins,
@@ -1820,6 +1833,18 @@ recorded so the design question survives the session that raised it.
   6 tests.
 
 ## Next
+
+**Directions retained from the November 12 upstream review.** These are not
+implemented by that cycle: explicit follow-ups to completed native delegates
+(Goose `71dd9a9`), fork-awareness context (OpenCode `e56eff2b`), and negotiated
+ACP client system prompts (ACP `67cde2d`). Follow-ups need admission within
+existing generation/policy/quota/cancellation bounds; no automatic wake or
+unaccounted model spend. Fork context must distinguish historical ancestry from
+current workspace/job ownership, be included in context accounting and survive
+compaction/reopen without implying copied process authority. Client prompts need
+capability/byte admission and an explicit authority boundary before advertising
+support. The frozen manifest also leaves older/unexamined shallow upstream
+history as a backlog; the new pointers do not claim exhaustive adoption.
 
 **After 0.18.0 reference cycle, 2026-10-18.** Four reference pointers advance
 after reviewing 18 incoming commits. The next accepted capability is durable

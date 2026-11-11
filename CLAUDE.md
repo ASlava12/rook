@@ -8,6 +8,12 @@ public failure in another agent, and the ADRs cite them.
 
 ## Build and test
 
+Build artifacts belong in the checkout's physical `target/` directory. Do not
+redirect it to another drive with a junction. On Windows, `xtask/cargo.cmd`
+keeps compiler/linker and test temporary files on the checkout's drive too,
+under its root `RookBuildTemp/` directory. It stays outside the repository so
+temporary test projects do not inherit this repository's ignore rules.
+
 ```sh
 cargo xtask ci             # fmt + clippy + frontend builds + test — the CI gate
 cargo test --workspace --no-fail-fast   # as the gate runs it: every failure, not the first
@@ -319,15 +325,14 @@ with the job id from `gh run view <run> --json jobs`. Strip the colour codes
 before grepping. A Windows compile error costs one round trip this way, not
 three.
 
-**Verifying the web UI.** It is hand-written ES modules under `web/dist`,
-embedded into `rookd` (ADR-0012). `cargo test -p rookd` checks that every
-module the page or another module loads is embedded and served as script, and
-that every tab has a renderer; it cannot check JavaScript syntax, so run
-`node --check web/dist/*.js` where `node` happens to be installed before
-trusting a change, and open the page against a scratch daemon
-(`ROOK_HOME=/tmp/rook-scratch cargo run -p rookd`) for anything the tests do
-not see. Markdown from the model is rendered by building nodes, never by
-assigning HTML.
+**Verifying the web UI.** It is a separate, buildless application under `web/`
+(ADR-0016). `rookd` serves API/WebSocket/MCP without linking UI assets. Run
+`node web/check.mjs` and `node --test web/tests/*.mjs` for syntax, asset/import
+integrity and frontend behavior. Start a scratch daemon with its own `ROOK_HOME`,
+then `node web/serve.mjs --daemon http://127.0.0.1:7717` and open its port 3000
+for behavior those tests cannot see. The controlled Windows browser probe is
+`xtask/probes/web-workspace/run.mjs`; it needs current built binaries. Markdown
+from the model is rendered by building nodes, never by assigning HTML.
 
 **Verifying a change to `rookd`.** The daemon tests in
 `crates/rook-cli/tests/cli.rs` and `tui_pty.rs` run the binary. Their helpers may

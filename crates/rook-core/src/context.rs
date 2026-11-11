@@ -308,7 +308,8 @@ pub fn reaches_the_model(kind: rook_store::EventKind) -> bool {
 /// Companion notes with this label are also replayed as source data.
 pub(crate) fn record_reaches_the_model(kind: rook_store::EventKind, label: &str) -> bool {
     reaches_the_model(kind)
-        || (kind == rook_store::EventKind::Note && label == crate::branches::SUMMARY_LABEL)
+        || (kind == rook_store::EventKind::Note
+            && (label == crate::branches::SUMMARY_LABEL || label == crate::agent::messaging::LABEL))
 }
 
 /// How much of a thought is carried into the next request.

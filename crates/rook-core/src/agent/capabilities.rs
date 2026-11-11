@@ -21,6 +21,8 @@ const OPTIONAL: &[&str] = &[
     "recall",
     "delegate",
     "subagents",
+    "agent_message",
+    "remote_agent",
     "stance",
     "verify",
     "worktree",
@@ -152,6 +154,12 @@ impl AgentLoop<'_> {
             "retained-source review context exposes only its installed reader"
         } else if self.checking && CHANGES_THINGS.contains(&name) {
             "verification cannot expose tools that change the work"
+        } else if name == crate::remote_agents::TOOL {
+            if self.rook.config.sandbox.network_policy.enabled {
+                "excluded by domain network policy"
+            } else {
+                "remote agents are disabled or no peers are configured"
+            }
         } else if self.rook.config.sandbox.network_policy.enabled
             && (["docs", "find_skill"].contains(&name)
                 || (installed.contains(&name) && !rook_tools::network::local_tool(name)))

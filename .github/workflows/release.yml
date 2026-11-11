@@ -156,6 +156,11 @@ jobs:
             fi
           done
           cp -R skills "dist/$name/share/rook/skills"
+          if [ -f web/serve.mjs ]; then
+            mkdir -p "dist/$name/share/rook/web"
+            cp -R web/dist "dist/$name/share/rook/web/dist"
+            cp web/serve.mjs web/README.md "dist/$name/share/rook/web/"
+          fi
           cp README.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
           # Rebuilding a tag with a revised recipe keeps both identities:
           # checkout HEAD is the source; GITHUB_SHA identifies this recipe.
@@ -218,7 +223,10 @@ jobs:
       - name: verify collected archives
         run: |
           set -euo pipefail
+          web_args=()
+          if [ -f web/serve.mjs ]; then web_args=(--web web); fi
           python3 xtask/probes/release-packages/verify.py dist \
+            "${web_args[@]}" \
             --skills skills --version "${GITHUB_REF_NAME#v}" \
             --source-commit "$GITHUB_SHA" --recipe-commit "$GITHUB_SHA" \
             --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"

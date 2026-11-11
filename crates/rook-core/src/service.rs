@@ -52,6 +52,7 @@ pub struct Rook {
     /// shared across turns without leaking a large window to another model.
     window_learned: std::sync::Mutex<std::collections::VecDeque<([u8; 32], usize)>>,
     pub(crate) browser: Arc<crate::browser::Pool>,
+    pub(crate) remote_agents: Arc<crate::remote_agents::Pool>,
     pub(crate) execution_environments: Arc<rook_tools::environments::Pool>,
     /// Skills and plugins that failed to load, kept so the UIs can show them
     /// instead of silently presenting a shorter catalog.
@@ -85,6 +86,7 @@ pub struct Rook {
 
 /// Immutable inputs for rooted discovery, movable off an engine lock.
 pub struct WorkspaceSeed {
+    remote_agents: Arc<crate::remote_agents::Pool>,
     store: Arc<Store>,
     extension_changed: Arc<tokio::sync::watch::Sender<u64>>,
     config: Config,
@@ -109,6 +111,7 @@ impl WorkspaceSeed {
             window_learned: Default::default(),
             browser: Default::default(),
             execution_environments: self.execution_environments,
+            remote_agents: self.remote_agents,
             skill_errors,
             plugins,
             output_dir: self.output_dir,
@@ -256,6 +259,7 @@ impl Rook {
             skill_errors,
             plugins,
             output_dir: paths::output_dir(),
+            remote_agents: Default::default(),
             writing: Default::default(),
             touched: Default::default(),
         })
@@ -290,6 +294,7 @@ impl Rook {
             // Beside the scratch store rather than in the user's home, for the
             // reason the field carries.
             output_dir: root.join("output"),
+            remote_agents: Default::default(),
             writing: Default::default(),
             touched: Default::default(),
         }
@@ -308,6 +313,7 @@ impl Rook {
     /// Capture only shared immutable inputs; no filesystem discovery or claims.
     pub fn workspace_seed(&self) -> WorkspaceSeed {
         WorkspaceSeed {
+            remote_agents: self.remote_agents.clone(),
             store: self.store.clone(),
             extension_changed: self.extension_changed.clone(),
             config: self.config.clone(),
@@ -1061,6 +1067,20 @@ impl Rook {
     /// Where replay should start, and the summary standing in for what came
     /// before it.
     pub fn last_compaction(&self, session: u128) -> Result<(u64, Option<String>)> {
+        let (from, record) = self.last_compaction_record(session)?;
+        let summary = record.as_ref().and_then(|record| {
+            record.get("summary").and_then(|value| value.as_str()).map(|summary| {
+                let files = crate::compaction_files::Files::from_record(
+                    record,
+                    crate::compaction_files::Files::budget(self.config.agent.max_compaction_summary_bytes),
+                );
+                format!("{summary}{}", files.render())
+            })
+        });
+        Ok((from, summary))
+    }
+
+    pub(crate) fn last_compaction_record(&self, session: u128) -> Result<(u64, Option<serde_json::Value>)> {
         if let Some(seq) = self.read_mark(COMPACTED, session)?
             && let Some(found) = self.compaction_at(session, seq)?
         {
@@ -1079,28 +1099,28 @@ impl Rook {
         match found {
             Some((seq, parsed)) => {
                 self.set_mark(COMPACTED, session, seq)?;
-                Ok(parsed)
+                Ok((parsed.0, Some(parsed.1)))
             }
             None => Ok((0, None)),
         }
     }
 
-    fn compaction_at(&self, session: u128, seq: u64) -> Result<Option<(u64, Option<String>)>> {
+    fn compaction_at(&self, session: u128, seq: u64) -> Result<Option<(u64, Option<serde_json::Value>)>> {
         let Some(event) = self.store.events(session, seq, 1)?.into_iter().next() else {
             return Ok(None);
         };
         if event.seq != seq || event.record.kind != EventKind::Compaction {
             return Ok(None);
         }
-        Ok(self.compaction_body(&event))
+        Ok(self.compaction_body(&event).map(|(from, record)| (from, Some(record))))
     }
 
     /// Where replay resumes, and the summary standing in for what came before.
-    fn compaction_body(&self, event: &Event) -> Option<(u64, Option<String>)> {
+    fn compaction_body(&self, event: &Event) -> Option<(u64, serde_json::Value)> {
         let body = self.store.get(&event.record.body).ok()?;
         let parsed = serde_json::from_slice::<serde_json::Value>(&body).ok()?;
         let through = parsed.get("through_seq")?.as_u64()?;
-        Some((through + 1, parsed.get("summary").and_then(|s| s.as_str()).map(String::from)))
+        Some((through.checked_add(1)?, parsed))
     }
 
     /// Render a session's log with bodies resolved. `max_body` bounds how much of
@@ -1120,6 +1140,8 @@ impl Rook {
             let (body, truncated) = crate::transcript::body(self, &e, max_body)
                 .unwrap_or_else(|err| (format!("<unreadable: {err}>"), false));
             out.push(TranscriptEntry {
+                internal: e.record.kind == EventKind::Note
+                    && !crate::agent::note_is_for_a_person(&e.record.label),
                 seq: e.seq,
                 ts: e.record.ts,
                 kind: e.record.kind.as_str().to_string(),
@@ -2427,6 +2449,10 @@ pub struct SkillVersionRecord {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TranscriptEntry {
+    /// Bookkeeping is retained in history but need not interrupt the conversation.
+    /// Computed by the same note projection used by the native frontends.
+    #[serde(default)]
+    pub internal: bool,
     pub seq: u64,
     pub ts: i64,
     pub kind: String,
@@ -2749,6 +2775,7 @@ mod tests {
             skill_errors: Vec::new(),
             plugins: Vec::new(),
             output_dir: dir.join("output"),
+            remote_agents: Default::default(),
             writing: Default::default(),
             touched: Default::default(),
         }

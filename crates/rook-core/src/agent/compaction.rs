@@ -50,18 +50,54 @@ pub(super) const TOO_MUCH_COMPACTION: u32 = 3;
 /// bookkeeping stopped being shown.
 pub(super) fn render_span(entries: &[crate::TranscriptEntry], budget_tokens: usize) -> String {
     let mut lines = Vec::new();
-    let mut used = 0;
+    let marker = "[earlier still, elided]";
+    let mut remaining = budget_tokens.saturating_sub(estimate_tokens(marker));
     for entry in entries.iter().rev() {
+        if remaining < 32 {
+            if !lines.is_empty() {
+                lines.push(marker.into());
+            }
+            break;
+        }
         let named = match entry.label.is_empty() {
             true => entry.kind.clone(),
             false => format!("{} {}", entry.kind, entry.label),
         };
-        let line = serde_json::json!({"seq":entry.seq, "event":named, "content":entry.body}).to_string();
-        used += estimate_tokens(&line);
-        if used > budget_tokens && !lines.is_empty() {
-            lines.push("[earlier still, elided]".to_string());
+        // A compiler dump should not crowd every decision out of the summary
+        // or checker input. The complete result remains in the saved log.
+        let mut limit = if entry.kind == "tool-result" {
+            (budget_tokens / 4).clamp(64, 512)
+        } else {
+            (budget_tokens / 2).max(64)
+        }
+        .min(remaining);
+        let named = crate::context::shorten_thinking(&named, remaining / 8);
+        let line = loop {
+            let body = if entry.kind == "tool-result" {
+                crate::context::shorten_result(&entry.body, limit)
+            } else {
+                crate::context::shorten_thinking(&entry.body, limit)
+            };
+            let mut record = serde_json::json!({"seq":entry.seq, "event":named, "content":body});
+            if record["content"].as_str() != Some(entry.body.as_str()) {
+                record["content_elided"] = serde_json::json!(true);
+            }
+            let line = record.to_string();
+            // Count quoting and separators too: control characters can expand
+            // sixfold in JSON, and even the newest single entry must fit.
+            if estimate_tokens(&line) < remaining || limit <= 1 {
+                break line;
+            }
+            limit /= 2;
+        };
+        let cost = estimate_tokens(&line) + 1;
+        if cost > remaining {
+            if !lines.is_empty() {
+                lines.push(marker.into());
+            }
             break;
         }
+        remaining -= cost;
         lines.push(line);
     }
     lines.reverse();
@@ -177,7 +213,17 @@ impl<'a> AgentLoop<'a> {
     }
 
     async fn summarise_span(&self, id: u128) -> Result<Compacted> {
-        let (from_seq, previous) = self.rook.last_compaction(self.session)?;
+        let (from_seq, previous_record) = self.rook.last_compaction_record(self.session)?;
+        let prior_prose = previous_record
+            .as_ref()
+            .and_then(|record| record.get("summary"))
+            .and_then(|value| value.as_str())
+            .map(|text| {
+                self.vault
+                    .redact_bounded(text, 1024 * 1024)
+                    .unwrap_or_else(|| "[previous summary omitted: redaction exceeds its admission]".into())
+            });
+        let previous = prior_prose.as_deref();
         // Only what the model was actually shown. The log also holds checkpoint
         // manifests, asides and errors, and summarising those spends the budget
         // on bookkeeping and hands back a summary of things it never saw.
@@ -186,7 +232,7 @@ impl<'a> AgentLoop<'a> {
             self.provider.id(),
             self.provider.dispatch_identity().as_ref(),
         );
-        let entries: Vec<_> = self
+        let mut entries: Vec<_> = self
             .rook
             .transcript(self.session, from_seq, usize::MAX, 8_000)?
             .into_iter()
@@ -331,8 +377,32 @@ impl<'a> AgentLoop<'a> {
             return Err(CoreError::Other("not enough history to compact".into()));
         }
 
+        // Legacy/user records can predate registration of a secret. Scrub the
+        // admitted bodies before excerpting them, so shortening cannot split a
+        // known value into an unrecognizable fragment. Original history stays.
+        for entry in &mut entries[..split] {
+            entry.label = self
+                .vault
+                .redact_bounded(&entry.label, 1024)
+                .unwrap_or_else(|| "[source label omitted]".into());
+            entry.body = self
+                .vault
+                .redact_bounded(&entry.body, 16_000)
+                .unwrap_or_else(|| "[source omitted: redaction exceeds summary input admission]".into());
+        }
         let span = &entries[..split];
         let through_seq = span.last().map(|e| e.seq).unwrap_or(from_seq.saturating_sub(1));
+
+        // Reserve only a fraction of the configured summary admission for path
+        // metadata, independently of whether the model remembers those paths.
+        let file_budget =
+            crate::compaction_files::Files::budget(self.rook.config.agent.max_compaction_summary_bytes);
+        let mut file_activity = previous_record
+            .as_ref()
+            .map(|record| crate::compaction_files::Files::from_record(record, file_budget))
+            .unwrap_or_default();
+        file_activity.observe(span, file_budget);
+        file_activity.redact(&self.vault, file_budget);
 
         // The previous summary is folded into this one, and is never what gets
         // trimmed. Without it a second compaction covers only the span since
@@ -342,7 +412,7 @@ impl<'a> AgentLoop<'a> {
             .map(|p| format!("A summary of everything before this point:\n\n{p}\n\n---\n\n"))
             .unwrap_or_default();
         let room = (self.budget.usable() / 2).saturating_sub(estimate_tokens(&carried));
-        let material = format!("{carried}{}", render_span(span, room));
+        let material = format!("{carried}{}{}", render_span(span, room), file_activity.render());
 
         // A summary that cannot be produced still leaves a compaction worth
         // recording: the span is dropped from the request either way, and the
@@ -353,21 +423,24 @@ impl<'a> AgentLoop<'a> {
             Err(e) => {
                 // Provider errors can themselves contain a large response.
                 // Admit their borrowed display prefix before formatting a note.
-                let reason = match &e {
-                    CoreError::Other(text) => {
-                        let mut end = text.len().min(512);
-                        while !text.is_char_boundary(end) {
-                            end -= 1;
-                        }
-                        &text[..end]
-                    }
-                    _ => "summary request failed; inspect the saved diagnostics",
+                let detail = match &e {
+                    CoreError::Other(text) => self
+                        .vault
+                        .redact_bounded(text, 2048)
+                        .unwrap_or_else(|| "summary request failed; inspect the saved diagnostics".into()),
+                    _ => "summary request failed; inspect the saved diagnostics".into(),
                 };
+                let reason = rook_llm::truncate(&detail, 512);
                 (
-                    format!(
-                        "The transcript before this point could not be summarised ({reason}). It is still in \
+                    fallback_summary(
+                        previous,
+                        &format!(
+                            "The transcript before this point could not be summarised ({reason}). It is still in \
                      the session log — `rook session show` reads it back — so ask before assuming \
                      what is in it."
+                        ),
+                        self.budget.usable(),
+                        self.rook.config.agent.max_compaction_summary_bytes,
                     ),
                     false,
                 )
@@ -379,6 +452,7 @@ impl<'a> AgentLoop<'a> {
             dropped_events: span.len(),
             compaction_id: rook_store::format_session_id(id),
             summarized,
+            file_activity,
             summary: if span.iter().any(|entry| tool_images.contains(&entry.seq)) {
                 format!(
                     "{summary}\nEarlier tool images are no longer in context. Their original pixels remain available through read_result with include_images=true."
@@ -554,7 +628,9 @@ impl<'a> AgentLoop<'a> {
         let summary = if said.trim().is_empty() { thought } else { said };
         match summary.trim().is_empty() {
             true => Err(CoreError::Other("the model returned an empty summary".into())),
-            false => Ok(summary),
+            false => self.vault.redact_bounded(&summary,
+                self.rook.config.agent.max_compaction_summary_bytes.clamp(1024, 1024 * 1024))
+                .ok_or_else(|| CoreError::Other("redacted compaction output exceeds agent.max_compaction_summary_bytes; use saved source history".into())),
         }
     }
 }
@@ -567,10 +643,69 @@ struct Compacted {
     // JSON companions may gain optional fields; no postcard/wire struct changes.
     compaction_id: String,
     summarized: bool,
+    file_activity: crate::compaction_files::Files,
+}
+
+// A failed new summary does not invalidate an already committed one. Carry a
+// bounded prefix/suffix rather than nesting fallbacks without limit on retry.
+fn fallback_summary(previous: Option<&str>, warning: &str, usable_tokens: usize, max_bytes: usize) -> String {
+    let Some(previous) = previous else { return warning.to_owned() };
+    let budget = (usable_tokens / 4).min(max_bytes.clamp(1024, 1024 * 1024) / 8);
+    let kept = crate::context::shorten_thinking(previous, budget);
+    format!("Previously saved summary (covers earlier history only):\n{kept}\n\n{warning}")
 }
 
 #[cfg(test)]
 mod summary_budget_tests {
+    #[test]
+    fn a_single_escaped_entry_and_large_tool_results_cannot_overrun_the_rendered_span() {
+        let entry = |seq, kind: &str, body: String| crate::TranscriptEntry {
+            seq,
+            kind: kind.into(),
+            body,
+            ..serde_json::from_value(serde_json::json!({
+                "seq":0,"ts":0,"kind":"user","label":"", "object":"", "bytes":0,
+                    "stored_bytes":0,"tokens_in":0,"tokens_out":0,"body":"", "truncated":false
+            }))
+            .unwrap()
+        };
+        let entries = vec![
+            entry(0, "user", "Preserve the parser compatibility decision.".into()),
+            entry(1, "tool-result", format!("FIRST ERROR\n{}\nLAST ERROR", "\u{1}".repeat(30000))),
+        ];
+        for budget in [0, 16, 64, 512, 2000] {
+            let rendered = super::render_span(&entries, budget);
+            assert!(crate::context::estimate_tokens(&rendered) <= budget, "{budget}: {}", rendered.len());
+            if budget == 2000 {
+                assert!(
+                    rendered.contains("parser compatibility"),
+                    "a large tool result leaves room for decisions"
+                );
+                assert!(rendered.contains("FIRST ERROR") && rendered.contains("LAST ERROR"));
+                assert!(rendered.contains("elided"));
+            }
+        }
+        let rendered = super::render_span(&[entry(0, "user", "\u{1}".repeat(30000))], 512);
+        assert!(crate::context::estimate_tokens(&rendered) <= 512);
+    }
+
+    #[test]
+    fn repeated_failed_summaries_keep_bounded_prior_context_and_an_explicit_source_warning() {
+        let original = format!("KEEP USER CONSTRAINT\n{}\nUNRESOLVED DECISION", "🦀".repeat(30000));
+        let mut previous = original;
+        for _ in 0..20 {
+            previous = super::fallback_summary(
+                Some(&previous),
+                "new span unsummarized; use session show",
+                4000,
+                8192,
+            );
+            assert!(previous.len() < 5000, "fallbacks cannot accumulate without bound");
+            assert!(previous.contains("KEEP USER CONSTRAINT"));
+            assert!(previous.contains("session show"));
+        }
+    }
+
     #[test]
     fn auxiliary_request_fits_its_own_window_with_wrappers_and_output() {
         for window in [4096, 8192, 32768] {

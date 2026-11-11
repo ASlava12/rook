@@ -6,7 +6,7 @@ update. Keep the English and Russian README introductions and versioned notes
 in `docs/releases/` consistent with the package version.
 
 The source must pass formatting, workspace/all-target clippy and workspace
-tests. Inspect the eight required platform CI jobs on the release revision;
+tests. Inspect all ten required platform and standalone-web CI jobs on the release revision;
 the optional model smoke is separate evidence, including its failures.
 Its [preparation step](../xtask/probes/model-smoke/README.md) requires a complete
 pull response and confirms the requested model is available. HTTP 200 alone is
@@ -43,14 +43,16 @@ Download the GitHub-hosted draft assets into an isolated verification directory:
 ```sh
 gh release download vX.Y.Z --dir /path/to/release-verification
 python3 xtask/probes/release-packages/verify.py /path/to/release-verification \
-  --skills /path/to/tagged-source/skills --version X.Y.Z \
+  --skills /path/to/tagged-source/skills --web /path/to/tagged-source/web --version X.Y.Z \
   --source-commit SOURCE_SHA --recipe-commit RECIPE_SHA \
   --run-url https://github.com/OWNER/REPO/actions/runs/RUN_ID
 ```
 
 Verify all five archive checksums against `SHA256SUMS`, safe archive paths,
 expected binary architectures, source/recipe provenance, package versions and
-the exact bundled skills from the tagged source. Linux binaries must have no
+the exact bundled skills and standalone web resources from the tagged source.
+Omit `--web` only for historical packages that embedded the interface and have no
+standalone web component. Linux binaries must have no
 ELF interpreter or shared-library dependencies; Windows binaries must not
 import the dynamic C runtime. Both host binaries must report the package
 version and pass the owned runtime checks for the changed behavior. Record
@@ -59,6 +61,28 @@ which targets ran natively and which received archive/linkage checks.
 Use the extracted binaries and isolated test state for runtime checks. The
 installer changes a user's installation and is not the artifact test runner.
 Retain the verified SHA256s and native probe results in the release evidence.
+When the standalone interface or agent integrations change, run
+`node xtask/probes/web-workspace/run.mjs --bin-dir /absolute/extracted/bin --web-dir /absolute/extracted/share/rook/web`
+on Windows with an installed Chromium browser. This uses the downloaded daemon
+and UI, isolated state and a fixture provider; it checks HTTP/MCP tasks, approvals,
+reconnects, project switching and independent UI shutdown. Preserve its JSON result.
+For selected CLI integration fixtures, set `ROOK_TEST_BIN_DIR` to the absolute
+extracted `bin` directory and run these exact `rook-cli --test cli` cases:
+
+- `remote_agents::two_owned_daemons_exchange_agent_tasks_and_live_messages_and_keep_receipts_after_restart`
+- `unicode_history_search_keeps_original_coordinates_locally_and_through_the_daemon`
+- `model_call_cli::registered_secrets_are_scrubbed_in_native_compaction_requests_and_saved_prose`
+- `model_call_cli::model_call_native_compaction_adds_its_own_purpose_without_rewriting_earlier_snapshots`
+
+Use `cargo test -p rook-cli --test cli NAME -- --exact`. Their common runtime
+helper requires the matching daemon version and never rebuilds the supplied pair;
+the compiled helper only seeds/verifies private data. This override does not cover
+every CLI test. Record both extracted binary hashes before and after the probes.
+Run `xtask/probes/deferred-work/run.py --bin-dir /absolute/extracted/bin` as well;
+retain all 22 conditions, including execution in a different workspace, restart,
+capacity and guidance. A successful fresh run does not explain the historical
+0.21.21 queue timeout; retain that uncertainty separately in release evidence.
+
 The [archive verifier](../xtask/probes/release-packages/README.md) can extract and
 check Windows host versions with `--host`. Run the
 [owned dialog probe](../xtask/probes/browser-dialogs/README.md) on the extracted

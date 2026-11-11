@@ -200,7 +200,8 @@ rook tui                                   # the conversation, with ^p for every
 rook tui --session last                    # open this workspace's saved conversation
 rook checkpoint create before-refactor     # or `c` in the TUI's Checkpoints tab
 rook docs add redis                        # read its documentation once, answer from it after
-rookd                                      # http://127.0.0.1:7717 — web UI + API
+rookd                                      # http://127.0.0.1:7717 — API, WebSocket, MCP
+node web/serve.mjs                          # http://127.0.0.1:3000 — separate web UI
 rook tui                                   # F4: scheduled tasks and their sessions
 rook task schedule "Check CI failures" --when "weekdays 09:00" --timezone Europe/Moscow
 rook task steer TASK_ID "Keep API compatibility"          # durable correction + receipt
@@ -209,6 +210,10 @@ rook daemon status                         # where it is, and whether it is this
 rook update                                # a newer release, if there is one; keeps the previous beside it
 rook daemon restart                        # after an upgrade; names any turn it ends
 ```
+
+The [standalone web workspace](web/README.md) updates independently of the Rust
+binaries. Node is needed only for its optional local host. For application and
+assistant integrations, see the scoped [agent HTTP API and MCP server](docs/agent-api.md).
 
 TUI data panels refresh in the background and retain their previous data when a
 read fails. See [panel refresh behavior and limits](docs/tui-panel-refresh.md).
@@ -219,9 +224,9 @@ the model says; a session being written by a terminal is read live from the
 sessions tab, which can hand it to the chat. The stance and effort selects are
 the engine's own lists. With permission, a turn that stops to ask for a person
 sends a notification, which is the case for one: an autonomous run in a
-background tab. It is hand-written HTML and ES modules served by `rookd` with
-no bundler and no toolchain — `cargo build` is the whole story
-([ADR-0012](docs/adr/0012-hand-written-modules-no-bundler.md)).
+background tab. Its hand-written HTML and ES modules are served separately with
+no bundler or installation step. `rookd` remains a Rust-only API backend
+([ADR-0016](docs/adr/0016-separate-web-and-agent-integrations.md)).
 
 In a conversation, slash commands reach the same engine the subcommands do:
 
@@ -702,7 +707,7 @@ It does not open the store, so it runs beside `rookd` — which is the arrangeme
 you want if the web UI is up and an editor should reach the same tools.
 
 All three front ends run turns, stream them, and ask for approvals the same way:
-`rook chat`, `rook tui`, and the web UI at `rookd`. Nothing is reachable from one
+`rook chat`, `rook tui`, and the separate web UI connected to `rookd`. Nothing is reachable from one
 that is not reachable from the others.
 
 ### Code intelligence
@@ -1504,6 +1509,11 @@ design, after the person said to.
 
 ### Delegation
 
+[Agent-to-agent messages](docs/agent-messaging.md) add direct parent/child/sibling
+coordination, delivery receipts and per-task tool allowlists to native delegation.
+[Remote agents](docs/remote-agents.md) exchange tasks, live messages, status,
+results and cancellation across computers over authenticated HTTP(S) or SSH tunnels.
+
 A turn can hand self-contained sub-tasks to fresh agents and get back only their
 conclusions. Each sub-agent runs in its own session with an empty context, so a
 wide search or a long file survey never enters the conversation that asked for it
@@ -1935,9 +1945,9 @@ crates/
   rook-lsp      Language Server Protocol client: diagnostics and navigation
   rook-acp      Agent Client Protocol server, so editors can drive it
   rook-proto    wire types shared by daemon, CLI and web
-  rookd         HTTP backend, chat websocket, embedded web UI
+  rookd         HTTP API, chat websocket and agent MCP backend
   rook-cli      `rook`: commands and the terminal browser
-web/dist        the web UI: one hand-written HTML file, no build step
+web/            standalone web UI and local proxy host; no build step
 docs/           architecture, storage format, skills, platforms, ADRs, research
 references/     upstream agent sources as shallow submodules, to read from
 ```
@@ -2056,6 +2066,13 @@ being the platform's job, and
 [0013](docs/adr/0013-secrets-are-named-never-valued.md) on secrets.
 
 ## Development
+
+On Windows, `.\xtask\cargo.cmd build -p rook-cli -p rookd` or
+`.\xtask\cargo.cmd xtask ci` keeps artifacts in the checkout's `target/` and
+temporary compiler/test files in `RookBuildTemp/` at the root of that same drive.
+It grants the invoking user full access to that temporary directory so Windows
+containment can set integrity labels there.
+The wrapper changes environment variables only for its own process tree.
 
 ```sh
 cargo xtask ci             # fmt + clippy + test, the gate CI runs; prints what each took

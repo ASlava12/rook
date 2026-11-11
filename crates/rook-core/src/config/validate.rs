@@ -8,6 +8,14 @@ impl Config {
     pub fn validation_errors(&self) -> Vec<String> {
         let mut errors = Vec::new();
         errors.extend(self.telemetry.runtime_diagnostics.errors());
+        errors.extend(self.remote_agents.errors());
+        for route in &self.remote_agents.routes {
+            if !self.inbound.enabled || !self.inbound.routes.contains_key(route) {
+                errors.push(format!(
+                    "remote_agents.routes: {route} requires an existing enabled inbound route"
+                ));
+            }
+        }
         if let Err(error) = self.sandbox.network_policy.validate() {
             errors.push(error);
         }
@@ -29,6 +37,9 @@ impl Config {
             errors.push(error.to_string());
         }
         for (name, value, low, high) in [
+            ("max_agent_message_bytes", self.agent.max_agent_message_bytes, 0, 65536),
+            ("max_agent_inbox_messages", self.agent.max_agent_inbox_messages, 0, 256),
+            ("max_agent_messages_per_turn", self.agent.max_agent_messages_per_turn, 0, 4096),
             ("delegation_progress_entries", self.agent.delegation_progress_entries, 1, 128),
             ("worktree_recovery_max_files", self.agent.worktree_recovery_max_files, 1, 65536),
             ("worktree_recovery_max_bytes", self.agent.worktree_recovery_max_bytes, 1, 256 * 1024 * 1024),

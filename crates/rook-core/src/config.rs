@@ -37,6 +37,7 @@ pub struct Config {
     pub learning: crate::learning::Settings,
     pub execution_environment: rook_tools::environments::Settings,
     pub inbound: crate::inbound::Settings,
+    pub remote_agents: crate::remote_agents::Settings,
     pub telegram: crate::telegram::Settings,
     pub composite_recipes: crate::composite_recipes::Settings,
     pub acp_executor: crate::acp_executor::Settings,
@@ -337,6 +338,7 @@ impl Default for Config {
             learning: Default::default(),
             execution_environment: Default::default(),
             inbound: Default::default(),
+            remote_agents: Default::default(),
             telegram: Default::default(),
             composite_recipes: Default::default(),
             acp_executor: Default::default(),
@@ -605,6 +607,12 @@ pub struct AgentConfig {
     pub max_parallel_subagents: usize,
     /// Pending child display hints; repeated hints coalesce independently of receipts.
     pub delegation_progress_entries: usize,
+    /// Maximum UTF-8 bytes in one agent-to-agent message (hard ceiling 64 KiB).
+    pub max_agent_message_bytes: usize,
+    /// Pending messages per recipient; a full inbox refuses new messages.
+    pub max_agent_inbox_messages: usize,
+    /// Accepted messages across a root turn and every descendant, including delivered mail.
+    pub max_agent_messages_per_turn: usize,
     /// How many sub-agents one turn may start in total, counting the ones its
     /// children start. `max_parallel_subagents` paces them; this is what stops
     /// a single tool call from being a thousand model calls, because the list
@@ -1037,6 +1045,9 @@ impl Default for AgentConfig {
             max_output_tokens: 0,
             max_parallel_subagents: 4,
             delegation_progress_entries: 32,
+            max_agent_message_bytes: 8192,
+            max_agent_inbox_messages: 32,
+            max_agent_messages_per_turn: 256,
             max_subagents_per_turn: 16,
             server_update_after_days: 30,
             install_servers: true,
@@ -1186,6 +1197,9 @@ const PROJECT_MAY_SET: &[&str] = &[
     "agent.max_instructions_bytes",
     "agent.max_parallel_subagents",
     "agent.delegation_progress_entries",
+    "agent.max_agent_message_bytes",
+    "agent.max_agent_inbox_messages",
+    "agent.max_agent_messages_per_turn",
     "agent.max_skill_cards",
     "agent.max_steps",
     "agent.max_subagents_per_turn",

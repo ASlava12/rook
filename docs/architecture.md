@@ -1,5 +1,27 @@
 # Architecture
 
+[Unicode history search](history-search.md) shares full folding while retaining
+original byte coordinates, query-sized matching state and match-centered
+previews. Compaction masks registered values before excerpting and committing
+derived text. The [November 12 upstream review](research/reference-review-20261112.md)
+records refreshed reference snapshots and the scoped adoption decisions.
+
+Compaction carries bounded file-request metadata independently of model prose,
+shortens individual tool results before summarization/checking and preserves
+bounded prior context when a later summary fails. See the
+[long-task contract](long-task-compaction.md) and
+[November 11 reference review](research/reference-review-20261111.md).
+
+The [standalone web workspace](../web/README.md) is delivered separately from
+`rookd`; the daemon exposes HTTP, WebSocket and scoped [agent API/MCP](agent-api.md).
+See [ADR-0016](adr/0016-separate-web-and-agent-integrations.md) for the boundary.
+
+[Native agent messaging](agent-messaging.md) shares bounded mailboxes within an
+active turn family. Admitted messages persist as source-data Notes; child tool
+allowlists intersect inherited recipe equipment on both delegation paths.
+Independent daemons use [authenticated remote agents](remote-agents.md), reusing
+inbound source receipts, bounded task queues and generation-bound work controls.
+
 [Transcript metadata admission and retrieval limits](transcript-admission.md).
 
 [Domain network policy with OS containment](domain-network-policy.md).

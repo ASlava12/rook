@@ -25,6 +25,7 @@ enum Behavior {
     Repetition,
     MaxTokens,
     Block,
+    SecretSummary,
 }
 impl Server {
     fn new(retry_first: bool) -> Self {
@@ -86,6 +87,9 @@ impl Server {
                     let classifier =
                         request.to_string().contains("Classify whether an assistant's proposed last reply");
                     let streamed = request["stream"] == true;
+                    let summarizing = request["messages"][0]["content"]
+                        .as_str()
+                        .is_some_and(|text| text.contains("compacting an agent"));
                     output.lock().unwrap().push(request);
                     if matches!(behavior, Behavior::Quota) {
                         let body =
@@ -105,6 +109,8 @@ impl Server {
                         } else {
                             let text = if matches!(behavior, Behavior::Repetition) {
                                 "OWNED_REPEAT no new observation or progress.\n".repeat(1500)
+                            } else if matches!(behavior, Behavior::SecretSummary) && summarizing {
+                                "Summary retained fixture-release-credential-0123456789".into()
                             } else if classifier {
                                 r#"{"action":"finish"}"#.into()
                             } else {
@@ -568,4 +574,59 @@ fn model_call_native_compaction_adds_its_own_purpose_without_rewriting_earlier_s
     let prefix = rook.json(&["session", "model-calls", &saved, "--through", &before["through"].to_string()]);
     assert_eq!(prefix["calls"].as_array().unwrap().len(), before["calls"].as_array().unwrap().len());
     assert!(!prefix["calls"].as_array().unwrap().iter().any(|c| c["purpose"] == "compaction"));
+}
+
+#[test]
+fn registered_secrets_are_scrubbed_in_native_compaction_requests_and_saved_prose() {
+    let _one = one_at_a_time();
+    let rook = Rook::new();
+    let server = Server::with_behavior(Behavior::SecretSummary);
+    config(&rook, &server);
+    let secret = "fixture-release-credential-0123456789";
+    let mut vault = rook_core::Vault::load_from(rook.home.path().join("secrets.toml")).unwrap();
+    vault.keep("fixture_provider", secret).unwrap();
+    let config = std::fs::read_to_string(rook.home.path().join("config.toml")).unwrap();
+    rook.write_config(&format!("{config}key='secret:fixture_provider'\n[models.local.compaction]\ncompact_at=0.1\nkeep_recent_tokens=256\n"));
+    let saved = session(&rook);
+    let id = rook_store::parse_session_id(&saved).unwrap();
+    let original;
+    {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        original = format!("REGISTERED_SOURCE {secret} {}", "preserved source. ".repeat(300));
+        for _ in 0..24 {
+            store
+                .append_event(
+                    id,
+                    rook_store::NewEvent::new(
+                        rook_store::EventKind::UserMessage,
+                        rook_store::Kind::Message,
+                        original.as_bytes(),
+                    ),
+                )
+                .unwrap();
+        }
+    }
+    let out = rook.run(&["run", "Continue the owned inspection and finish.", "--session", &saved]);
+    assert!(out.status.success(), "{out:?}");
+    let seen = server.seen.lock().unwrap();
+    let requests: Vec<_> = seen
+        .iter()
+        .filter(|request| {
+            request["messages"][0]["content"]
+                .as_str()
+                .is_some_and(|text| text.contains("compacting an agent"))
+        })
+        .collect();
+    assert!(!requests.is_empty(), "the extracted native engine must really ask for a summary");
+    assert!(requests.iter().any(|request| request.to_string().contains("REGISTERED_SOURCE")));
+    assert!(requests.iter().all(|request| !request.to_string().contains(secret)));
+    let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+    let events = store.events(id, 0, usize::MAX).unwrap();
+    let compact =
+        events.iter().rev().find(|event| event.record.kind == rook_store::EventKind::Compaction).unwrap();
+    let note: Value = serde_json::from_slice(&store.get(&compact.record.body).unwrap()).unwrap();
+    assert_eq!(note["summarized"], true);
+    assert!(!note.to_string().contains(secret));
+    assert!(note["summary"].as_str().unwrap().contains("${secret}"));
+    assert_eq!(String::from_utf8(store.get(&events[0].record.body).unwrap()).unwrap(), original);
 }

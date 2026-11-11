@@ -1,3 +1,29 @@
+# Release 0.22.0 — November 12, 2026
+
+The current release comes from `main`: cross-computer agent messaging, HTTP API
+and MCP server, a separate web interface with connection recovery, Unicode history
+search and bounded compaction with registered-secret masking. Sources and pinned
+revisions are in `references/PORTED.md` and `docs/research/reference-review-20261112.md`.
+
+Publication requires the local workspace gate, web tests, all ten required CI jobs
+on the exact revision, and five downloaded archives checked for hashes, provenance,
+skills and web resources. Native downloaded-binary probes cover browser/API/MCP,
+A2A, Unicode search, compaction and managed work. Final SHAs, CI runs, results and
+limitations belong in GitHub release `v0.22.0`, following `docs/releasing.md`.
+
+Keep the `v0.21.21` draft, tag and assets unchanged. Its original 30-second queue
+timeout remains unexplained; successful repetitions do not establish a fix.
+A future reproduction must compare preserved states and logs before the first
+model request, including workspace preparation and capacity admission.
+
+The separate `feat/tui-parallel-asides-20261024` branch (`ec6b1b8`) is outside this
+release. Its parallel `/btw` and background MCP refinements remain separate work;
+the historical results below do not establish coverage of `main` or new archives.
+
+---
+
+## Historical October 24 plan for the separate branch
+
 # План работ над Rook
 
 Актуализировано: 24 октября 2026 года.

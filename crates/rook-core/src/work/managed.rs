@@ -412,7 +412,27 @@ fn guidance_changed(saved: &mut Saved) {
 }
 
 pub fn steer_noticed(rook: &Rook, id: &str, request: Steer) -> Result<(Steering, rook_proto::queue::Notice)> {
+    steer_in_generation(rook, id, None, request)
+}
+
+pub(crate) fn steer_peer(
+    rook: &Rook,
+    identity: &rook_proto::work::RunIdentity,
+    request: Steer,
+) -> Result<Steering> {
+    steer_in_generation(rook, &identity.id, Some(identity), request).map(|(receipt, _)| receipt)
+}
+
+fn steer_in_generation(
+    rook: &Rook,
+    id: &str,
+    identity: Option<&rook_proto::work::RunIdentity>,
+    request: Steer,
+) -> Result<(Steering, rook_proto::queue::Notice)> {
     update(rook, id, |saved| {
+        if identity.is_some_and(|identity| saved.run.identity() != *identity) {
+            return Err(bad("remote task generation changed; inspect its original receipt"));
+        }
         let previous = saved.run.instructions.len();
         let receipt = super::receipts::submit(
             rook,

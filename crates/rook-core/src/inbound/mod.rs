@@ -1,5 +1,6 @@
 //! Authenticated event data, durable delivery receipts and ordinary task admission.
 mod auth;
+mod peer;
 mod settings;
 use crate::{CoreError, Result, Rook, work::managed};
 use rook_store::{EventKind, Kind, NewEvent, ObjectId, SessionMeta};

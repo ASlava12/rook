@@ -44,6 +44,8 @@ pub fn router(state: Shared) -> Router {
     Router::new()
         .merge(crate::work::routes())
         .merge(crate::inbound::routes())
+        .merge(crate::a2a::routes())
+        .merge(crate::agent_api::routes())
         .merge(crate::telegram::routes())
         .route("/api/health", get(health))
         .route(
@@ -2029,6 +2031,7 @@ async fn search(
 
 #[derive(Deserialize)]
 struct Naming {
+    workspace: Option<std::path::PathBuf>,
     /// What has been typed after the `@`. Empty is a question — "what is here" —
     /// and is answered with the first few rather than with nothing.
     #[serde(default)]
@@ -2053,7 +2056,8 @@ fn eight() -> usize {
 /// again here: a client asking for ten thousand suggestions is asking for a
 /// response nobody can read.
 async fn naming(State(s): State<Shared>, Query(query): Query<Naming>) -> ApiResult<Vec<String>> {
-    let rook = s.rook.read().await;
+    let engine = s.engine_for(query.workspace.as_deref()).await.map_err(CoreError::Other)?;
+    let rook = engine.read().await;
     let here = rook_core::mention::here(&rook.workspace, rook.config.sandbox.max_files_searched);
     Ok(Json(rook_core::mention::matching(&here, &query.fragment, query.limit.clamp(1, 50))))
 }
@@ -3558,6 +3562,34 @@ mod tests {
         let (_, body) = get(&f, "/api/files?limit=10000").await;
         let capped: Vec<String> = serde_json::from_value(body).unwrap();
         assert!(capped.len() <= 50, "the limit is capped here too: {}", capped.len());
+
+        let other = tempfile::tempdir().unwrap();
+        std::fs::write(other.path().join("only-other.txt"), "another workspace").unwrap();
+        let encoded: String =
+            other.path().to_string_lossy().bytes().map(|byte| format!("%{byte:02X}")).collect();
+        let (status, body) = get(&f, &format!("/api/files?workspace={encoded}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            serde_json::json!(["only-other.txt"]),
+            "file mentions belong to the selected workspace"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_api_daemon_does_not_serve_frontend_assets() {
+        let f = fixture();
+        for path in ["/", "/app.js", "/workspace.css", "/sessions/example"] {
+            let response = f
+                .router
+                .clone()
+                .oneshot(
+                    Request::builder().uri(path).header("host", "127.0.0.1").body(Body::empty()).unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path} belongs to the separate UI host");
+        }
     }
 
     /// The property the whole feature rests on: no call anywhere hands a value

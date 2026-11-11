@@ -102,3 +102,11 @@ test('server question links require an HTTPS user action and never interpret mar
  assert(!form().all().some(n=>n.tag==='script'));assert(form().textContent.includes('<script>ignore</script>'));
  socket.receive({type:'cancelled'});
 });
+
+test('a late close from the old observer cannot erase the new observers private input',()=>{
+ const old=connect();old.disconnect();const next=connect();
+ next.receive(snapshot([]));next.receive(secret('new-private'));
+ const current=privateForm(),input=current.all().find(n=>n.tag==='input');input.value='CURRENT_PRIVATE_VALUE';
+ old.onclose();assert.equal(privateForm(),current);assert.equal(input.value,'CURRENT_PRIVATE_VALUE');
+ next.receive({type:'inputs',approvals:[],questions:[]});assert.equal(privateForm(),undefined);
+});

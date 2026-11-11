@@ -2,6 +2,8 @@
 
 **Status:** accepted; the "one file" part superseded by
 [ADR-0012](0012-hand-written-modules-no-bundler.md), the rest kept.
+The embedding part is subsequently superseded by
+[ADR-0016](0016-separate-web-and-agent-integrations.md).
 
 ## Context
 

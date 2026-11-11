@@ -77,7 +77,15 @@ impl Default for Search {
 
 impl Rook {
     pub fn search(&self, query: &str, options: &Search) -> Result<Found> {
-        let terms: Vec<String> = memory::terms_of(query).into_iter().collect();
+        if query.len() > 1024 {
+            return Err(crate::CoreError::Other("search query must be at most 1024 bytes".into()));
+        }
+        let terms: Vec<String> = memory::terms_of(&crate::text_match::fold(query))
+            .into_iter()
+            .map(|term| crate::text_match::fold(&term))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
         if terms.is_empty() {
             return Ok(Found { hits: Vec::new(), objects_scanned: 0, truncated: false });
         }
@@ -243,7 +251,7 @@ fn score(text: &str, terms: &[String]) -> Option<(f32, String)> {
     let mut best: Option<(f32, &str)> = None;
 
     for line in text.lines() {
-        let lowered = line.to_lowercase();
+        let lowered = crate::text_match::fold(line);
         let mut distinct = 0;
         let mut repeats = 0;
         for term in terms {
@@ -265,15 +273,28 @@ fn score(text: &str, terms: &[String]) -> Option<(f32, String)> {
     }
 
     let (_, line) = best?;
-    Some((total, snippet(line)))
+    let at = terms
+        .iter()
+        .filter_map(|term| crate::text_match::Literal::new(term).find(line.as_bytes()))
+        .map(|range| range.start)
+        .min()
+        .unwrap_or(0);
+    Some((total, snippet(line, at)))
 }
 
-fn snippet(line: &str) -> String {
+fn snippet(line: &str, at: usize) -> String {
     const WIDTH: usize = 160;
     let trimmed = line.trim();
-    if trimmed.chars().count() <= WIDTH {
-        return trimmed.to_string();
-    }
-    let cut = trimmed.char_indices().nth(WIDTH).map(|(i, _)| i).unwrap_or(trimmed.len());
-    format!("{}…", &trimmed[..cut])
+    let at = at.saturating_sub(line.len() - line.trim_start().len()).min(trimmed.len());
+    let begin = if trimmed.chars().nth(WIDTH).is_none() {
+        0
+    } else {
+        trimmed[..at].char_indices().rev().nth(40).map(|(index, _)| index).unwrap_or(0)
+    };
+    let rest = &trimmed[begin..];
+    let cut = rest.char_indices().nth(WIDTH).map(|(index, _)| index).unwrap_or(rest.len());
+    // Match and choose the source excerpt first. Normalizing whitespace before
+    // matching would change literal query coordinates and hide the actual hit.
+    let excerpt = rest[..cut].split_whitespace().collect::<Vec<_>>().join(" ");
+    format!("{}{}{}", if begin > 0 { "…" } else { "" }, excerpt, if cut < rest.len() { "…" } else { "" })
 }

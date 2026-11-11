@@ -72,6 +72,16 @@ pub fn doing(name: &str, arguments: Option<&Value>, workspace: &Path) -> String 
         "load_skill" | "find_skill" => field("name").map(|n| format!("{name} {n}")),
         "verify" => field("claim").map(|c| format!("verify {c}")),
         "delegate" => Some("delegate".into()),
+        "remote_agent" => Some(format!(
+            "remote agent {} {}",
+            field("action").unwrap_or_default(),
+            field("peer").unwrap_or_default()
+        )),
+        "agent_message" => Some(match field("action").as_deref() {
+            Some("send") => format!("message agent {}", field("to").unwrap_or_default()),
+            Some("status") => format!("message status {}", field("id").unwrap_or_default()),
+            _ => "list agents".into(),
+        }),
         _ => None,
     }
     .unwrap_or_else(|| bounded(name))

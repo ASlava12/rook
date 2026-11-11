@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { MAX_MODEL_CHARACTERS } from '../dist/streamed-markdown.js';
+import { drafts } from '../dist/drafts.js';
 
 let stream, parseCount = 0, next = 0;
 const frames = new Map(), visibility = new Map();
@@ -187,7 +188,9 @@ test('branch selection rejects a late old socket and callback without losing the
   const fresh = chat.connect(); fresh.receive(snapshot('new-branch')); text(fresh, 'new branch');
   old.receive({ type: 'text', text: 'late old connection' }); obsolete();
   assert.equal(parseCount, 0); frame(); assert.equal(answers()[0].textContent, 'new branch');
-  assert.equal(state.chat.draft, 'saved draft'); assert.equal(state.chat.session, 'new-branch');
+  assert.equal(state.chat.draft, '', 'a different session has its own draft');
+  assert.equal(drafts.get('fixture',state.chat.workspace), 'saved draft');
+  assert.equal(state.chat.session, 'new-branch');
   fresh.receive({ type: 'cancelled' });
 });
 

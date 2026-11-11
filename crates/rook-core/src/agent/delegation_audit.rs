@@ -132,6 +132,7 @@ async fn a_delayed_display_reader_keeps_exact_child_operations_without_fragment_
         });
         let mut agent = AgentLoop::new(&rook, provider, parent);
         agent.observer = Some(observations.clone());
+        let _membership = agent.mailboxes.join(parent, None, "audit").unwrap();
         let crew = agent.crew(0);
         let (doing, mut steps) =
             super::super::delegation_progress::channel(rook.config.agent.delegation_progress_entries);
@@ -145,6 +146,7 @@ async fn a_delayed_display_reader_keeps_exact_child_operations_without_fragment_
             recipe: None,
             executor: None,
             result_schema: None,
+            equipment: None,
         };
         crate::execution::RECEIPT_WRITE_MEASUREMENT.with(|measurement| measurement.set((0, 0, 0)));
         let (child, outcome) = crew
@@ -266,6 +268,7 @@ async fn an_actual_child_retry_reaches_the_bounded_parent_display_without_a_runt
     let provider = Arc::new(rook_llm::retry::Retrying::new(Box::new(WaitingChild { calls: calls.clone() })));
     let agent = AgentLoop::new(&rook, provider, parent);
     assert!(agent.observer.is_none(), "this is the local frontend path");
+    let _membership = agent.mailboxes.join(parent, None, "audit").unwrap();
     let crew = agent.crew(0);
     let (doing, mut steps) = super::super::delegation_progress::channel(1);
     let bounds = Bounds {
@@ -278,6 +281,7 @@ async fn an_actual_child_retry_reaches_the_bounded_parent_display_without_a_runt
         recipe: None,
         executor: None,
         result_schema: None,
+        equipment: None,
     };
     let running = crew.run_subtask("report without tools", None, bounds, doing, 0, Default::default());
     let display = async {

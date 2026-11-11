@@ -40,9 +40,12 @@ pub(super) struct Bounds {
     pub(super) recipe: Option<crate::recipes::Prepared>,
     pub(super) executor: Option<String>,
     pub(super) result_schema: Option<serde_json::Value>,
+    pub(super) equipment: Option<crate::recipes::Equipment>,
 }
 
 pub(super) struct Crew<'a> {
+    remote_tasks: std::sync::Arc<std::sync::Mutex<super::remote::Tasks>>,
+    mailboxes: std::sync::Arc<super::messaging::Mailboxes>,
     model_call_budget: std::sync::Arc<crate::model_calls::Budget>,
     record_model_calls: Option<bool>,
     rook: &'a Rook,
@@ -237,6 +240,42 @@ fn requested_tasks(args: &serde_json::Value) -> std::result::Result<Vec<String>,
     Ok(tasks)
 }
 
+// Like recipe equipment, a per-task allowlist intersects inherited authority.
+// Validate every matching declaration before allocating sessions or worktrees.
+fn equipment_for(args: &serde_json::Value, task: &str) -> Result<Option<crate::recipes::Equipment>> {
+    let mut own = None;
+    for item in args.get("tasks").and_then(serde_json::Value::as_array).into_iter().flatten() {
+        let text = item.as_str().or_else(|| {
+            ["task", "goal", "prompt", "description"].iter().find_map(|key| item.get(key)?.as_str())
+        });
+        if text.map(str::trim) == Some(task)
+            && let Some(tools) = item.get("tools")
+        {
+            if own.as_ref().is_some_and(|previous| previous != tools) {
+                return Err(CoreError::Other(
+                    "duplicate delegated task has conflicting tool allowlists".into(),
+                ));
+            }
+            let names =
+                tools.as_array().ok_or_else(|| CoreError::Other("task tools must be an array".into()))?;
+            if names.len() > 128
+                || names.iter().any(|name| {
+                    name.as_str().is_none_or(|name| {
+                        name.is_empty() || name.len() > 256 || name.chars().any(char::is_control)
+                    })
+                })
+            {
+                return Err(CoreError::Other(
+                    "task tools accepts at most 128 nonempty names of at most 256 bytes".into(),
+                ));
+            }
+            own = Some(tools.clone());
+        }
+    }
+    own.map(|tools| serde_json::from_value(serde_json::json!({"tools":tools})).map_err(CoreError::from))
+        .transpose()
+}
+
 /// The head of a sub-task, for a progress line. A task is a whole instruction —
 /// a live one ran to two hundred characters — and repeating it on every step
 /// buries what the step actually was.
@@ -306,6 +345,9 @@ impl Crew<'_> {
             // What the call asked for, or what the turn is using.
             let chosen = bounds.provider.clone().unwrap_or_else(|| self.provider.clone());
             let mut child = AgentLoop::new(rook, chosen, session);
+            child.mailboxes = self.mailboxes.clone();
+            child.mailbox_parent = Some(self.parent);
+            child.remote_tasks = self.remote_tasks.clone();
             child.model_call_budget = self.model_call_budget.clone();
             child.options.record_model_calls = self.record_model_calls;
             for value in rook_tools::Secrets::redactions(self.vault.as_ref()) {
@@ -314,6 +356,9 @@ impl Crew<'_> {
             child.tool_ctx.secrets = Some(self.vault.clone());
             child.depth = self.depth + 1;
             child.equipment = self.equipment.clone();
+            if let Some(equipment) = &bounds.equipment {
+                child.equipment = child.equipment.intersect(equipment);
+            }
             if bounds.executor.is_some() && child.equipment.restricted() {
                 return Err(CoreError::Other(
                     "recipe equipment cannot be delegated to an external ACP executor".into(),
@@ -586,6 +631,14 @@ impl<'a> AgentLoop<'a> {
             Ok(schemas) => schemas,
             Err(error) => return error.to_string(),
         };
+        let equipment: std::collections::BTreeMap<_, _> = match tasks
+            .iter()
+            .map(|task| equipment_for(args, task).map(|equipment| (task.clone(), equipment)))
+            .collect::<Result<_>>()
+        {
+            Ok(equipment) => equipment,
+            Err(error) => return error.to_string(),
+        };
         let isolated = match args.get("isolation") {
             None => false,
             Some(value) if value.as_str() == Some("shared") => false,
@@ -635,6 +688,9 @@ impl<'a> AgentLoop<'a> {
         };
         if executor.is_some() && (args.get("model").is_some() || args.get("care").is_some()) {
             return "executor cannot be combined with model or care".into();
+        }
+        if executor.is_some() && equipment.values().any(Option::is_some) {
+            return "per-task tools cannot be enforced by an external ACP executor".into();
         }
         let careful = args.get("care").and_then(|m| m.as_str()).map(str::trim) == Some("careful");
         // An endpoint the call named, where the configuration offers a choice.
@@ -699,6 +755,7 @@ impl<'a> AgentLoop<'a> {
                             recipe: None,
                             executor: executor.clone(),
                             result_schema: result_schemas.get(task).cloned().flatten(),
+                            equipment: equipment.get(task).cloned().flatten(),
                         },
                     )
                 })
@@ -741,6 +798,7 @@ impl<'a> AgentLoop<'a> {
                 let provider = provider.clone();
                 let executor = executor.clone();
                 let result_schema = result_schemas.get(task).cloned().flatten();
+                let equipment = equipment.get(task).cloned().flatten();
                 async move {
                     let _permit = limit.acquire().await;
                     let bounds = Bounds {
@@ -753,6 +811,7 @@ impl<'a> AgentLoop<'a> {
                         recipe: None,
                         executor: executor.clone(),
                         result_schema,
+                        equipment,
                     };
                     (i, crew.run_subtask(task, inherited.as_deref(), bounds, doing, i, said).await)
                 }
@@ -890,6 +949,8 @@ impl<'a> AgentLoop<'a> {
     /// while they run, and a future holding `&self` freezes it.
     pub(super) fn crew(&self, left_to_spend: u64) -> Crew<'a> {
         Crew {
+            remote_tasks: self.remote_tasks.clone(),
+            mailboxes: self.mailboxes.clone(),
             model_call_budget: self.model_call_budget.clone(),
             record_model_calls: Some(
                 self.turn_options()
@@ -1024,6 +1085,37 @@ mod audit;
 mod relay_tests {
     use super::{Interjections, relay};
     use std::sync::Arc;
+
+    #[test]
+    fn task_tool_allowlists_validate_before_spawn_and_intersect_parent_authority() {
+        use serde_json::json;
+        let args = json!({"tasks":[{"task":"inspect","tools":["read_file","write_file"]}]});
+        let child = super::equipment_for(&args, "inspect").unwrap().unwrap();
+        let parent: crate::recipes::Equipment =
+            serde_json::from_value(json!({"tools":["read_file","delegate"]})).unwrap();
+        let inherited = parent.intersect(&child);
+        assert!(inherited.allows("read_file"));
+        assert!(!inherited.allows("write_file"));
+        assert!(!inherited.allows("delegate"));
+        assert!(
+            super::equipment_for(&json!({"tasks":[{"task":"inspect","tools":false}]}), "inspect").is_err()
+        );
+        assert!(
+            super::equipment_for(
+                &json!({"tasks":[{"task":"inspect","tools":["read_file"]},{"task":"inspect","tools":[]}]}),
+                "inspect"
+            )
+            .is_err()
+        );
+        assert!(
+            super::equipment_for(&json!({"tasks":[{"task":"inspect","tools":vec!["x";129]}]}), "inspect")
+                .is_err()
+        );
+        let empty = super::equipment_for(&json!({"tasks":[{"task":"inspect","tools":[]}]}), "inspect")
+            .unwrap()
+            .unwrap();
+        assert!(!empty.allows("read_file"), "an empty allowlist grants no tools");
+    }
 
     /// One queue each, because taking from one shared queue would give the
     /// message to whichever child stepped first and to none of the others.

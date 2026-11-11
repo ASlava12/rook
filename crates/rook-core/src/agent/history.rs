@@ -237,6 +237,17 @@ fn replay_inner(
                 "inbound source note exceeds its byte limit or is missing".into(),
             ));
         }
+        if event.record.kind == EventKind::Note
+            && event.record.label == super::messaging::LABEL
+            && rook
+                .store
+                .stat_object(&event.record.body)?
+                .is_none_or(|m| m.size_raw > super::messaging::RECORD_BYTES as u64)
+        {
+            return Err(crate::CoreError::Other(
+                "agent message record exceeds its byte limit or is missing".into(),
+            ));
+        }
         let (body, body_readable) = match rook.store.get(&event.record.body) {
             Ok(bytes) => (String::from_utf8_lossy(&bytes).into_owned(), true),
             // Preserve a visible gap: dropping an unreadable instruction
@@ -273,6 +284,15 @@ fn replay_inner(
         last_at = event.record.ts;
 
         match event.record.kind {
+            EventKind::Note if event.record.label == super::messaging::LABEL => {
+                close_open_call(&mut messages, &mut open_call);
+                let message = Message::user(super::messaging::replay(&body));
+                if let Some(batch) = &mut batch {
+                    batch.auxiliary.push(message);
+                } else {
+                    messages.push(message);
+                }
+            }
             EventKind::Note if event.record.label == crate::inbound::SOURCE => {
                 close_open_call(&mut messages, &mut open_call);
                 messages.push(Message::user(crate::inbound::replay_source(&body)));

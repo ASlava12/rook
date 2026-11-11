@@ -1,4 +1,4 @@
-//! `rookd` — the HTTP backend and web UI.
+//! `rookd` — the HTTP API, agent execution and integration backend.
 //!
 //! Separate from the CLI binary so a headless machine, a container or an editor
 //! integration can run the backend without linking a terminal UI into it. Bound
@@ -6,12 +6,13 @@
 //! thing on a developer's machine, and it should not become reachable by
 //! accident.
 
+mod a2a;
+mod agent_api;
 mod api;
 mod chat;
 mod drain;
 mod inbound;
 mod telegram;
-mod web;
 mod work;
 
 use std::net::{IpAddr, SocketAddr};
@@ -25,7 +26,7 @@ use tokio::sync::{OnceCell, RwLock};
 use rook_core::Rook;
 
 #[derive(Parser)]
-#[command(name = "rookd", version = rook_core::AGENT_VERSION, about = "Rook backend and web UI")]
+#[command(name = "rookd", version = rook_core::AGENT_VERSION, about = "Rook API and agent backend")]
 struct Args {
     #[arg(long)]
     port: Option<u16>,
@@ -458,7 +459,7 @@ async fn serve() -> Result<()> {
         started: std::time::Instant::now(),
         about,
     });
-    let app = api::router(state.clone()).merge(web::router()).layer(axum::middleware::from_fn_with_state(
+    let app = api::router(state.clone()).layer(axum::middleware::from_fn_with_state(
         config.server.allowed_hosts.clone(),
         chat::trusted_authority,
     ));
@@ -476,7 +477,6 @@ async fn serve() -> Result<()> {
     tracing::info!("rookd listening on http://{addr}");
     let address_file = rook_core::paths::daemon_address_file();
     publish_address(&address_file, &format!("http://{addr}"));
-    println!("rook web UI:  http://{addr}");
     println!("rook API:     http://{addr}/api/health");
 
     axum::serve(listener, app).with_graceful_shutdown(shutdown(state.clone())).await.context("serving")?;

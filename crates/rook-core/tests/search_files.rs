@@ -64,6 +64,28 @@ fn asking_for_the_conversation_only_leaves_captured_files_out() {
 }
 
 #[test]
+fn unicode_search_previews_the_actual_hit_deep_inside_a_long_line() {
+    let f = fixture();
+    let session = f.rook.start_session("Unicode search").unwrap();
+    let text = format!("{} 🦀 Straße\t\tΟς {}", "background ".repeat(400), "tail ".repeat(100));
+    let seq = f.rook.log(session, rook_store::EventKind::UserMessage, "", &text).unwrap();
+    for query in ["STRASSE", "οσ", "strasse   οσ", "straße strasse", "ß"] {
+        let result = f.rook.search(query, &Search { session: Some(session), ..Default::default() }).unwrap();
+        assert_eq!(result.hits.len(), 1, "{query}: {result:?}");
+        let hit = &result.hits[0];
+        assert_eq!(hit.seq, seq);
+        assert!(hit.snippet.contains("Straße Ος"), "the hit must be visible: {}", hit.snippet);
+        assert!(hit.snippet.starts_with('…') && hit.snippet.ends_with('…'));
+        assert!(hit.snippet.chars().count() <= 162);
+    }
+    assert!(f.rook.search(&"q".repeat(1025), &Search::default()).unwrap_err().to_string().contains("1024"));
+    let short = format!("{}shortneedle", "context ".repeat(12));
+    f.rook.log(session, rook_store::EventKind::AssistantMessage, "", &short).unwrap();
+    let found = f.rook.search("shortneedle", &Search::default()).unwrap();
+    assert_eq!(found.hits[0].snippet, short, "a line that fits keeps its complete context");
+}
+
+#[test]
 fn a_hit_in_something_said_still_belongs_to_its_session() {
     let f = fixture();
     let session = f.rook.start_session("a session").unwrap();

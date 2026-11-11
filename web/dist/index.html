@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>rook</title>
+<meta name="theme-color" content="#f7f6f2">
 <style>
 :root{
   --bg:#fbfbfa; --panel:#fff; --line:#e4e2dd; --fg:#1c1b19; --dim:#78736c;
@@ -145,28 +146,51 @@ nav{overflow-x:auto}nav button{flex-shrink:0}
 @container(min-width:800px){.diff-patch:not([data-layout="unified"]) .diff-split{display:block}.diff-patch:not([data-layout="unified"]) .diff-unified{display:none}}
 @media(max-width:700px){.diff-layout{grid-template-columns:1fr}.diff-files{max-height:8rem}.diff-row{grid-template-columns:3rem 3rem minmax(0,1fr)}}
 </style>
+<link rel="stylesheet" href="/workspace.css">
 </head>
 <body>
-<header>
-  <h1>rook</h1>
-  <span class="meta" id="meta">connecting…</span>
-</header>
-<nav>
-  <button data-tab="chat" aria-selected="true">Chat</button>
-  <button data-tab="tasks">Tasks</button>
-  <button data-tab="sessions">Sessions</button>
-  <button data-tab="context">Context</button>
-  <button data-tab="prices">Prices</button>
-  <button data-tab="search">Search</button>
-  <button data-tab="memory">Memory</button>
-  <button data-tab="skills">Skills</button>
-  <button data-tab="jobs">Jobs</button>
-  <button data-tab="checkpoints">Checkpoints</button>
-  <button data-tab="docs">Docs</button>
-  <button data-tab="secrets">Secrets</button>
-  <button data-tab="store">Store</button>
-</nav>
-<main id="view"></main>
+<a class="skip-link" href="#view">Skip to workspace</a>
+<aside class="sidebar" id="sidebar" aria-label="Workspace navigation">
+  <div class="brand-row"><a class="brand" href="#chat" aria-label="Rook home"><span id="brand-icon"></span>rook<span class="brand-caption">WORKSPACE</span></a><button class="icon-button sidebar-close" id="sidebar-close" aria-label="Close navigation">×</button></div>
+  <button class="new-session" id="new-session">New session <kbd>Ctrl ⇧ O</kbd></button>
+  <button class="quick-find" id="quick-find">Search sessions & commands <kbd>Ctrl K</kbd></button>
+  <nav aria-label="Main navigation">
+    <button data-tab="chat" aria-selected="true">Workspace</button>
+    <button data-tab="tasks">Tasks</button>
+    <button data-tab="sessions">Session history</button>
+    <div class="nav-heading">PROJECT</div>
+    <button data-tab="context">Context & usage</button>
+    <button data-tab="search">Search project</button>
+    <button data-tab="memory">Memory</button>
+    <button data-tab="jobs">Background jobs</button>
+    <button data-tab="checkpoints">Checkpoints</button>
+    <button data-tab="integrations">API & MCP</button>
+    <details class="nav-more"><summary>Tools & settings</summary>
+      <button data-tab="skills">Skills</button>
+      <button data-tab="prices">Model pricing</button>
+      <button data-tab="secrets">Credentials</button>
+      <button data-tab="store">Storage</button>
+      <button data-tab="docs">Documentation</button>
+    </details>
+  </nav>
+  <div class="nav-heading recent-heading"><span>RECENT SESSIONS</span><button class="icon-button" id="refresh-sessions" aria-label="Refresh recent sessions">↻</button></div>
+  <div id="recent-sessions" class="recent-sessions" aria-label="Recent sessions"><p class="sidebar-empty">Loading sessions…</p></div>
+  <div class="sidebar-footer"><span class="connection-dot" id="daemon-dot"></span><span id="meta">Connecting to daemon…</span><button class="icon-button" id="theme-toggle" aria-label="Change color theme"></button></div>
+</aside>
+<button class="sidebar-scrim" id="sidebar-scrim" aria-label="Close navigation" hidden></button>
+<div class="workspace-shell">
+  <header class="workspace-header">
+    <button class="icon-button" id="sidebar-toggle" aria-label="Toggle navigation" aria-controls="sidebar" aria-expanded="true"></button>
+    <button class="workspace-location" id="workspace-location" title="Choose a project"><span id="workspace-icon"></span><span id="workspace-name">Workspace</span><span class="location-chevron">⌄</span></button>
+    <span class="header-divider"></span><h1 id="session-title">New session</h1>
+    <span id="session-state" class="session-state" role="status">Ready</span>
+    <div class="header-actions"><button class="icon-button" id="copy-session-link" aria-label="Copy session link" title="Copy session link"></button><button class="icon-button" id="inspector-toggle" aria-label="Toggle session details" title="Session details · Alt I" aria-expanded="false"></button></div>
+  </header>
+  <main id="view" tabindex="-1" aria-label="Workspace"></main>
+</div>
+<div id="toast" class="toast" role="status" hidden></div>
+<dialog id="command-palette" class="command-palette" aria-label="Search sessions and commands"><div class="palette-input"><input id="command-query" placeholder="Find a session or run a command…" aria-label="Search sessions and commands" autocomplete="off" maxlength="256"><kbd>Esc</kbd></div><div id="command-results" role="listbox" aria-label="Results"></div><div class="palette-footer">↑ ↓ to navigate <span>Enter to open</span></div></dialog>
+<dialog id="project-dialog" class="project-dialog" aria-labelledby="project-title"><form id="project-form"><h2 id="project-title">Choose a project</h2><p class="muted">Work in a folder on the computer running Rook.</p><label for="project-path">Absolute folder path</label><input id="project-path" autocomplete="off" maxlength="4096" required><div id="recent-projects"></div><p id="project-error" class="bad" role="alert"></p><div class="row"><button type="button" id="project-cancel">Cancel</button><button type="submit" class="primary">Open project</button></div></form></dialog>
 <!-- ES modules the browser loads as they are: no bundler, no toolchain (ADR-0012).
      The chat socket is /api/chat. -->
 <script type="module" src="/app.js"></script>

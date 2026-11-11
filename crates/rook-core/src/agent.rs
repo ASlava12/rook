@@ -41,10 +41,12 @@ mod followups;
 pub(crate) mod history;
 mod lifecycle;
 mod mcp_input;
+pub(crate) mod messaging;
 pub mod observe;
 mod output;
 mod private_input;
 mod prompt;
+mod remote;
 mod repetition;
 mod review;
 mod routing;
@@ -325,6 +327,8 @@ const CHANGES_THINGS: &[&str] = &[
     DELEGATE,
     crate::composite_recipes::TOOL,
     SUBAGENTS,
+    messaging::TOOL,
+    crate::remote_agents::TOOL,
     STANCE,
     VERIFY,
     crate::worktrees::TOOL,
@@ -688,6 +692,9 @@ pub struct AgentLoop<'a> {
     /// again is charged to the turn that began it rather than being handed a
     /// fresh allowance at each level.
     spawned: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    mailboxes: std::sync::Arc<messaging::Mailboxes>,
+    mailbox_parent: Option<u128>,
+    remote_tasks: std::sync::Arc<std::sync::Mutex<remote::Tasks>>,
     /// This loop is checking somebody else's claim, and may not change anything.
     ///
     /// Taking the writing tools out of the toolbox is not enough on its own: the
@@ -858,6 +865,9 @@ impl<'a> AgentLoop<'a> {
             effort: rook.config.agent.effort(),
             budget,
             spawned: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            mailboxes: messaging::Mailboxes::new(&rook.config.agent),
+            mailbox_parent: None,
+            remote_tasks: Default::default(),
             checking: false,
             review_only: false,
         }
@@ -1108,6 +1118,15 @@ impl<'a> AgentLoop<'a> {
             on_progress(Progress::Turn { id: journal.turn() });
         }
         self.execution = Some(std::sync::Arc::downgrade(&journal));
+        if self.mailbox_parent.is_none() {
+            self.mailboxes = messaging::Mailboxes::new(&self.rook.config.agent);
+            self.remote_tasks = Default::default();
+        }
+        let _membership = if !self.checking && !self.review_only && self.external_executor.is_none() {
+            Some(self.mailboxes.join(self.session, self.mailbox_parent, &self.vault.redact(prompt))?)
+        } else {
+            None
+        };
         // From here until the turn ends, this session is marked as having one in
         // flight. Only the turn a person asked for: a sub-agent's session ends
         // with its parent's, and two explanations of one death read as two.
@@ -1278,6 +1297,7 @@ impl<'a> AgentLoop<'a> {
             for said in self.incoming()? {
                 self.hear(&said, &mut messages, &mut on_progress)?;
             }
+            self.hear_agents(&mut messages)?;
             if self.managed_stopped()? {
                 outcome.stopped = "work_paused".into();
                 break;
@@ -2280,6 +2300,10 @@ pub fn note_is_for_a_person(label: &str) -> bool {
     !matches!(
         label,
         WROTE
+            | "request-tool-catalog"
+            | "rook:timing:v1"
+            | "rook:extension-ui:v1"
+            | crate::model_route::LABEL
             | crate::tool_details::LABEL
             | crate::model_route::AUX_LABEL
             | crate::model_attempt::LABEL
@@ -2292,6 +2316,9 @@ pub fn note_is_for_a_person(label: &str) -> bool {
 const SAY_IT: &str = "\
 You ended the turn without saying anything. Answer now, in words: what you found, or what \
 you did and what is left.";
+
+#[cfg(test)]
+mod remote_tests;
 
 #[cfg(test)]
 mod checker_tests {

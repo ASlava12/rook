@@ -8634,6 +8634,7 @@ and the next line"
             .iter()
             .enumerate()
             .map(|(seq, (kind, label, body))| TranscriptEntry {
+                internal: *kind == "note" && !rook_core::agent::note_is_for_a_person(label),
                 seq: seq as u64,
                 ts: 0,
                 kind: (*kind).to_string(),

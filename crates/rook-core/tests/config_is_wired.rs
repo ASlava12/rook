@@ -315,8 +315,12 @@ fn the_whole_advertised_tool_list_stays_within_a_budget() {
     // (also from direct children); worktree reviews and cleans isolated edits.
     // Their descriptions are one sentence each, and the schemas retain only
     // the fields needed for paging, ownership, and explicit dirty-tree removal.
+    // Native agent mail adds a distinct bounded coordination capability, and
+    // delegate task objects now carry an inherited tool allowlist. After trimming
+    // descriptions, schema-cost measures 2970 eager / 1413 lazy tokens; the mail
+    // stub itself costs 75. Keep the ratchet close to those measured costs.
     assert!(
-        full < 2_840,
+        full < 3_000,
         "the whole list costs ~{full} tokens on every eager request; trim a description or \
          merge an argument before raising this"
     );
@@ -341,7 +345,7 @@ fn the_whole_advertised_tool_list_stays_within_a_budget() {
     // was shortened and nine arguments merged into four (an opaque cursor
     // binds page/offset/hashes/mode); the measured default list is ~1,287.
     assert!(
-        stubs < 1_340,
+        stubs < 1_430,
         "the stubs cost ~{stubs} tokens on every request, which is what is \
          actually paid: lazy loading is the default"
     );

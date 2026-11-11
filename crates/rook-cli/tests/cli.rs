@@ -1475,6 +1475,65 @@ fn history_navigation_and_quotes_match_locally_and_with_a_locked_daemon_store() 
 }
 
 #[test]
+fn unicode_history_search_keeps_original_coordinates_locally_and_through_the_daemon() {
+    let rook = Rook::new();
+    rook.write_config("[transcript]\nsearch_bytes=4096\n");
+    let text = format!("{}🙂Straße\t\tΟΣ\nnext line", "x".repeat(4095));
+    let session = {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        let id = rook_store::new_session_id();
+        store
+            .create_session(&rook_store::SessionMeta::new(
+                id,
+                "Unicode runtime",
+                rook.workspace.path().display().to_string(),
+                1,
+            ))
+            .unwrap();
+        store
+            .append_event(
+                id,
+                rook_store::NewEvent::new(
+                    rook_store::EventKind::UserMessage,
+                    rook_store::Kind::Message,
+                    text.as_bytes(),
+                ),
+            )
+            .unwrap();
+        rook_store::format_session_id(id)
+    };
+    let check = || {
+        let ranked = rook.json(&["search", "STRASSE"]);
+        assert!(ranked["hits"][0]["snippet"].as_str().unwrap().contains("Straße"));
+        let first = rook.json(&["session", "find", &session, "STRASSE\t\tος\nNEXT"]);
+        assert!(first["hits"].as_array().unwrap().is_empty());
+        let next = &first["next"];
+        assert_eq!(next["offset"], 4096);
+        let found = rook.json(&[
+            "session",
+            "find",
+            &session,
+            "STRASSE\t\tος\nNEXT",
+            "--from",
+            &next["seq"].to_string(),
+            "--offset",
+            &next["offset"].to_string(),
+            "--through",
+            &next["through"].to_string(),
+        ]);
+        let hit = &found["hits"][0];
+        let start = hit["offset"].as_u64().unwrap() as usize;
+        let snippet = hit["snippet"].as_str().unwrap();
+        assert_eq!(text.get(start..start + snippet.len()), Some(snippet));
+        assert!(snippet.contains("Straße\t\tΟΣ\nnext"));
+        (ranked, found)
+    };
+    let direct = check();
+    let _daemon = Daemon::start(&rook);
+    assert_eq!(check(), direct);
+}
+
+#[test]
 fn mcp_probes_and_explicit_calls_work_while_the_conversation_store_is_locked() {
     let rook = Rook::new();
     let _locked = rook_store::Store::open(rook.home.path().join("store")).unwrap();
@@ -1607,8 +1666,9 @@ impl Rook {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_rook"))
+        Command::new(runtime_probe_rook())
             .env("ROOK_HOME", self.home.path())
+            .env("ROOK_CONFIG_DIR", self.home.path())
             .env("ROOK_LOG", "error")
             .arg("--workspace")
             .arg(self.workspace.path())
@@ -1975,7 +2035,7 @@ struct Daemon {
     /// Held by the daemon rather than taken by each test, so the tenth test
     /// cannot forget it, and released after `Drop` has killed the child —
     /// fields drop after the `Drop` impl has run, and this one is last.
-    _one: std::sync::MutexGuard<'static, ()>,
+    _one: Option<std::sync::MutexGuard<'static, ()>>,
 }
 
 fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
@@ -1988,13 +2048,33 @@ fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
 ///
 /// Build once before daemon tests, including incremental runs: an existing
 /// binary may speak an older store format than the CLI being tested.
+fn runtime_probe_rook() -> PathBuf {
+    match std::env::var_os("ROOK_TEST_BIN_DIR") {
+        Some(directory) => {
+            let directory = PathBuf::from(directory);
+            assert!(directory.is_absolute(), "ROOK_TEST_BIN_DIR must be absolute");
+            let binary = directory.join(if cfg!(windows) { "rook.exe" } else { "rook" });
+            assert!(binary.is_file(), "supplied runtime CLI is missing: {}", binary.display());
+            binary
+        }
+        None => PathBuf::from(env!("CARGO_BIN_EXE_rook")),
+    }
+}
+
 fn rookd() -> PathBuf {
     static BUILT: std::sync::Once = std::sync::Once::new();
-    let path = PathBuf::from(env!("CARGO_BIN_EXE_rook")).with_file_name(if cfg!(windows) {
-        "rookd.exe"
-    } else {
-        "rookd"
-    });
+    let path = runtime_probe_rook().with_file_name(if cfg!(windows) { "rookd.exe" } else { "rookd" });
+
+    if std::env::var_os("ROOK_TEST_BIN_DIR").is_some() {
+        let version = Command::new(&path).arg("--version").output().expect("running supplied daemon");
+        assert!(version.status.success(), "supplied runtime daemon must run");
+        assert_eq!(
+            String::from_utf8_lossy(&version.stdout).trim(),
+            format!("rookd {}", env!("CARGO_PKG_VERSION")),
+            "runtime probe must use the matching package version"
+        );
+        return path;
+    }
 
     BUILT.call_once(|| {
         let mut build = Command::new(env!("CARGO"));
@@ -2029,7 +2109,21 @@ impl Daemon {
     }
 
     fn start_in(rook: &Rook, workspace: &std::path::Path) -> Self {
-        let one = one_at_a_time();
+        Self::start_guarded(rook, workspace, Some(one_at_a_time()))
+    }
+
+    /// A two-computer scenario keeps its first daemon's serialization lease
+    /// while starting the peer, rather than deadlocking on a second lease.
+    fn start_peer(rook: &Rook, owner: &Daemon) -> Self {
+        assert!(owner._one.is_some(), "a peer fixture requires the primary daemon's lease");
+        Self::start_guarded(rook, rook.workspace.path(), None)
+    }
+
+    fn start_guarded(
+        rook: &Rook,
+        workspace: &std::path::Path,
+        one: Option<std::sync::MutexGuard<'static, ()>>,
+    ) -> Self {
         // Killing a fixture bypasses the daemon's address-file cleanup. A
         // restart must wait for this child, rather than read the previous port.
         let address_file = rook.home.path().join("rookd.addr");
@@ -2044,6 +2138,7 @@ impl Daemon {
         let complaints = rook.home.path().join("rookd.err");
         let mut child = Command::new(rookd())
             .env("ROOK_HOME", rook.home.path())
+            .env("ROOK_CONFIG_DIR", rook.home.path())
             .env("ROOK_LOG", "error")
             .args(["--workspace", workspace.to_str().unwrap()])
             .args(["--port", "0"])
@@ -4554,6 +4649,8 @@ fn lost_ssh_execution_uses_matching_local_http_sources_and_reviewed_recovery_wit
 
 #[path = "scenarios/inbound.rs"]
 mod inbound_events;
+#[path = "scenarios/remote_agents.rs"]
+mod remote_agents;
 
 #[path = "scenarios/telegram.rs"]
 mod telegram;

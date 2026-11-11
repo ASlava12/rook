@@ -365,6 +365,8 @@ fn entry_from(
         String::new()
     };
     Ok(TranscriptEntry {
+        internal: event.record.kind == EventKind::Note
+            && !crate::agent::note_is_for_a_person(&event.record.label),
         seq: event.seq,
         ts: event.record.ts,
         kind: event.record.kind.as_str().into(),
@@ -555,12 +557,9 @@ impl Rook {
             return Err(CoreError::Other("history search needs 1–256 bytes of literal text".into()));
         }
         let through = cursor.through.unwrap_or(end(self, session)?).min(end(self, session)?);
-        let pattern = regex::bytes::RegexBuilder::new(&regex::escape(query))
-            .case_insensitive(true)
-            .build()
-            .map_err(|e| CoreError::Other(e.to_string()))?;
-        // Unicode case folding can match a wider UTF-8 character than the query.
-        let overlap = query.chars().count().saturating_mul(4);
+        let pattern = crate::text_match::Literal::new(query);
+        // Full folding may expand one query character to several source chars.
+        let overlap = pattern.overlap();
         let events = self.store.events_range_bounded(
             session,
             cursor.seq,
@@ -614,10 +613,10 @@ impl Rook {
             };
             let scanned = data.len().min(take);
             result.scanned_bytes += scanned;
-            let found = pattern.find(&data).filter(|m| m.start() < take);
-            let label_match = offset == 0 && pattern.is_match(event.record.label.as_bytes());
+            let found = pattern.find(&data).filter(|m| m.start < take);
+            let label_match = offset == 0 && pattern.find(event.record.label.as_bytes()).is_some();
             if found.is_some() || label_match {
-                let at = found.map(|m| m.start()).unwrap_or(0);
+                let at = found.map(|m| m.start).unwrap_or(0);
                 let begin = crate::context::ceil_char_boundary(&data, at.saturating_sub(100));
                 let stop = crate::context::floor_char_boundary(&data, (at + 400).min(data.len()));
                 result.hits.push(Hit {

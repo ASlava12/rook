@@ -255,6 +255,9 @@ impl AgentLoop<'_> {
     }
 
     fn cycle_live_poll(&self, call: &ToolCall) -> bool {
+        if self.remote_live_poll(call) {
+            return true;
+        }
         if call.name != "job" || call.arguments.get("stop").and_then(|v| v.as_bool()) == Some(true) {
             return false;
         }

@@ -21,3 +21,4 @@ usually goes missing.
 | [0014](0014-durable-work.md) | Daemon-owned durable tasks and steering receipts | accepted |
 
 - [0015: Tasks schedule session goals](0015-scheduled-tasks.md)
+- [0016: Separate web application and agent integrations](0016-separate-web-and-agent-integrations.md)

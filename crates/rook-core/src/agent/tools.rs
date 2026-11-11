@@ -247,6 +247,22 @@ impl<'a> AgentLoop<'a> {
         }
 
         outcome.tools_called.push(call.name.clone());
+        if call.name == crate::remote_agents::TOOL {
+            let result = match self.remote_agent(&call.arguments).await {
+                Ok(value) => (value.to_string(), false),
+                Err(error) => (self.vault.redact(&error.to_string()), true),
+            };
+            self.rook.log(self.session, EventKind::ToolResult, &call.name, &result.0).ok();
+            return result;
+        }
+        if call.name == super::messaging::TOOL {
+            let result = match self.agent_message(&call.arguments) {
+                Ok(value) => (value.to_string(), false),
+                Err(why) => (why, true),
+            };
+            self.rook.log(self.session, EventKind::ToolResult, &call.name, &result.0).ok();
+            return result;
+        }
         if call.name == super::capabilities::TOOL {
             let result = match self.tool_status(&call.arguments) {
                 Ok(value) => (value.to_string(), false),

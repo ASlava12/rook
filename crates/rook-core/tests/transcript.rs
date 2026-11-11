@@ -20,6 +20,40 @@ fn add(rook: &Rook, session: u128, text: &str) -> u64 {
 }
 
 #[test]
+fn internal_notes_are_identified_for_presentation_without_losing_saved_history() {
+    let root = tempfile::tempdir().unwrap();
+    let rook = open(root.path(), Config::default());
+    let session = rook.start_session("presentation metadata").unwrap();
+    for label in ["request-tool-catalog", "rook:timing:v1", "rook:agent-message:v1", "Operator note"] {
+        rook.store
+            .append_event(
+                session,
+                NewEvent::new(EventKind::Note, Kind::Message, label.as_bytes()).label(label),
+            )
+            .unwrap();
+    }
+    // A user quoting a reserved label is still a user message.
+    rook.store
+        .append_event(
+            session,
+            NewEvent::new(EventKind::UserMessage, Kind::Message, b"visible user text")
+                .label("request-tool-catalog"),
+        )
+        .unwrap();
+    let page = rook.transcript_page(session, &PageRequest::default()).unwrap();
+    let entries = page.items;
+    assert_eq!(entries.len(), 5);
+    assert_eq!(
+        entries.iter().map(|entry| entry.internal).collect::<Vec<_>>(),
+        [true, true, false, false, false]
+    );
+    for entry in entries {
+        let saved = rook.transcript_entry(session, entry.seq, 0).unwrap();
+        assert!(!saved.entry.body.is_empty(), "all notes must remain readable in saved history");
+    }
+}
+
+#[test]
 fn a_frozen_search_never_admits_metadata_from_events_appended_after_its_head() {
     let root = tempfile::tempdir().unwrap();
     let rook = open(root.path(), Config::default());
@@ -351,6 +385,43 @@ fn search_resumes_inside_large_bodies_and_finds_unicode_across_the_scan_boundary
     add(&rook, other, &format!("{}K!", "x".repeat(4095)));
     assert_eq!(rook.transcript_search(other, "k!", Cursor::default()).unwrap().hits.len(), 1);
     assert!(rook.transcript_search(session, "[literal]", Cursor::default()).unwrap().hits.is_empty());
+}
+
+#[test]
+fn full_unicode_literal_search_keeps_raw_offsets_across_pages_and_whitespace() {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    config.transcript.search_bytes = 4096;
+    let rook = open(root.path(), config);
+    let session = rook.start_session("expanded folds").unwrap();
+    let prefix = "x".repeat(4095);
+    let text = format!("{prefix}🦀Straße\t\tΟΣ\nnext line");
+    let seq = add(&rook, session, &text);
+    for query in ["STRASSE", "sTraSSe\t\tος\nNEXT", "οσ", "ος"] {
+        let first = rook.transcript_search(session, query, Cursor::default()).unwrap();
+        let result = if first.hits.is_empty() {
+            let next = first.next.expect("the byte budget must leave a continuation");
+            assert_eq!(first.scanned_bytes, 4096);
+            rook.transcript_search(session, query, next).unwrap()
+        } else {
+            first
+        };
+        let hit = &result.hits[0];
+        assert_eq!(hit.seq, seq);
+        assert!(hit.snippet.contains("Straße\t\tΟΣ\nnext"));
+        assert_eq!(
+            text.get(hit.offset as usize..hit.offset as usize + hit.snippet.len()),
+            Some(hit.snippet.as_str())
+        );
+        assert!(!hit.snippet.contains('\u{fffd}'));
+    }
+    let expanded = rook.start_session("one character expands").unwrap();
+    add(&rook, expanded, &format!("{}ss", "x".repeat(4095)));
+    assert_eq!(rook.transcript_search(expanded, "ß", Cursor::default()).unwrap().hits.len(), 1);
+    assert!(
+        rook.transcript_search(session, "strasse οσ", Cursor::default()).unwrap().hits.is_empty(),
+        "literal whitespace stays literal"
+    );
 }
 
 #[test]

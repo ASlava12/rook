@@ -9,6 +9,7 @@ authors.workspace = true
 
 [dependencies]
 base64 = "0.22.1"
+caseless = "0.2.2"
 getrandom = "0.4.3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 regex = "1.13.1"

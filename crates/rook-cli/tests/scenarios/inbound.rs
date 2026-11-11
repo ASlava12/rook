@@ -10,18 +10,24 @@ use std::{
     },
 };
 const SECRET: &[u8] = b"native-inbound-http-private-key";
-struct Model {
-    url: String,
+pub(super) struct Model {
+    pub(super) url: String,
     halt: Arc<AtomicBool>,
+    pub(super) remote_pending: Arc<AtomicBool>,
+    pub(super) remote_release: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<Vec<Value>>>,
 }
 impl Model {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}/v1", listener.local_addr().unwrap());
         let halt = Arc::new(AtomicBool::new(false));
         let stop = halt.clone();
+        let remote_pending = Arc::new(AtomicBool::new(false));
+        let pending = remote_pending.clone();
+        let remote_release = Arc::new(AtomicBool::new(true));
+        let release = remote_release.clone();
         let thread = std::thread::spawn(move || {
             let mut requests = Vec::new();
             while !stop.load(Ordering::SeqCst) {
@@ -67,7 +73,41 @@ impl Model {
                         )
                     } else if checker {
                         (json!({"content":"VERDICT: holds"}), "stop")
+                    } else if request["messages"].to_string().contains("REMOTE_A2A_SUBMIT") {
+                        if tool_result {
+                            let received = request["messages"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .find_map(|m| {
+                                    if m["role"] != "tool" {
+                                        return None;
+                                    }
+                                    let source: Value = serde_json::from_str(m["content"].as_str()?).ok()?;
+                                    let value: Value =
+                                        serde_json::from_str(source["rook_source"]["content"].as_str()?)
+                                            .ok()?;
+                                    value["response"]["id"].as_str().map(str::to_owned)
+                                })
+                                .expect("the remote submit returned its actual receipt");
+                            (json!({"content":format!("REMOTE_RECEIPT_{received}")}), "stop")
+                        } else {
+                            (
+                                json!({"tool_calls":[{"index":0,"id":"remote-submit","type":"function","function":{
+                                    "name":"remote_agent","arguments":json!({"action":"submit","peer":"worker","request":"cross-machine","text":"INBOUND_HTTP_42"}).to_string()
+                                }}]}),
+                                "tool_calls",
+                            )
+                        }
                     } else if tool_result {
+                        if request["messages"].to_string().contains("rook-a2a-v1")
+                            && pending.load(Ordering::SeqCst)
+                        {
+                            assert!(
+                                request["messages"].to_string().contains("A2A_LIVE_NOTE"),
+                                "remote message must reach the next actual model request"
+                            );
+                        }
                         (json!({"content":"INBOUND_HTTP_42 was written and checked."}), "stop")
                     } else {
                         let source = request["messages"]
@@ -95,7 +135,15 @@ impl Model {
                             serde_json::from_str(source["rook_source"]["content"].as_str().unwrap()).unwrap();
                         let payload: Value =
                             serde_json::from_str(record["payload_utf8"].as_str().unwrap()).unwrap();
-                        assert_eq!(payload["code"], "INBOUND_HTTP_42");
+                        if payload["protocol"] == "rook-a2a-v1" {
+                            assert_eq!(payload["operation"]["text"], "INBOUND_HTTP_42");
+                            pending.store(true, Ordering::SeqCst);
+                            while !release.load(Ordering::SeqCst) && !stop.load(Ordering::SeqCst) {
+                                std::thread::sleep(std::time::Duration::from_millis(5));
+                            }
+                        } else {
+                            assert_eq!(payload["code"], "INBOUND_HTTP_42");
+                        }
                         (
                             json!({"tool_calls":[{"index":0,"id":"event-write","type":"function","function":{"name":"write_file","arguments":json!({"path":"event-result","content":"INBOUND_HTTP_42"}).to_string()}}]}),
                             "tool_calls",
@@ -117,7 +165,7 @@ impl Model {
             }
             requests
         });
-        Self { url, halt, thread: Some(thread) }
+        Self { url, halt, remote_pending, remote_release, thread: Some(thread) }
     }
 }
 impl Drop for Model {

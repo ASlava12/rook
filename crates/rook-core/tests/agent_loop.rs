@@ -1563,6 +1563,193 @@ async fn a_goal_check_that_could_not_settle_is_an_open_question() {
 /// positional script makes the race decide who gets which reply.
 struct ByPrompt(Vec<(&'static str, Response)>);
 
+fn agent_message_value(request: &Request) -> serde_json::Value {
+    let last = request.messages.last().unwrap();
+    let outer: serde_json::Value = serde_json::from_str(&last.content).unwrap_or_default();
+    let text = outer["rook_source"]["content"].as_str().unwrap_or(&last.content);
+    serde_json::from_str(text).unwrap_or_default()
+}
+
+#[tokio::test]
+async fn agent_messages_connect_siblings_and_parent_with_attributed_replay() {
+    struct Exchange {
+        ready: tokio::sync::Barrier,
+        queued: tokio::sync::Notify,
+        seen: Mutex<Vec<Request>>,
+    }
+    #[async_trait]
+    impl Provider for Exchange {
+        fn id(&self) -> &str {
+            "scripted/agent-exchange"
+        }
+        fn context_window(&self) -> usize {
+            32_000
+        }
+        async fn complete(&self, request: Request) -> rook_llm::Result<Response> {
+            if let Some(answer) = completion_answer(&request) {
+                return Ok(answer);
+            }
+            self.seen.lock().unwrap().push(request.clone());
+            let last = request.messages.last().unwrap().content.as_str();
+            let value = agent_message_value(&request);
+            let has = |marker: &str| {
+                request.messages.iter().any(|m| m.role == Role::User && m.content.ends_with(marker))
+            };
+            let result = if has("A2A_PRODUCER") {
+                if last.ends_with("A2A_PRODUCER") {
+                    self.ready.wait().await;
+                    call("agent_message", serde_json::json!({"action":"peers"}))
+                } else if value["peers"].is_array() {
+                    let to = value["peers"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|peer| peer["task"].as_str().is_some_and(|s| s.contains("A2A_CONSUMER")))
+                        .expect("both peers joined before the barrier")["id"]
+                        .clone();
+                    call(
+                        "agent_message",
+                        serde_json::json!({"action":"send","to":to,"text":"A2A_SIBLING_FACT"}),
+                    )
+                } else if value["status"] == "queued" {
+                    self.queued.notify_one();
+                    reply("producer finished")
+                } else {
+                    panic!("unexpected producer input: {last}");
+                }
+            } else if has("A2A_CONSUMER") {
+                if last.ends_with("A2A_CONSUMER") {
+                    self.ready.wait().await;
+                    call("agent_message", serde_json::json!({"action":"peers"}))
+                } else if value["peers"].is_array() {
+                    self.queued.notified().await;
+                    call("read_file", serde_json::json!({"path":"coordination.txt"}))
+                } else if last.contains("A2A_SIBLING_FACT") {
+                    let source: serde_json::Value = serde_json::from_str(last).unwrap();
+                    assert_eq!(source["rook_source"]["authority"], "data");
+                    call(
+                        "agent_message",
+                        serde_json::json!({"action":"send","to":"parent","text":"A2A_PARENT_REPORT"}),
+                    )
+                } else if value["status"] == "queued" {
+                    reply("consumer received the sibling fact")
+                } else {
+                    panic!("unexpected consumer input: {last}");
+                }
+            } else if last.ends_with("A2A_ROOT") {
+                call("delegate", serde_json::json!({"tasks":["A2A_PRODUCER","A2A_CONSUMER"],"wait":false}))
+            } else if last.contains("started: task01") {
+                call("subagents", serde_json::json!({"wait_secs":30}))
+            } else if last.contains("A2A_PARENT_REPORT") {
+                reply("family exchange complete")
+            } else {
+                panic!("unexpected root input: {last}");
+            };
+            Ok(result)
+        }
+    }
+    let f = fixture();
+    std::fs::write(f.workspace.path().join("coordination.txt"), "step boundary").unwrap();
+    let root = f.rook.start_session("agent family").unwrap();
+    let provider = Arc::new(Exchange {
+        ready: tokio::sync::Barrier::new(2),
+        queued: tokio::sync::Notify::new(),
+        seen: Mutex::new(Vec::new()),
+    });
+    let mut agent = AgentLoop::new(&f.rook, provider.clone(), root);
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(60), agent.run("A2A_ROOT"))
+        .await
+        .expect("family exchange stalled")
+        .unwrap();
+    assert_eq!(outcome.reply, "family exchange complete");
+    assert_eq!(outcome.delegated.len(), 2);
+    let mut notes = Vec::new();
+    for session in std::iter::once(root)
+        .chain(outcome.delegated.iter().map(|id| rook_store::parse_session_id(id).unwrap()))
+    {
+        let entries = f.rook.transcript(session, 0, 200, 32768).unwrap();
+        for entry in entries.iter().filter(|e| e.label == "rook:agent-message:v1") {
+            let envelope: serde_json::Value = serde_json::from_str(&entry.body).unwrap();
+            assert_eq!(envelope["to"], rook_store::format_session_id(session));
+            let replay = AgentLoop::new(&f.rook, provider.clone(), session).history_for_test().unwrap();
+            let matching: Vec<_> = replay
+                .iter()
+                .filter(|m| {
+                    m.content.contains(envelope["text"].as_str().unwrap())
+                        && m.content.contains("\"kind\":\"agent_message\"")
+                })
+                .collect();
+            assert_eq!(matching.len(), 1, "received mail replays exactly once");
+            assert!(matching[0].content.contains("\"authority\":\"data\""));
+            notes.push(envelope);
+        }
+    }
+    assert_eq!(notes.len(), 2, "sibling and child-to-parent delivery were both recorded");
+    let consumer = notes.iter().find(|n| n["text"] == "A2A_SIBLING_FACT").unwrap()["to"].clone();
+    let parent = notes.iter().find(|n| n["text"] == "A2A_PARENT_REPORT").unwrap();
+    assert_eq!(parent["from"], consumer);
+}
+
+#[tokio::test]
+async fn per_task_tool_allowlists_apply_to_both_delegation_paths() {
+    for wait in [true, false] {
+        struct Restricted {
+            wait: bool,
+            checked: std::sync::atomic::AtomicBool,
+        }
+        #[async_trait]
+        impl Provider for Restricted {
+            fn id(&self) -> &str {
+                "scripted/restricted-child"
+            }
+            fn context_window(&self) -> usize {
+                16000
+            }
+            async fn complete(&self, request: Request) -> rook_llm::Result<Response> {
+                if let Some(answer) = completion_answer(&request) {
+                    return Ok(answer);
+                }
+                let last = request.messages.last().unwrap().content.as_str();
+                Ok(if last.ends_with("RESTRICTED_ROOT") {
+                    call(
+                        "delegate",
+                        serde_json::json!({"tasks":[{"task":"RESTRICTED_CHILD","tools":["read_file","agent_message"]}],"wait":self.wait}),
+                    )
+                } else if last.ends_with("RESTRICTED_CHILD") {
+                    assert_eq!(
+                        request.tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+                        ["agent_message", "read_file"]
+                    );
+                    self.checked.store(true, std::sync::atomic::Ordering::Relaxed);
+                    call("write_file", serde_json::json!({"path":"protected.txt","content":"overwrite"}))
+                } else if last.contains("unavailable under the selected recipe equipment") {
+                    call("read_file", serde_json::json!({"path":"protected.txt"}))
+                } else if last.contains("original bytes") {
+                    reply("restricted child finished")
+                } else if last.contains("started: task01") {
+                    call("subagents", serde_json::json!({"wait_secs":30}))
+                } else if last.contains("restricted child finished") {
+                    reply("restriction verified")
+                } else {
+                    panic!("unexpected restricted input: {last}");
+                })
+            }
+        }
+        let f = fixture();
+        std::fs::write(f.workspace.path().join("protected.txt"), "original bytes").unwrap();
+        let session = f.rook.start_session("restricted delegation").unwrap();
+        let provider = Arc::new(Restricted { wait, checked: false.into() });
+        let mut agent = AgentLoop::new(&f.rook, provider.clone(), session);
+        let outcome = agent.run("RESTRICTED_ROOT").await.unwrap();
+        assert_eq!(outcome.reply, "restriction verified", "wait={wait}");
+        assert!(provider.checked.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(
+            std::fs::read_to_string(f.workspace.path().join("protected.txt")).unwrap(),
+            "original bytes"
+        );
+    }
+}
+
 #[async_trait]
 impl Provider for ByPrompt {
     fn id(&self) -> &str {
@@ -5648,6 +5835,202 @@ async fn a_compaction_whose_summary_failed_still_moves_the_session_on() {
     let turn = seen.lock().unwrap().clone();
     let carried: String = turn[0].messages.iter().map(|m| m.content.clone()).collect();
     assert!(!carried.contains("question 0"), "the span is not carried: {carried}");
+}
+
+#[tokio::test]
+async fn compaction_masks_registered_values_in_legacy_sources_fallbacks_paths_and_new_summaries() {
+    struct FailedSummary(Arc<Mutex<Vec<Request>>>);
+    #[async_trait]
+    impl Provider for FailedSummary {
+        fn id(&self) -> &str {
+            "scripted/failed-secret-summary"
+        }
+        fn context_window(&self) -> usize {
+            16000
+        }
+        async fn complete(&self, request: Request) -> rook_llm::Result<Response> {
+            self.0.lock().unwrap().push(request);
+            Err(LlmError::Other(format!("{}legacy-key-foo\\\"bar-0123456789", "x".repeat(490))))
+        }
+    }
+    let f = fixture();
+    let secret = "legacy-key-foo\\\"bar-0123456789";
+    let session = f.rook.start_session("secret-safe compaction").unwrap();
+    f.rook.log(session, rook_store::EventKind::UserMessage, "", "initial request").unwrap();
+    f.rook.log(session, rook_store::EventKind::Compaction, "auto", &serde_json::json!({
+        "through_seq":0,"summary":format!("Earlier decision with {secret}"),
+        "file_activity":{"requests":[{"seq":0,"tool":"read_file","path":format!("{secret}.txt")}],"omitted":0}
+    }).to_string()).unwrap();
+    let original = format!("User quoted {} and plain {secret}", serde_json::to_string(secret).unwrap());
+    let original_seq = f.rook.log(session, rook_store::EventKind::UserMessage, "", &original).unwrap();
+    let append = || {
+        for i in 0..40 {
+            f.rook
+                .log(
+                    session,
+                    rook_store::EventKind::UserMessage,
+                    "",
+                    &format!("next {i} {} {}", if i == 32 { original.as_str() } else { "" }, "x".repeat(400)),
+                )
+                .unwrap();
+            f.rook.log(session, rook_store::EventKind::AssistantMessage, "", &"y".repeat(400)).unwrap();
+        }
+    };
+    append();
+    let first_seen = Arc::new(Mutex::new(Vec::new()));
+    let mut failing = AgentLoop::new(&f.rook, Arc::new(FailedSummary(first_seen.clone())), session);
+    failing.hide_connection_secret(secret);
+    failing.set_window_for_test(4000);
+    failing.compact_now().await;
+    let first_input: String =
+        first_seen.lock().unwrap()[0].messages.iter().map(|message| message.content.as_str()).collect();
+    assert!(
+        first_input.contains("User quoted"),
+        "the admitted source really includes a secret-bearing user record"
+    );
+    assert!(!first_input.contains("legacy-key-foo"), "known values are masked before excerpting");
+    let (from, fallback) = f.rook.last_compaction(session).unwrap();
+    assert!(from > original_seq, "setup actually drops the legacy secret-bearing span");
+    let fallback = fallback.unwrap();
+    assert!(!fallback.contains("legacy-key-foo"), "{fallback}");
+    assert!(fallback.contains("${secret}") && fallback.contains("could not be summarised"));
+    append();
+    let provider = ScriptedProvider::new(vec![reply(&format!("A summary echoing {secret}"))]);
+    let seen = provider.share();
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), session);
+    agent.hide_connection_secret(secret);
+    agent.set_window_for_test(4000);
+    agent.compact_now().await;
+    let input: String =
+        seen.lock().unwrap()[0].messages.iter().map(|message| message.content.as_str()).collect();
+    assert!(!input.contains("legacy-key-foo"), "the summarizer must receive scrubbed input");
+    let summary = f.rook.last_compaction(session).unwrap().1.unwrap();
+    assert!(!summary.contains("legacy-key-foo"));
+    assert!(summary.contains("${secret}"));
+    let entries = f.rook.transcript(session, 0, usize::MAX, 16000).unwrap();
+    assert_eq!(
+        entries.iter().find(|entry| entry.seq == original_seq).unwrap().body,
+        original,
+        "original history is not rewritten"
+    );
+    let last = entries.iter().rev().find(|entry| entry.kind == "compaction").unwrap();
+    assert!(
+        !last.body.contains("legacy-key-foo"),
+        "both prose and the structured file companion are scrubbed"
+    );
+}
+
+#[tokio::test]
+async fn redaction_expansion_cannot_exceed_the_compaction_output_admission() {
+    let mut config = Config::default();
+    config.agent.max_compaction_summary_bytes = 1024;
+    let f = fixture_with(config);
+    let session = long_session(&f, 40);
+    let secret = "abcXYZ";
+    let output = secret.repeat(140);
+    assert!(output.len() < 1024 && "${secret}".repeat(140).len() > 1024);
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(vec![reply(&output)])), session);
+    agent.hide_connection_secret(secret);
+    agent.set_window_for_test(4000);
+    agent.compact_now().await;
+    let (from, summary) = f.rook.last_compaction(session).unwrap();
+    assert!(from > 0);
+    let summary = summary.unwrap();
+    assert!(summary.contains("redacted compaction output exceeds"), "{summary}");
+    assert!(!summary.contains(secret));
+}
+
+#[tokio::test]
+async fn compaction_keeps_file_requests_and_prior_decisions_when_the_next_summary_fails() {
+    let f = fixture();
+    let session = f.rook.start_session("file continuity").unwrap();
+    std::fs::write(f.workspace.path().join("input.txt"), "original payload").unwrap();
+    let mut acting = AgentLoop::new(
+        &f.rook,
+        Arc::new(ScriptedProvider::new(vec![
+            call("read_file", serde_json::json!({"path":"input.txt"})),
+            call("write_file", serde_json::json!({"path":"output.txt", "content":"saved"})),
+            call("read_file", serde_json::json!({"path":"missing.txt"})),
+            reply("requests finished"),
+        ])),
+        session,
+    );
+    acting.allow_everything_not_denied();
+    acting.run("Read the input and write the result.").await.unwrap();
+    assert_eq!(std::fs::read_to_string(f.workspace.path().join("output.txt")).unwrap(), "saved");
+    assert!(!f.workspace.path().join("missing.txt").exists(), "the setup includes a failed request");
+    let append_history = || {
+        for i in 0..30 {
+            f.rook
+                .log(
+                    session,
+                    rook_store::EventKind::UserMessage,
+                    "",
+                    &format!("next {i} {}", "x".repeat(400)),
+                )
+                .unwrap();
+            f.rook.log(session, rook_store::EventKind::AssistantMessage, "", &"y".repeat(400)).unwrap();
+        }
+    };
+    append_history();
+    let provider =
+        Arc::new(ScriptedProvider::new(vec![reply("Keep compatibility with the existing parser.")]));
+    let mut compacting = AgentLoop::new(&f.rook, provider, session);
+    compacting.set_window_for_test(4000);
+    compacting.compact_now().await;
+    let first = f.rook.last_compaction(session).unwrap();
+    assert!(first.0 > 0, "setup must actually compact the file calls");
+    let first_summary = first.1.unwrap();
+    for path in ["input.txt", "output.txt", "missing.txt"] {
+        assert!(
+            first_summary.contains(path),
+            "the model omitted paths, but the engine retained {path}: {first_summary}"
+        );
+    }
+    assert!(first_summary.contains("may have failed or been refused"));
+    append_history();
+    let mut failing = AgentLoop::new(&f.rook, Arc::new(NoSummaries(ScriptedProvider::new(vec![]))), session);
+    failing.set_window_for_test(4000);
+    failing.compact_now().await;
+    let second = f.rook.last_compaction(session).unwrap();
+    assert!(second.0 > first.0, "the failed summary still advances the source boundary");
+    let summary = second.1.unwrap();
+    assert!(summary.contains("existing parser"), "a failure must preserve the prior decision: {summary}");
+    assert!(summary.contains("could not be summarised") && summary.contains("session show"));
+    assert_eq!(summary.matches("Saved file requests").count(), 1, "the ledger is not recursively embedded");
+    assert!(summary.contains("input.txt") && summary.contains("missing.txt"));
+
+    // The ordinary next-turn replay, shared by all frontends, sees this state.
+    let next = ScriptedProvider::new(vec![reply("continuing")]);
+    let seen = next.share();
+    AgentLoop::new(&f.rook, Arc::new(next), session).run("Continue.").await.unwrap();
+    let requests = seen.lock().unwrap();
+    let replay: String =
+        requests.last().unwrap().messages.iter().map(|message| message.content.as_str()).collect();
+    assert!(replay.contains("existing parser") && replay.contains("input.txt"));
+    drop(requests);
+    let fork_at = f.rook.store.get_session(session).unwrap().unwrap().next_seq;
+    let fork = f.rook.fork_session(session, fork_at).unwrap().id;
+    let saved = f.rook.last_compaction(session).unwrap();
+    assert_eq!(f.rook.last_compaction(fork).unwrap(), saved, "forked history retains the same source ledger");
+    let config = f.rook.config.clone();
+    drop(acting);
+    drop(compacting);
+    drop(failing);
+    drop(f.rook);
+    let reopened = Rook::from_parts(
+        Store::open(f._store_dir.path()).unwrap(),
+        config,
+        Environment::bare(std::env::consts::OS, std::env::consts::ARCH, "test"),
+        SkillIndex::default(),
+        f.workspace.path().to_path_buf(),
+    );
+    assert_eq!(reopened.last_compaction(session).unwrap(), saved);
+    assert_eq!(
+        reopened.last_compaction(fork).unwrap(),
+        saved,
+        "restart keeps source references and prior decisions"
+    );
 }
 
 /// Thinks at length before every step, which is what a reasoning model does.
@@ -10097,6 +10480,45 @@ async fn tool_cycles_do_not_treat_shell_undo_receipt_ids_as_command_progress() {
 
 #[tokio::test]
 async fn tool_cycles_do_not_treat_undo_ids_as_progress_when_command_output_is_truncated() {
+    // This claim needs identical *complete* captures. Under load a real shell
+    // can leave an uncertified descendant, correctly making its capture
+    // incomplete and its result different. Exercise that conservative branch
+    // separately; it must not decide this receipt-identity regression.
+    struct Captured(std::sync::atomic::AtomicUsize);
+    #[async_trait]
+    impl rook_tools::Tool for Captured {
+        fn name(&self) -> &str {
+            "run_command"
+        }
+        fn spec(&self) -> rook_llm::ToolSpec {
+            rook_llm::ToolSpec {
+                name: self.name().into(),
+                description: "Return a complete fixture capture.".into(),
+                parameters: serde_json::json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}),
+            }
+        }
+        async fn call(
+            &self,
+            ctx: &rook_tools::ToolContext,
+            _: &serde_json::Value,
+        ) -> rook_tools::Result<rook_tools::ToolOutcome> {
+            let bytes = "stable".repeat(128);
+            assert!(bytes.len() > ctx.max_output_bytes);
+            let directory = ctx.spill_dir.as_ref().unwrap();
+            std::fs::create_dir_all(directory).unwrap();
+            let file = directory
+                .join(format!("cycle-{}.log", self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+            std::fs::write(&file, &bytes).unwrap();
+            let mut outcome = rook_tools::ToolOutcome::ok("exit 0\nstable\n[elided]\nstable")
+                .with("exit_code", 0)
+                .with("output_complete", true)
+                .with("processes_stopped", true)
+                .with("output_file", file.display().to_string());
+            outcome.truncated = true;
+            outcome.full_bytes = bytes.len();
+            Ok(outcome)
+        }
+    }
     let mut config = Config::default();
     config.shell_undo.enabled = true;
     config.sandbox.max_output_bytes = 256;
@@ -10107,6 +10529,7 @@ async fn tool_cycles_do_not_treat_undo_ids_as_progress_when_command_output_is_tr
         (0..5).map(|_| call("run_command", serde_json::json!({"command":command}))).collect();
     script.push(reply("no files changed"));
     let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    agent.tools.register(Arc::new(Captured(0.into())));
     agent.allow_everything_not_denied();
     let out = agent.run("inspect once").await.unwrap();
     let results: Vec<_> = f

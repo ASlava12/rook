@@ -122,7 +122,9 @@ fn read_at(rook: &Rook, session: u128, floor: u64, through: u64) -> Excerpt {
         out.scanned += 1;
         // Checkpoint object ids are not file hashes. Showing bookkeeping to
         // a checker once turned an unchanged rename into a false finding.
-        if !crate::context::reaches_the_model(event.record.kind) {
+        if !crate::context::reaches_the_model(event.record.kind)
+            && !(event.record.kind == EventKind::Note && event.record.label == super::messaging::LABEL)
+        {
             continue;
         }
         let meta = match rook.store.stat_object(&event.record.body) {
@@ -205,6 +207,8 @@ fn read_at(rook: &Rook, session: u128, floor: u64, through: u64) -> Excerpt {
         // The checker renderer uses text and image attribution, not the UI's
         // measurement/change/detail companions. Do not load those companions.
         out.entries.push(TranscriptEntry {
+            internal: event.record.kind == EventKind::Note
+                && !super::note_is_for_a_person(&event.record.label),
             seq: event.seq,
             ts: event.record.ts,
             kind: event.record.kind.as_str().into(),
@@ -258,6 +262,26 @@ mod tests {
         assert_eq!(excerpt.unread_before, None);
         assert!(excerpt.issues.is_empty());
         assert_eq!(excerpt.body_reads, 2);
+    }
+
+    #[test]
+    fn delivered_agent_messages_are_visible_to_checks_as_saved_source_data() {
+        let root = tempfile::tempdir().unwrap();
+        let rook = engine(root.path());
+        let session = rook.start_session("owned").unwrap();
+        let first = rook.log(session, EventKind::UserMessage, "", "check the evidence").unwrap();
+        rook.log(session, EventKind::Note, "ordinary note", "bookkeeping").unwrap();
+        let mail = rook
+            .log(
+                session,
+                EventKind::Note,
+                super::super::messaging::LABEL,
+                r#"{"id":"msg0001","from":"peer","text":"observed result"}"#,
+            )
+            .unwrap();
+        let excerpt = read_at(&rook, session, first, mail + 1);
+        assert_eq!(excerpt.entries.iter().map(|e| e.seq).collect::<Vec<_>>(), [first, mail]);
+        assert!(excerpt.entries[1].body.contains("observed result"));
     }
 
     #[test]

@@ -188,7 +188,7 @@ pub(crate) enum Command {
     },
     /// Speak the Agent Client Protocol on stdio, for editors.
     Acp,
-    /// Start the HTTP backend and web UI.
+    /// Start the HTTP, WebSocket and MCP backend. Run web/serve.mjs for the UI.
     Serve {
         #[arg(long)]
         port: Option<u16>,

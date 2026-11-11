@@ -10,6 +10,21 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  web:
+    name: standalone web ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: node web/check.mjs
+      - run: node --test web/tests/*.mjs
   test:
     name: test ${{ matrix.os }}
     runs-on: ${{ matrix.os }}

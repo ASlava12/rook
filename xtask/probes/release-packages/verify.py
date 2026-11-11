@@ -65,6 +65,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('artifacts', type=Path)
     p.add_argument('--skills', type=Path, required=True)
+    p.add_argument('--web', type=Path, help='tagged standalone web component, when shipped')
     p.add_argument('--version', required=True)
     p.add_argument('--host', action='store_true', help='extract and run both Windows binaries; Windows only')
     p.add_argument('--target', action='append')
@@ -86,6 +87,12 @@ def main():
     skill_files = {f.relative_to(a.skills).as_posix(): f for f in a.skills.rglob('*') if f.is_file()}
     assert skills, 'the tagged skill source contains no SKILL.md files'
     assert all(not f.is_symlink() for f in a.skills.rglob('*')), 'linked source skill resources'
+    web_files = {}
+    if a.web:
+        web_files = {name: a.web / name for name in ['serve.mjs', 'README.md']}
+        web_files.update({f.relative_to(a.web).as_posix(): f for f in (a.web / 'dist').rglob('*') if f.is_file()})
+        assert 'dist/index.html' in web_files, 'web source lacks its entry point'
+        assert all(f.is_file() and not f.is_symlink() for f in web_files.values()), 'linked or missing web source resources'
     checksums = {}
     manifests = [*a.artifacts.rglob('*.sha256'), *a.artifacts.rglob('SHA256SUMS')]
     provided = {path for path in a.artifacts.rglob('*') if path.is_file()}
@@ -164,6 +171,14 @@ def main():
                     actual, expected_bytes = actual.replace(b'\r\n', b'\n'), expected_bytes.replace(b'\r\n', b'\n')
                 assert actual == expected_bytes, (target, skill)
             allowed = required | {'BUILD-INFO.txt'} | {f'share/rook/skills/{name}' for name in skill_files}
+            packaged_web = {name.removeprefix('share/rook/web/') for name in relative if name.startswith('share/rook/web/')}
+            assert packaged_web == set(web_files), (target, 'web resources', set(web_files) - packaged_web, packaged_web - set(web_files))
+            for name, source in web_files.items():
+                actual, expected_bytes = read(f'{root}/share/rook/web/{name}'), source.read_bytes()
+                if source.suffix in {'.md', '.mjs', '.js', '.html', '.css', '.svg', '.json'}:
+                    actual, expected_bytes = actual.replace(b'\r\n', b'\n'), expected_bytes.replace(b'\r\n', b'\n')
+                assert actual == expected_bytes, (target, 'web resource', name)
+            allowed |= {f'share/rook/web/{name}' for name in web_files}
             assert relative <= allowed, (target, 'unexpected package files', relative - allowed)
             assert a.version in read(f'{root}/README.md').decode('utf-8'), target
             for binary in ['rook', 'rookd']:

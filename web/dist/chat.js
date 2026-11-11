@@ -16,6 +16,11 @@ import { extensionPanel, readExtension } from './extension-ui.js';
 import { appsPanel } from './mcp-apps.js';
 import { presetPanel } from './presets.js';
 import { streamedMarkdown } from './streamed-markdown.js';
+import { icon } from './icons.js';
+import { drafts } from './drafts.js';
+import { workbench } from './workbench.js';
+import { followViewport } from './scroll-follow.js';
+import { connectionRecovery } from './connection-recovery.js';
 
 // Scrollback, not the record: the session holds every word of this and the
 // sessions tab reads it back, so a tab left open for a day need not keep an
@@ -36,6 +41,60 @@ let turnId = null;
 let retainedDraftFiles = [];
 let extensionDisplay = null;
 let extensionLoad = 0;
+let inspector = null;
+let scrollFollow = null;
+let viewGeneration = 0;
+let draftTimer = null;
+let recovery = null;
+
+function connectionChanged({kind}) {
+  state.chat.connection=kind;
+  const notice=$('#chat-connection'),title=$('#connection-title'),description=$('#connection-description');
+  if(notice){
+    notice.hidden=kind==='ready';notice.dataset.kind=kind;
+    title.textContent=kind==='project'?'Choose a project folder':kind==='connecting'?'Connecting to Rook…':'Connection to Rook lost';
+    description.textContent=kind==='project'
+      ?'The selected folder is unavailable. Choose an existing folder to start working.'
+      :kind==='connecting'?'Restoring your connection. Your draft stays here.'
+      :'Your draft is kept in this tab. Reconnecting automatically; keep rookd and the web server running.';
+    if(retryPrompt.candidate()||retryStop.candidate())description.textContent+=' Saved requests are not resent automatically. Use the recovery controls below after reconnecting.';
+    const choose=$('#connection-project');if(choose)choose.hidden=kind!=='project';
+  }
+  const button=$('#reconnect-chat');if(button){button.hidden=kind==='ready';button.disabled=kind==='connecting';}
+  const submit=$('#send');if(submit)submit.disabled=kind==='project';
+  chatChanged();
+}
+
+async function inspectConnection(signal) {
+  const health=await api('/api/health',undefined,signal);
+  const workspace=state.chat.workspace||health.workspace;
+  if(workspace){
+    const reply=await fetch(`/api/files?limit=1&workspace=${encodeURIComponent(workspace)}`,{signal,cache:'no-store'});
+    await reply.body?.cancel();
+    if([400,404,422,500].includes(reply.status))return {kind:'project'};
+    if(!reply.ok)throw new Error('Workspace connection unavailable');
+  }
+  return {kind:'ready'};
+}
+
+function saveDraft() {
+  clearTimeout(draftTimer);
+  const persisted = drafts.save(state.chat.session,state.chat.workspace,state.chat.draft ?? '');
+  const notice=$('#draft-notice');
+  if(notice){notice.textContent=persisted?'':'Draft recovery unavailable for this text. Keep this tab open.';notice.hidden=persisted;}
+}
+function chatChanged() {
+  const main=$('#chat-main');
+  main?.setAttribute('data-empty',String(!state.chat.session&&!state.chat.busy));
+  nav.chatChanged(); inspector?.update();
+}
+nav.disposeChat = () => {
+  viewGeneration++;saveDraft();finishModel(false);
+  recovery?.dispose();recovery=null;
+  inspector?.dispose();inspector=null;scrollFollow?.dispose();scrollFollow=null;
+  nav.inspect=()=>{};
+};
+globalThis.addEventListener?.('pagehide',saveDraft);
 
 function extensionUi(ui) {
  if (ui?.session !== state.chat.session || !Number.isSafeInteger(ui.through) || ui.through < 0) return;
@@ -70,10 +129,11 @@ function block(kind, ...kids) {
   if (kind !== 'md') finishModel();
   const out = chatOut();
   if (!out) return null;
+  const following=kind==='you'||(scrollFollow?.viewport===out?scrollFollow.before():true);
   const n = el('div', { class: kind }, ...kids);
   out.append(n);
   while (out.childElementCount > MAX_SCROLLBACK_BLOCKS) out.firstElementChild.remove();
-  out.scrollTop = out.scrollHeight;
+  if(scrollFollow?.viewport===out)scrollFollow.after(following);else out.scrollTop=out.scrollHeight;
   return n;
 }
 
@@ -146,11 +206,12 @@ function saidByModel(text, replace = false) {
     const owns = () => node.isConnected && chatOut() === out && socket === connection &&
       state.chat.session === session && turnId === turn;
     const writer = streamedMarkdown({ isCurrent: owns, render: (source, clipped) => {
+      const following=scrollFollow?.viewport===out?scrollFollow.before():true;
       modelSpace(node, source.length);
       node.replaceChildren(md(source));
       if (clipped) node.append(el('p', { class: 'warn' },
         `Displayed answer shortened; inspect the saved response in Sessions (${session || 'current session'}).`));
-      out.scrollTop = out.scrollHeight;
+      if(scrollFollow?.viewport===out)scrollFollow.after(following);else out.scrollTop=out.scrollHeight;
     } });
     current = { writer, owns };
   }
@@ -159,6 +220,7 @@ function saidByModel(text, replace = false) {
 
 function setTitle() {
   document.title = state.chat.waiting ? '? rook' : state.chat.busy ? '● rook' : 'rook';
+  chatChanged();
 }
 
 /// The page is watching a turn — whether it asked for one or joined one.
@@ -261,7 +323,9 @@ function done(keepInputs = false) {
 
 export function connect() {
   if (socket && socket.readyState <= 1) return socket;
-  socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/chat?live_snapshots=true`);
+  state.chat.connected=false;
+  connectionChanged({kind:'connecting'});
+  socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/chat?live_snapshots=true${state.chat.workspace?`&workspace=${encodeURIComponent(state.chat.workspace)}`:''}`);
   const connection = socket;
   socket.onmessage = (event) => {
     if (socket !== connection) return;
@@ -445,18 +509,18 @@ export function connect() {
   // opened again. Asking is how it finds out; before the turn outlived the
   // socket there was nothing to ask about.
   socket.addEventListener('open', () => {
+    if(socket===connection){state.chat.connected=true;recovery?.opened();connectionChanged({kind:'ready'});}
     const reconnect = $('#reconnect-chat');
     if (socket === connection && reconnect) reconnect.hidden = true;
     if (socket === connection && state.chat.session) connection.send(JSON.stringify({ type: 'attach', session: state.chat.session }));
   }, { once: true });
   socket.onclose = () => {
-    clearPrivateInputs();
     if (socket === connection) {
+      clearPrivateInputs();
+      state.chat.connected=false;
       retryPrompt.disconnected();
-      say('err', retryPrompt.candidate()
-        ? 'disconnected; use Retry saved prompt if its delivery is uncertain' : 'disconnected');
-      if (retryStop.candidate()) say('stat', 'Stop delivery is uncertain; reconnect, inspect the session, then use Retry saved Stop');
       done(true);
+      connectionChanged({kind:'offline'});recovery?.closed();
       const reconnect = $('#reconnect-chat');
       if (reconnect) reconnect.hidden = false;
     }
@@ -755,6 +819,7 @@ async function pickSessionModel(model, retry = false, effort = null) {
   renderSettings(); return false;
 }
 function renderSettings() {
+  chatChanged();
   const bar = $('#settings');
   const s = state.chat.settings;
   if (!bar || !s) return;
@@ -813,6 +878,7 @@ function rememberRenamedBranch(updated) {
 }
 
 function renderPicker() {
+  chatChanged();
   receiveQueueDraft();
   const background = $('#background-controls');
   if (background && background.dataset.session !== (state.chat.session || '')) {
@@ -879,7 +945,14 @@ export async function resume(session) {
       else if (e.kind === 'tool-call' || e.kind === 'tool-result') block('tool', savedToolCard(session, e));
       // `wrote` is JSON for `changes` to read, not prose for anybody. The same
       // question is `note_is_for_a_person` in rook-core, which the window asks.
-      else if (e.kind === 'note' && !['wrote', 'rook:extension-ui:v1', 'rook:model-aux:v1', 'rook:model-attempt:v1', 'rook:model-delegation:v1', 'compaction usage', 'branch summary usage'].includes(e.label)) say('stat', `${e.label}: ${e.body}`);
+      // New daemons classify notes centrally. Keep the old exclusion only for
+      // historical servers that predate that additive wire field.
+      else if (e.kind === 'note' && !e.internal && !(e.internal===undefined&&['wrote', 'rook:extension-ui:v1', 'rook:model-aux:v1', 'rook:model-attempt:v1', 'rook:model-delegation:v1', 'compaction usage', 'branch summary usage'].includes(e.label))) {
+        if(e.label==='rook:agent-message:v1'){
+          try{const message=JSON.parse(e.body);block('agent',el('div',{class:'peer-message'},el('strong',{},`Agent ${String(message.from||'peer').slice(0,8)}`),el('p',{},String(message.text||''))));}
+          catch{say('agent','Saved agent message has a longer body. Open Session history to read it.');}
+        }else say('stat',`${e.label}: ${e.body}`);
+      }
     }
     say('stat', `— ${items.length} earlier entries; the next prompt continues this session —`);
   } catch (e) {
@@ -933,7 +1006,7 @@ async function offer(input, row) {
   const mine = ++asked;
   let found = [];
   try {
-    found = await api(`/api/files?fragment=${encodeURIComponent(fragment)}`);
+    found = await api(`/api/files?fragment=${encodeURIComponent(fragment)}${state.chat.workspace?`&workspace=${encodeURIComponent(state.chat.workspace)}`:''}`);
   } catch {
     found = [];
   }
@@ -946,8 +1019,16 @@ async function offer(input, row) {
 }
 
 export async function renderChat() {
-  try { state.chat.sessions = (await api('/api/sessions?tree=true')).items.slice(0, 30); } catch { state.chat.sessions = []; }
-  const stream = el('div', { class: 'stream', id: 'stream' });
+  const generation=++viewGeneration;
+  try { state.chat.sessions = (await api('/api/sessions?tree=true')).items.slice(0, 80); } catch { state.chat.sessions = []; }
+  if(generation!==viewGeneration||state.tab!=='chat')return;
+  if(state.chat.session){
+    let selected=state.chat.sessions.find(item=>item.id===state.chat.session);
+    if(!selected){try{selected=await api(`/api/sessions/${encodeURIComponent(state.chat.session)}`);}catch{/* History will show an unavailable session. */}}
+    if(generation!==viewGeneration||state.tab!=='chat')return;
+    if(selected?.workspace)state.chat.workspace=selected.workspace;
+  }
+  const stream = el('div', { class: 'stream', id: 'stream', role:'log', 'aria-label':'Conversation', 'aria-live':'off', tabindex:'0' });
   const copyAnswer = async (summary = false) => {
     const session = state.chat.session;
     if (!session) { say('stat', 'Open a saved session first.'); return; }
@@ -982,7 +1063,7 @@ export async function renderChat() {
       el('button', {onclick:()=>drainAction({action:'start', id:crypto.randomUUID(), timeout_secs:300, restart:false})}, 'Drain'),
       el('button', {onclick:()=>drainAction({action:'start', id:crypto.randomUUID(), timeout_secs:300, restart:true})}, 'Drain and restart'),
       el('button', {onclick:()=>{if(drainId)drainAction({action:'cancel', id:drainId});}}, 'Cancel observed drain')), drainStatus);
-  const input = el('textarea', { id: 'chat-input' , rows: 3, 'aria-label': 'Prompt', placeholder: 'Ask the agent… (Enter sends, Shift+Enter adds a line, Esc stops)', autofocus: true }, state.chat.draft || '');
+  const input = el('textarea', { id: 'chat-input' , rows: 2, 'aria-label': 'Prompt', placeholder: 'Ask Rook to build, fix, or explain something…', autofocus: true }, state.chat.draft || '');
   const sendButton = el('button', { id: 'send', type: 'submit' }, 'Send');
   const followupButton = el('button', { type: 'submit', value: 'follow_up', title: 'Start a separate turn after this turn or goal finishes' }, 'Queue follow-up');
   const retryButton = el('button', { id: 'retry-prompt', type: 'button', hidden: true,
@@ -1004,7 +1085,7 @@ export async function renderChat() {
     onclick: () => { retryStop.discard(); renderStopRetry(); } }, 'Discard saved Stop');
   const stopButton = el('button', { id: 'stop', type: 'button', hidden: true, onclick: stop }, 'Stop');
   const reconnectButton = el('button', { id: 'reconnect-chat', type: 'button', hidden: true,
-    onclick: () => connect() }, 'Reconnect');
+    onclick: () => recovery ? recovery.retry() : connect() }, 'Reconnect');
 
   let loadingAttachments = false;
   const attachmentsInput = el('input', { id: 'attachments', type: 'file', multiple: true, 'aria-label': 'Images or UTF-8 context files' });
@@ -1044,8 +1125,13 @@ export async function renderChat() {
     el('div', { class: 'row' }, recipePath), el('div', { class: 'row' }, recipeParameters),
     el('div', { class: 'row' }, outputPath), el('div', { class: 'row' }, outputSchema),
     el('div', { class: 'row' }, el('label', { for: 'output-repairs' }, 'Repair attempts'), repairs));
+  const naming = el('div', { class: 'row', id: 'naming' });
+  const presets=presetPanel(input,preset=>{
+    return preset.model || preset.effort ? pickSessionModel(preset.model || state.chat.settings.model, false, preset.effort) : true;
+  });
   const form = el('form', { class: 'ask', onsubmit: async (event) => {
     event.preventDefault();
+    if(state.chat.connection==='project'){connectionChanged({kind:'project'});return;}
     if (loadingAttachments) return;
     let files;
     try { files = admitDraftFiles(attachmentsInput.files?.length ? attachmentsInput.files : retainedDraftFiles,
@@ -1147,16 +1233,17 @@ export async function renderChat() {
     if (state.chat.busy) return;
     say('you', `› ${text}`);
     working();
-  } }, input, sendButton, followupButton, retryButton, discardButton,
-  retryStopButton, discardStopButton, stopButton, reconnectButton,
-  presetPanel(input,preset=>{
-    return preset.model || preset.effort ? pickSessionModel(preset.model || state.chat.settings.model, false, preset.effort) : true;
-  }));
+  } }, input,naming,historicalAttachments,pendingFiles,
+  el('div',{class:'composer-toolbar'},
+    el('button',{type:'button',class:'icon-button','aria-label':'Attach images or text files',title:'Attach images or text files',onclick:()=>attachmentsInput.click()},icon('paperclip')),
+    el('details',{class:'composer-more'},el('summary',{},'Options'),el('div',{class:'composer-options'},outputSettings,presets)),
+    el('span',{class:'toolbar-spacer'}),followupButton,stopButton,sendButton),
+  el('div',{class:'composer-recovery'},retryButton,discardButton,retryStopButton,discardStopButton));
   // Naming a file meant knowing the path and typing it, which in a browser
   // means leaving the page to go and look. The ranking is the daemon's, so the
   // page offers the same list the terminal does.
-  const naming = el('div', { class: 'row', id: 'naming' });
-  input.addEventListener('input', () => { state.chat.draft = input.value; offer(input, naming); });
+  const resizeInput=()=>{if(input.style){input.style.height='auto';input.style.height=`${Math.min(210,Math.max(60,input.scrollHeight))}px`;}};
+  input.addEventListener('input', () => { state.chat.draft = input.value; offer(input, naming);resizeInput();clearTimeout(draftTimer);draftTimer=setTimeout(saveDraft,300); });
   input.addEventListener('keydown', (e) => {
     const offered = naming.firstElementChild;
     if (e.key === 'Enter' && !e.shiftKey && !e.altKey && !e.isComposing) {
@@ -1208,20 +1295,46 @@ export async function renderChat() {
     queue.querySelector('section')?.remove();
     if (queue.open) queue.append(queuePanel(state.chat.session, receiveQueueDraft, receiveQueueReceipt));
   });
-  $('#view').replaceChildren(el('div', { class: 'card' },
-    el('div', { class: 'row', id: 'picker' }),
-    el('div', { class: 'row', id: 'settings' }),
-    el('div', {class:'row'}, el('button', {onclick:()=>copyAnswer(false)}, 'Copy last answer'), el('button', {onclick:()=>copyAnswer(true)}, 'Copy internal summary'), el('button', {onclick:async()=>{if(!state.chat.session)return; try {const results=await api(`/api/sessions/${encodeURIComponent(state.chat.session)}/delegated-results`); stream.append(el('pre',{},JSON.stringify(results,null,2)));}catch(error){say('stat',error.error||error.message||String(error));}}}, 'Delegated results')),
-    stream, el('div', {id:'extension-widget', style:'max-height:20rem;overflow:auto', hidden:true}), history, branches, background, mcp, queue, drain, outputSettings, historicalAttachments, pendingFiles,
-    el('p', { id: 'branch-draft-note', class: 'sub', role: 'status' }, state.chat.branchNotice || ''), form, naming));
+  const actions=el('details',{},el('summary',{},'Conversation actions'),el('div',{class:'row',id:'picker'}),
+    el('div',{class:'row'},el('button',{onclick:()=>copyAnswer(false)},'Copy last answer'),el('button',{onclick:()=>copyAnswer(true)},'Copy internal summary'),
+      el('button',{onclick:async()=>{if(!state.chat.session)return;try{const results=await api(`/api/sessions/${encodeURIComponent(state.chat.session)}/delegated-results`);say('stat',JSON.stringify(results,null,2));}catch(error){say('stat',error.error||error.message||String(error));}}},'Delegated results')));
+  inspector=workbench([actions,history,branches,background,mcp,queue,drain],quoteIntoDraft);
+  nav.inspect=()=>inspector?.toggle();
+  const welcome=el('div',{class:'chat-welcome'},el('div',{class:'welcome-mark'},icon('rook')),
+    el('h2',{},'What are we working on?'),el('p',{},'Your project. Your tools. A little help moving things forward.'),
+    el('div',{class:'suggestions'},[
+      ['folder','Explore the project','Understand how it fits together','Explore this project and explain its architecture and important entry points.'],
+      ['code','Fix a bug','Find the cause, then make a fix','Help me investigate a bug in this project. Start by asking what is going wrong.'],
+      ['changes','Review changes','Get another set of eyes','Review the current changes in this project. Explain any problems and suggest focused fixes.'],
+    ].map(([symbol,title,description,text])=>el('button',{type:'button',class:'suggestion',onclick:()=>{
+      if(input.value.trim())return;input.value=text;input.dispatchEvent(new Event('input'));input.focus();
+    }},icon(symbol),el('strong',{},title),el('small',{},description)))));
+  const jump=el('button',{class:'jump-latest',type:'button',hidden:true,onclick:()=>scrollFollow?.latest()},icon('down'),' New messages');
+  const main=el('section',{class:'chat-main',id:'chat-main','data-empty':String(!state.chat.session&&!state.chat.busy)},welcome,stream,jump,
+    el('div',{id:'extension-widget',style:'max-height:20rem;overflow:auto',hidden:true}),
+    el('div',{class:'composer-dock'},
+      el('aside',{id:'chat-connection',class:'chat-connection',hidden:true,role:'status','aria-live':'polite'},
+        icon('link'),el('div',{class:'connection-copy'},el('strong',{id:'connection-title'}),el('p',{id:'connection-description'})),
+        el('div',{class:'connection-actions'},el('button',{id:'connection-project',type:'button',hidden:true,onclick:()=>$('#workspace-location')?.click()},'Choose folder'),reconnectButton)),
+      el('div',{class:'composer-card'},
+      el('p',{id:'branch-draft-note',class:'sub',role:'status'},state.chat.branchNotice||''),form),
+      el('div',{class:'composer-footer'},el('div',{class:'row',id:'settings'}),el('span',{class:'keyboard-hint'},'Enter to send · ',el('kbd',{},'Shift Enter'),' for a new line')),
+      el('p',{id:'draft-notice',class:'muted',hidden:true,role:'status'})));
+  $('#view').replaceChildren(el('div',{class:'chat-layout'},main,inspector.root));
+  scrollFollow=followViewport(stream,unread=>{jump.hidden=!unread;});
+  recovery=connectionRecovery({inspect:inspectConnection,reopen:connect,changed:connectionChanged,
+    visible:()=>!document.hidden&&state.tab==='chat'});
   renderPicker();
   renderSettings();
   if (extensionDisplay?.session === state.chat.session) extensionUi(extensionDisplay);
-  connect();
+  const reuseSocket=socket?.readyState===1;
+  const connection=connect();
+  if(connection.readyState===1){recovery.opened();connectionChanged({kind:'ready'});}
+  if(reuseSocket&&state.chat.session&&state.chat.busy)connection.send(JSON.stringify({type:'attach',session:state.chat.session}));
   if (state.chat.busy) working();
   else { renderPromptRetry(); renderStopRetry(); }
   if (state.chat.session && !state.chat.busy) await resume(state.chat.session);
-  input.focus();
+  if(input.isConnected){resizeInput();input.focus();}
 }
 
 // From another tab: continue this session in the chat.
@@ -1231,21 +1344,30 @@ export function continueIn(session, prepared = null) {
     const chosen = $('#attachments')?.files;
     files = prepared ? [] : admitDraftFiles(chosen?.length ? chosen : retainedDraftFiles,
       state.chat.historicalAttachments || []);
-  } catch (error) { say('err', String(error)); return; }
+  } catch (error) { state.chat.nextWorkspace=null;say('err', String(error)); return false; }
+  const workspace=state.chat.nextWorkspace || state.chat.sessions.find(item=>item.id===session)?.workspace || state.chat.workspace;
+  state.chat.nextWorkspace=null;
+  if(files.length&&!prepared&&(session!==state.chat.session||workspace!==state.chat.workspace)){
+    say('err','Send or remove the selected files before changing sessions. Your draft and attachments are retained.');return false;
+  }
+  state.chat.draft=$('#chat-input')?.value ?? state.chat.draft ?? '';
+  saveDraft();
   // Detach this observer before choosing another conversation. A queued frame
   // from the old socket must not change the selected session or its controls.
   const previous = socket;
   finishModel(false);
   socket = null;
   previous?.close();
-  state.chat.draft = prepared ? prepared.text : ($('#chat-input')?.value ?? state.chat.draft ?? '');
+  state.chat.draft = prepared ? prepared.text : drafts.get(session,workspace);
   if (prepared) state.chat.historicalAttachments = prepared.attachments;
   retainedDraftFiles = files;
   done();
   callStatus = null;
   state.chat.spent = null; state.chat.context = null; state.chat.modelRequest = null;
   state.chat.session = session;
+  state.chat.workspace=workspace;
   nav.go('chat');
+  return true;
 }
 
 export async function branchFromEvent(session, event) {

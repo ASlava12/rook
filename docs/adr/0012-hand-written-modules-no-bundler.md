@@ -4,6 +4,8 @@
 
 Accepted. Supersedes the "one file" part of
 [ADR-0007](0007-no-js-build-step.md); keeps the rest.
+The asset-embedding decision is superseded by
+[ADR-0016](0016-separate-web-and-agent-integrations.md).
 
 ## Context
 

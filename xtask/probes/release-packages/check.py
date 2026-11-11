@@ -38,7 +38,7 @@ class PackageChecks(unittest.TestCase):
             if path.is_file():
                 self.files[f'{ROOT}/share/rook/skills/{path.relative_to(self.skills).as_posix()}'] = path.read_bytes()
 
-    def rejected(self, reason, extra=None, extra_file=False, optimized=False):
+    def rejected(self, reason, extra=None, extra_file=False, optimized=False, web=False):
         archive = self.artifacts / f'{ROOT}.zip'
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', UserWarning)
@@ -57,6 +57,8 @@ class PackageChecks(unittest.TestCase):
                    '--skills', str(self.skills), '--version', '1.2.3', '--target', TARGET,
                    '--source-commit', 'a' * 40, '--recipe-commit', 'b' * 40,
                    '--run-url', 'https://example.invalid/run/1']
+        if web:
+            command += ['--web', str(self.web)]
         result = subprocess.run(command, capture_output=True, text=True, timeout=15)
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn(reason, result.stderr)
@@ -65,6 +67,25 @@ class PackageChecks(unittest.TestCase):
     def test_missing_variant_is_rejected_before_binary_inspection(self):
         del self.files[RESOURCE]
         self.rejected('skill resources')
+
+    def web_component(self):
+        self.web = Path(self.temporary.name) / 'web'
+        (self.web / 'dist').mkdir(parents=True)
+        for name, text in {'serve.mjs': 'export const server = true;\n', 'README.md': 'Rook web\n',
+                           'dist/index.html': '<title>Rook</title>', 'dist/app.js': 'export const ui = true;\n'}.items():
+            source = self.web / name
+            source.write_text(text)
+            self.files[f'{ROOT}/share/rook/web/{name}'] = source.read_bytes()
+
+    def test_missing_web_runtime_is_rejected_before_binary_inspection(self):
+        self.web_component()
+        del self.files[f'{ROOT}/share/rook/web/serve.mjs']
+        self.rejected('web resources', web=True)
+
+    def test_changed_web_module_is_rejected_before_binary_inspection(self):
+        self.web_component()
+        self.files[f'{ROOT}/share/rook/web/dist/app.js'] = b'different runtime'
+        self.rejected('web resource', web=True)
 
     def test_changed_variant_is_rejected_before_binary_inspection(self):
         self.files[RESOURCE] = b'different resource'

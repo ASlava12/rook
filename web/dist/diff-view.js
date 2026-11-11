@@ -37,8 +37,8 @@ export function diffViewer(owner,review,putLine) {
       el('div',{class:`diff-cell ${pair.old?.kind||''}`},line('before',pair.old?.before),el('pre',{},pair.old?.text||'')),
       el('div',{class:`diff-cell ${pair.new?.kind||''}`},line('after',pair.new?.after),el('pre',{},pair.new?.text||'')))));
     body.setAttribute('data-layout',mode.value);
-    body.replaceChildren(el('p',{class:'sub'},`${page.path} · source ${page.source} · byte ${page.offset}`),unified,paired,
-      page.next!==null?el('button',{type:'button',onclick:()=>load(page.path,page.next)},'Next diff page'):null);
+    body.replaceChildren(...[el('p',{class:'sub',title:`Saved source ${page.source} · byte ${page.offset}`},`${page.path} · source ${page.source.slice(0,12)}`),unified,paired,
+      page.next!=null?el('button',{type:'button',onclick:()=>load(page.path,page.next)},'Next diff page'):null].filter(node=>node!==null));
   }
   async function load(path,offset=0){
     const token=++epoch;
