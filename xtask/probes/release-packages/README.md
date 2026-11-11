@@ -5,7 +5,7 @@ download directory and the skills from the immutable tagged source:
 
 ```sh
 python3 xtask/probes/release-packages/verify.py /path/to/downloads \
-  --skills /path/to/tagged-source/skills --version X.Y.Z \
+  --skills /path/to/tagged-source/skills --web /path/to/tagged-source/web --version X.Y.Z \
   --source-commit SOURCE_SHA --recipe-commit RECIPE_SHA \
   --run-url https://github.com/OWNER/REPO/actions/runs/RUN_ID
 ```
@@ -19,6 +19,9 @@ The verifier checks checksums, portable paths and duplicate/case aliases, regula
 archive entries, file layout, package version and build identity, binary
 architecture, Linux ELF linkage and Windows CRT imports. It compares every skill
 file, including variants/resources; Markdown comparison normalizes CRLF/LF.
+With `--web`, it also compares the separate web host, README and every `dist/`
+resource against tagged source bytes. Omit that option only for historical
+releases without a standalone web component.
 Unexpected artifact files fail verification. Python optimization is refused so
 `-O` or `PYTHONOPTIMIZE` cannot silently remove validation.
 Portable-name checks follow the

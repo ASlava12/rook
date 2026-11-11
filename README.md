@@ -1,7 +1,7 @@
 # Rook
 
-[Rook 0.21.21](docs/releases/0.21.21.md): responsive TUI panel refresh,
-questions and Stop during slow reads, reliable cross-window cancellation, local MCP shutdown and hook input cleanup.
+[Rook 0.22.0](docs/releases/0.22.0.md): agents across computers, HTTP API and
+MCP server, a separate web workspace, Unicode history search and bounded compaction.
 
 [Domain network policy with OS containment](docs/domain-network-policy.md).
 
