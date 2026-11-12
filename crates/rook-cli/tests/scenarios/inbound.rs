@@ -10,6 +10,40 @@ use std::{
     },
 };
 const SECRET: &[u8] = b"native-inbound-http-private-key";
+
+fn inbound_source(messages: &Value) -> Option<Value> {
+    messages.as_array()?.iter().find_map(|message| {
+        let text = message["content"].as_str().map(str::to_owned).or_else(|| {
+            message["content"].as_array().map(|parts| {
+                parts.iter().filter_map(|part| part["text"].as_str()).collect::<Vec<_>>().join("\n")
+            })
+        })?;
+        // Source envelopes occupy individual JSON lines. Bundled skills add
+        // Markdown headings between them; a JSON value stream stops there.
+        text.lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(|record| record["rook_source"]["kind"] == "inbound_event")
+    })
+}
+
+#[test]
+fn inbound_provider_fixture_reads_envelopes_after_bundled_skill_headings() {
+    let environment = json!({"rook_source":{"kind":"environment","content":"rust"}});
+    let skill =
+        json!({"rook_source":{"kind":"skill_catalog","content":"- api-design: Use when designing APIs."}});
+    let source = json!({"rook_source":{"kind":"inbound_event","authority":"data","content":"owned event"}});
+    let text = format!(
+        "{environment}\n\n## Skills\nConsult a recipe when needed.\n{skill}\n\n## Sources\n{source}\n"
+    );
+    for content in [json!(text), json!([{"type":"text","text":text}])] {
+        assert_eq!(inbound_source(&json!([{"role":"user","content":content}])), Some(source.clone()));
+    }
+    assert!(
+        inbound_source(&json!([{"role":"user","content":format!("{environment}\n## Skills\n{skill}")}]))
+            .is_none()
+    );
+}
+
 pub(super) struct Model {
     pub(super) url: String,
     halt: Arc<AtomicBool>,
@@ -110,25 +144,7 @@ impl Model {
                         }
                         (json!({"content":"INBOUND_HTTP_42 was written and checked."}), "stop")
                     } else {
-                        let source = request["messages"]
-                            .as_array()
-                            .unwrap()
-                            .iter()
-                            .find_map(|m| {
-                                let text = m["content"].as_str().map(str::to_owned).or_else(|| {
-                                    m["content"].as_array().map(|parts| {
-                                        parts
-                                            .iter()
-                                            .filter_map(|part| part["text"].as_str())
-                                            .collect::<Vec<_>>()
-                                            .join("\n")
-                                    })
-                                })?;
-                                serde_json::Deserializer::from_str(&text)
-                                    .into_iter::<Value>()
-                                    .filter_map(Result::ok)
-                                    .find(|record| record["rook_source"]["kind"] == "inbound_event")
-                            })
+                        let source = inbound_source(&request["messages"])
                             .expect("the actual HTTP provider request has its inbound source envelope");
                         assert_eq!(source["rook_source"]["authority"], "data");
                         let record: Value =

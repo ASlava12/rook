@@ -78,6 +78,13 @@ Use `cargo test -p rook-cli --test cli NAME -- --exact`. Their common runtime
 helper requires the matching daemon version and never rebuilds the supplied pair;
 the compiled helper only seeds/verifies private data. This override does not cover
 every CLI test. Record both extracted binary hashes before and after the probes.
+Keep the packaged built-in skills enabled during artifact checks. Their catalog
+adds Markdown headings between individual JSON source envelopes; provider fixtures
+must scan the source lines rather than treat the whole context as a JSON stream.
+If a test-only fixture repair is needed after tagging, retain the original failure
+and record the verification-helper commit separately from the immutable binary
+source and build-recipe commits. Confirm that the repair changes no shipped code
+or resources and that the supplied binary hashes remain unchanged.
 Run `xtask/probes/deferred-work/run.py --bin-dir /absolute/extracted/bin` as well;
 retain all 22 conditions, including execution in a different workspace, restart,
 capacity and guidance. A successful fresh run does not explain the historical
