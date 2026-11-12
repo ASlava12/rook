@@ -1,7 +1,7 @@
 # Rook
 
-[Rook 0.22.0](docs/releases/0.22.0.md): agents across computers, HTTP API and
-MCP server, a separate web workspace, Unicode history search and bounded compaction.
+[Rook 0.22.1](docs/releases/0.22.1.md): preserve server sampling defaults
+for model requests and distinguish unset temperatures in saved diagnostics.
 
 [Domain network policy with OS containment](docs/domain-network-policy.md).
 
