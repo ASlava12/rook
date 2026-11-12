@@ -47,6 +47,23 @@ const ANSWERED: &str = r#"{
 }"#;
 
 #[tokio::test]
+async fn sampling_is_left_to_google_unless_the_caller_overrides_it() {
+    for temperature in [None, Some(0.0), Some(0.6)] {
+        let (url, sent_body) = serve(ANSWERED).await;
+        let mut request = Request::new(vec![Message::user("hello")]);
+        request.temperature = temperature;
+        provider(url).complete(request).await.unwrap();
+        let body = sent(&sent_body.await.unwrap());
+        let config = &body["generationConfig"];
+        if temperature.is_none() {
+            assert!(config.get("temperature").is_none(), "{body}");
+        } else {
+            assert_eq!(config["temperature"], serde_json::json!(temperature), "{body}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn a_plain_answer_carries_its_usage_and_the_model_that_replied() {
     let (url, _sent) = serve(ANSWERED).await;
     let response = provider(url).complete(Request::new(vec![Message::user("what colour?")])).await.unwrap();

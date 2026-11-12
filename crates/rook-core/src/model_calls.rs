@@ -159,7 +159,7 @@ struct RequestView<'a> {
     messages: Messages<'a>,
     tools: &'a [rook_llm::ToolSpec],
     max_output_tokens: u32,
-    temperature: f32,
+    temperature: Option<f32>,
     effort: Option<rook_llm::Effort>,
     cache_ttl: rook_llm::CacheTtl,
     model_capabilities: &'a rook_llm::ModelCapabilities,

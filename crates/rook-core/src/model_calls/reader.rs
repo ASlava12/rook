@@ -229,7 +229,7 @@ fn content_eligible(request: &Value, response: &Value) -> std::result::Result<()
         || messages.len() > 4096
         || tools.len() > 256
         || !request["max_output_tokens"].as_u64().is_some_and(|n| n > 0 && n <= u32::MAX.into())
-        || request["temperature"].as_f64().is_none()
+        || !(request["temperature"].is_null() || request["temperature"].as_f64().is_some())
         || !(request["effort"].is_null()
             || matches!(request["effort"].as_str(), Some("low" | "medium" | "high" | "xhigh" | "max")))
         || !matches!(request["cache_ttl"].as_str(), Some("5m" | "1h"))
@@ -625,6 +625,33 @@ mod tests {
     }
     fn inspect(r: &Rook, s: u128, format: Format) -> Artifact {
         read(r, s, &ReadRequest { format, ..Default::default() }).unwrap()
+    }
+    #[test]
+    fn captured_server_sampling_defaults_and_explicit_temperatures_remain_distinct_and_eligible() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = engine(dir.path());
+        let s = r.start_session("sampling").unwrap();
+        for temperature in [None, Some(0.0), Some(0.6)] {
+            let mut request = Request::new(vec![Message::user("question")]);
+            request.temperature = temperature;
+            complete(&r, s, &request, Purpose::Main);
+        }
+        let records = inspect(&r, s, Format::Records);
+        let dataset = inspect(&r, s, Format::Dataset);
+        assert_eq!(records.eligible, 3, "{:?}", records.exclusions);
+        assert_eq!(dataset.examples.len(), 3, "{:?}", dataset.exclusions);
+        for ((call, example), expected) in
+            records.calls.iter().zip(&dataset.examples).zip([Value::Null, json!(0.0), json!(0.6)])
+        {
+            let request = call.request.as_ref().unwrap();
+            assert_eq!(request["temperature"], expected);
+            assert_eq!(example.request["temperature"], expected);
+            for invalid in [json!("server"), json!(false)] {
+                let mut request = request.clone();
+                request["temperature"] = invalid;
+                assert_eq!(content_eligible(&request, &example.response), Err("unsupported_content_shape"));
+            }
+        }
     }
     #[test]
     fn preview_records_and_dataset_keep_single_response_targets_with_provenance() {

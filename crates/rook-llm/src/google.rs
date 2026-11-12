@@ -524,10 +524,12 @@ fn wire_request(model: &str, request: &Request) -> Value {
     let mut body = json!({
         "contents": contents,
         "generationConfig": {
-            "temperature": request.temperature,
             "maxOutputTokens": request.max_output_tokens,
         },
     });
+    if let Some(temperature) = request.temperature {
+        body["generationConfig"]["temperature"] = json!(temperature);
+    }
     if !system.is_empty() {
         body["systemInstruction"] = json!({ "parts": [{ "text": system }] });
     }

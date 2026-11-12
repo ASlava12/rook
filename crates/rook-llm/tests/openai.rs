@@ -6,6 +6,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use futures_util::StreamExt;
 use rook_llm::openai::{Config, OpenAiCompatible};
 use rook_llm::{Effort, Message, Provider, Request};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -44,9 +45,18 @@ async fn serve() -> (String, Arc<Mutex<Option<serde_json::Value>>>) {
             *recorder.lock().unwrap() = serde_json::from_str(&text[split + 4..]).ok();
             break;
         }
+        let stream = recorder.lock().unwrap().as_ref().is_some_and(|body| body["stream"] == true);
+        let (content_type, body) = if stream {
+            (
+                "text/event-stream",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+            )
+        } else {
+            ("application/json", DONE)
+        };
         let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{DONE}",
-            DONE.len()
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
         );
         let _ = socket.write_all(response.as_bytes()).await;
         let _ = socket.flush().await;
@@ -209,6 +219,41 @@ async fn reasoning_models_use_completion_limits_without_unsupported_sampling_fie
         let body = sent(model, Some(Effort::High)).await;
         assert_eq!(body["max_tokens"], defaults.max_output_tokens, "{model}");
         assert!(body.get("max_completion_tokens").is_none(), "{model}");
-        assert_eq!(body["temperature"], defaults.temperature, "{model}");
+        assert!(body.get("temperature").is_none(), "{model}");
+    }
+}
+
+#[tokio::test]
+async fn server_sampling_defaults_survive_unless_temperature_is_explicitly_requested() {
+    for model in ["gemma4-26b-uncensored", "gpt-6-astra"] {
+        for temperature in [None, Some(0.0), Some(0.6)] {
+            for streaming in [false, true] {
+                let (url, seen) = serve().await;
+                let provider =
+                    OpenAiCompatible::new("test/model", model, Config::new(url, None, 8192)).unwrap();
+                let mut request = Request::new(vec![Message::user("hi")]);
+                assert!(request.temperature.is_none());
+                request.temperature = temperature;
+                if streaming {
+                    let mut stream = provider.stream(request).await.unwrap();
+                    while let Some(delta) = stream.next().await {
+                        delta.unwrap();
+                    }
+                } else {
+                    provider.complete(request).await.unwrap();
+                }
+                let body = seen.lock().unwrap().clone().unwrap();
+                assert_eq!(body["stream"], streaming);
+                if model == "gpt-6-astra" || temperature.is_none() {
+                    assert!(body.get("temperature").is_none(), "{model}: {body}");
+                } else {
+                    assert_eq!(
+                        body["temperature"].as_f64().map(|n| n as f32),
+                        temperature,
+                        "{model}: {body}"
+                    );
+                }
+            }
+        }
     }
 }

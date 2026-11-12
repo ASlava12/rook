@@ -443,7 +443,7 @@ impl OpenAiCompatible {
             // temperature. Omitting effort after a refusal does not change that.
             max_tokens: (!reasons(&self.model)).then_some(request.max_output_tokens),
             max_completion_tokens: reasons(&self.model).then_some(request.max_output_tokens),
-            temperature: (!reasons(&self.model)).then_some(request.temperature),
+            temperature: request.temperature.filter(|_| !reasons(&self.model)),
             stream,
             stream_options: stream.then_some(StreamOptions { include_usage: true }),
             reasoning_effort: declared

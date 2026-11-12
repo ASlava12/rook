@@ -105,6 +105,47 @@ fn provider(url: String) -> Responses {
 }
 
 #[tokio::test]
+async fn responses_preserve_server_sampling_defaults_and_explicit_supported_overrides() {
+    for model in ["local-model", "gpt-6-astra"] {
+        for temperature in [None, Some(0.0), Some(0.6)] {
+            for streaming in [false, true] {
+                let response = answer(json!([text_item("hi")]));
+                let response = if streaming {
+                    Reply {
+                        status: 200,
+                        body: frame(json!({"type":"response.completed", "response":response})),
+                        stream: true,
+                        fragment: usize::MAX,
+                    }
+                } else {
+                    reply(response)
+                };
+                let (url, seen) = serve(vec![response]).await;
+                let provider = Responses::new("test/model", model, Config::new(url, None, 8192)).unwrap();
+                let mut request = Request::new(vec![Message::user("hi")]);
+                request.temperature = temperature;
+                if streaming {
+                    let mut stream = provider.stream(request).await.unwrap();
+                    while let Some(delta) = stream.next().await {
+                        delta.unwrap();
+                    }
+                } else {
+                    provider.complete(request).await.unwrap();
+                }
+                let seen = seen.lock().unwrap();
+                let body = &seen[0].body;
+                assert_eq!(body["stream"], streaming);
+                if model == "gpt-6-astra" || temperature.is_none() {
+                    assert!(body.get("temperature").is_none(), "{model}: {body}");
+                } else {
+                    assert_eq!(body["temperature"], json!(temperature), "{model}: {body}");
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn complete_response_replays_ordered_output_and_preserves_tool_schemas() {
     let output = json!([
         reasoning(),

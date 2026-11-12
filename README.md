@@ -834,6 +834,10 @@ sent through a VPN, a request to the next desk comes back as whatever the tunnel
 makes of an address it cannot route to. A key is still refused over plain http to
 anything but this machine, own network or not.
 
+Sampling temperature is left to the server by default, preserving model-specific
+settings on local endpoints. An explicit temperature in a library `Request` is
+sent by adapters that support it; reasoning families that reject it still omit it.
+
 A request refused for something the agent added rather than you is asked again
 without it. Default effort mappings recognize known model families and fresh
 route metadata. A configured source can declare an implemented reasoning control

@@ -289,7 +289,10 @@ pub struct Request {
     #[serde(default)]
     pub tools: Vec<ToolSpec>,
     pub max_output_tokens: u32,
-    pub temperature: f32,
+    /// Leave sampling to the server unless the caller explicitly overrides it.
+    /// A forced zero can defeat model-specific defaults on local endpoints.
+    #[serde(default)]
+    pub temperature: Option<f32>,
     /// Providers that have no notion of effort ignore it.
     #[serde(default)]
     pub effort: Option<Effort>,
@@ -356,7 +359,7 @@ impl Request {
             messages: joined_user_turns(messages),
             tools: Vec::new(),
             max_output_tokens: 4096,
-            temperature: 0.0,
+            temperature: None,
             effort: None,
             cache_ttl: CacheTtl::default(),
             model_capabilities: Default::default(),
@@ -452,6 +455,19 @@ pub struct ModelInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn requests_distinguish_server_sampling_defaults_from_explicit_zero_and_older_numeric_values() {
+        let request = Request::new(vec![Message::user("hi")]);
+        let mut value = serde_json::to_value(request).unwrap();
+        for temperature in [serde_json::Value::Null, serde_json::json!(0.0), serde_json::json!(0.6_f32)] {
+            value["temperature"] = temperature.clone();
+            let restored: Request = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(restored).unwrap()["temperature"], temperature);
+        }
+        value.as_object_mut().unwrap().remove("temperature");
+        assert!(serde_json::from_value::<Request>(value).unwrap().temperature.is_none());
+    }
 
     fn spec(description: &str) -> ToolSpec {
         ToolSpec {

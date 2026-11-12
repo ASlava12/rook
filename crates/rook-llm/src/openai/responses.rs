@@ -278,8 +278,8 @@ fn wire_request(model: &str, scope: &[u8; 32], request: &Request, stream: bool) 
         // Accepted by older Responses implementations too. Current OpenAI
         // returns encrypted content automatically for store=false.
         body["include"] = json!(["reasoning.encrypted_content"]);
-    } else {
-        body["temperature"] = json!(request.temperature);
+    } else if let Some(temperature) = request.temperature {
+        body["temperature"] = json!(temperature);
     }
     if !request.tools.is_empty() {
         body["tools"] = request

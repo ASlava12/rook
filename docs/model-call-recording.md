@@ -69,6 +69,11 @@ This is a Rook review format, not a ready-made trainer or raw HTTP wire format.
 Provider credentials and headers are outside the representation. ACP calls are
 outside this provider capture.
 
+Request `temperature: null` means the caller left sampling to the server, not
+that the server used zero. Numeric values, including zero, are explicit caller
+overrides; an adapter may still omit an unsupported parameter. The capture does
+not report the server's effective sampling settings.
+
 Eligible pairs need a confirmed completed physical attempt, both snapshots,
 supported content and complete visible context. Redacted content, omitted
 images, signed provider state, hidden reasoning, incomplete/max-token replies,

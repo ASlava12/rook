@@ -56,7 +56,7 @@ impl<'a> AgentLoop<'a> {
                 ],
                 tools: Vec::new(),
                 max_output_tokens: self.rook.config.agent.max_output_tokens,
-                temperature: 0.0,
+                temperature: Some(0.0),
                 effort: Some(rook_llm::Effort::Low),
                 cache_ttl: Default::default(),
                 model_capabilities: Default::default(),
